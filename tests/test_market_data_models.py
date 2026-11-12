@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -29,7 +30,6 @@ def make_candle(
         symbol=symbol,
         timeframe=timeframe,
         timestamp=timestamp,
-        received_at=NOW,
         open=2000.0,
         high=2005.0,
         low=1995.0,
@@ -48,9 +48,7 @@ def make_batch(candles=None, **overrides):
         "timeframe": "M5",
         "source": "MT5",
         "received_at": NOW,
-        "candles": candles
-        if candles is not None
-        else [make_candle()],
+        "candles": candles if candles is not None else [make_candle()],
     }
     values.update(overrides)
     return CandleBatch(**values)
@@ -96,7 +94,6 @@ def test_invalid_prices_are_rejected(field, value):
         "symbol": "XAUUSD",
         "timeframe": "M5",
         "timestamp": NOW - timedelta(minutes=5),
-        "received_at": NOW,
         "open": 2000.0,
         "high": 2005.0,
         "low": 1995.0,
@@ -126,7 +123,6 @@ def test_invalid_ohlc_relationships_are_rejected(high, low):
             symbol="XAUUSD",
             timeframe="M5",
             timestamp=NOW - timedelta(minutes=5),
-            received_at=NOW,
             open=2000.0,
             high=high,
             low=low,
@@ -177,7 +173,6 @@ def test_unclosed_candle_cannot_be_verified():
             symbol="XAUUSD",
             timeframe="M5",
             timestamp=NOW - timedelta(minutes=5),
-            received_at=NOW,
             open=2000.0,
             high=2005.0,
             low=1995.0,
