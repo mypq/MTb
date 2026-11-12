@@ -7,6 +7,7 @@ from backend import __version__
 from backend.config import get_settings
 from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
+from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
 
 
@@ -14,18 +15,27 @@ from backend.security import verify_api_token
 async def lifespan(app: FastAPI):
     settings = get_settings()
     adapter = MT5Adapter(settings=settings)
-
-    if settings.MT5_ENABLED:
-        adapter.connect()
+    monitor = MT5ConnectionMonitor(
+        adapter=adapter,
+        interval_seconds=10.0,
+    )
 
     app.state.settings = settings
     app.state.mt5_adapter = adapter
+    app.state.mt5_monitor = monitor
     app.state.market_data_service = MarketDataService(source=adapter)
 
     try:
+        if settings.MT5_ENABLED:
+            adapter.connect()
+            monitor.start()
+
         yield
     finally:
-        adapter.shutdown()
+        try:
+            monitor.stop()
+        finally:
+            adapter.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -49,6 +59,7 @@ def create_app() -> FastAPI:
     )
     async def system_status() -> dict[str, object]:
         adapter: MT5Adapter = application.state.mt5_adapter
+        monitor: MT5ConnectionMonitor = application.state.mt5_monitor
         connection = adapter.connection_status()
 
         return {
@@ -63,6 +74,7 @@ def create_app() -> FastAPI:
             "live_trading_blocked": settings.live_trading_must_be_blocked,
             "mt5_enabled": settings.MT5_ENABLED,
             "mt5_connection": connection.model_dump(mode="json"),
+            "mt5_monitor_running": monitor.is_running,
         }
 
     @application.get(
