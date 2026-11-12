@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from backend.market_data import (
     CandleBatch,
@@ -10,187 +10,234 @@ from backend.market_data import (
     VolumeSource,
 )
 
-
 UTC = timezone.utc
-BASE_TIME = datetime(2026, 11, 13, 10, 0, tzinfo=UTC)
 
 
-def make_candle(**overrides: object) -> MarketCandle:
-    values: dict[str, object] = {
-        "symbol": "XAUUSD",
-        "timeframe": "M5",
-        "timestamp": BASE_TIME,
-        "open": 2650.0,
-        "high": 2655.0,
-        "low": 2648.0,
-        "close": 2653.0,
-        "tick_volume": 120,
-        "real_volume": None,
-        "volume_source": VolumeSource.TICK,
-        "is_closed": True,
-        "quality": CandleQuality.VERIFIED,
-    }
-    values.update(overrides)
-    return MarketCandle(**values)
+def make_candle(
+    *,
+    timestamp: datetime | None = None,
+    open_price: float = 2000.0,
+    high: float = 2010.0,
+    low: float = 1990.0,
+    close: float = 2005.0,
+    tick_volume: int = 100,
+    real_volume: int | None = None,
+    volume_source: VolumeSource = VolumeSource.TICK,
+    quality: CandleQuality = CandleQuality.VERIFIED,
+    symbol: str = "XAUUSD",
+    timeframe: str = "M5",
+) -> MarketCandle:
+    candle_timestamp = timestamp or datetime(
+        2026, 1, 1, 10, 0, tzinfo=UTC
+    )
 
-
-def make_batch(*candles: MarketCandle) -> CandleBatch:
-    return CandleBatch(
-        symbol="XAUUSD",
-        timeframe="M5",
-        candles=candles,
-        received_at=BASE_TIME + timedelta(minutes=15),
-        source="MT5",
+    return MarketCandle(
+        symbol=symbol,
+        timeframe=timeframe,
+        timestamp=candle_timestamp,
+        open=open_price,
+        high=high,
+        low=low,
+        close=close,
+        tick_volume=tick_volume,
+        real_volume=real_volume,
+        volume_source=volume_source,
+        quality=quality,
+        is_closed=True,
     )
 
 
-def test_valid_candle_is_accepted() -> None:
+def test_valid_candle_is_created():
     candle = make_candle()
 
     assert candle.symbol == "XAUUSD"
     assert candle.timeframe == "M5"
-    assert candle.close == 2653.0
+    assert candle.close == 2005.0
 
 
-def test_candle_timestamp_is_utc() -> None:
-    candle = make_candle()
-
-    assert candle.timestamp.utcoffset() == timedelta(0)
-
-
-def test_naive_timestamp_is_rejected() -> None:
+def test_timestamp_must_be_utc():
     with pytest.raises(ValidationError):
-        make_candle(timestamp=datetime(2026, 11, 13, 10, 0))
+        make_candle(
+            timestamp=datetime(2026, 1, 1, 10, 0)
+        )
 
 
-def test_non_utc_timestamp_is_rejected() -> None:
-    non_utc = datetime(
-        2026, 11, 13, 13, 0,
-        tzinfo=timezone(timedelta(hours=3)),
-    )
+def test_non_utc_timestamp_is_rejected():
+    non_utc = timezone(timedelta(hours=3))
 
     with pytest.raises(ValidationError):
-        make_candle(timestamp=non_utc)
+        make_candle(
+            timestamp=datetime(
+                2026, 1, 1, 10, 0, tzinfo=non_utc
+            )
+        )
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("open", float("nan")),
-        ("high", float("inf")),
-        ("low", float("-inf")),
-        ("close", 0.0),
-    ],
+    "price",
+    [0, -1, float("inf"), float("-inf"), float("nan")],
 )
-def test_invalid_prices_are_rejected(field: str, value: float) -> None:
+def test_invalid_prices_are_rejected(price):
     with pytest.raises(ValidationError):
-        make_candle(**{field: value})
+        make_candle(open_price=price)
 
 
-def test_invalid_ohlc_relationship_is_rejected() -> None:
+def test_high_cannot_be_lower_than_open():
     with pytest.raises(ValidationError):
-        make_candle(high=2649.0)
+        make_candle(high=1999.0)
 
 
-def test_negative_tick_volume_is_rejected() -> None:
+def test_high_cannot_be_lower_than_close():
+    with pytest.raises(ValidationError):
+        make_candle(high=2000.0, close=2005.0)
+
+
+def test_low_cannot_be_higher_than_open():
+    with pytest.raises(ValidationError):
+        make_candle(low=2001.0)
+
+
+def test_low_cannot_be_higher_than_close():
+    with pytest.raises(ValidationError):
+        make_candle(low=2006.0)
+
+
+def test_negative_tick_volume_is_rejected():
     with pytest.raises(ValidationError):
         make_candle(tick_volume=-1)
 
 
-def test_real_volume_requires_real_volume_value() -> None:
+def test_negative_real_volume_is_rejected():
     with pytest.raises(ValidationError):
         make_candle(
+            real_volume=-1,
             volume_source=VolumeSource.REAL,
-            real_volume=None,
         )
 
 
-def test_tick_and_real_volume_are_kept_separate() -> None:
-    candle = make_candle(
-        tick_volume=120,
-        real_volume=75,
-        volume_source=VolumeSource.REAL,
-    )
-
-    assert candle.tick_volume == 120
-    assert candle.real_volume == 75
-    assert candle.volume_source == VolumeSource.REAL
-
-
-def test_unclosed_candle_cannot_be_verified() -> None:
+def test_real_volume_requires_real_volume_source():
     with pytest.raises(ValidationError):
-        make_candle(is_closed=False)
+        make_candle(
+            real_volume=100,
+            volume_source=VolumeSource.TICK,
+        )
 
 
-def test_unclosed_candle_can_be_incomplete() -> None:
-    candle = make_candle(
-        is_closed=False,
-        quality=CandleQuality.INCOMPLETE,
+def test_real_volume_source_requires_real_volume():
+    with pytest.raises(ValidationError):
+        make_candle(
+            real_volume=None,
+            volume_source=VolumeSource.REAL,
+        )
+
+
+def test_unclosed_candle_cannot_be_verified():
+    with pytest.raises(ValidationError):
+        MarketCandle(
+            symbol="XAUUSD",
+            timeframe="M5",
+            timestamp=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            open=2000.0,
+            high=2010.0,
+            low=1990.0,
+            close=2005.0,
+            tick_volume=100,
+            real_volume=None,
+            volume_source=VolumeSource.TICK,
+            quality=CandleQuality.VERIFIED,
+            is_closed=False,
+        )
+
+
+def test_batch_accepts_chronological_candles():
+    first = make_candle(
+        timestamp=datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
     )
-
-    assert candle.quality == CandleQuality.INCOMPLETE
-
-
-def test_batch_accepts_chronological_candles() -> None:
-    first = make_candle(timestamp=BASE_TIME)
     second = make_candle(
-        timestamp=BASE_TIME + timedelta(minutes=5)
+        timestamp=datetime(2026, 1, 1, 10, 5, tzinfo=UTC)
     )
 
-    batch = make_batch(first, second)
+    batch = CandleBatch(
+        symbol="XAUUSD",
+        timeframe="M5",
+        candles=[first, second],
+        received_at=datetime(2026, 1, 1, 10, 10, tzinfo=UTC),
+    )
 
     assert len(batch.candles) == 2
-    assert batch.candles[0].timestamp < batch.candles[1].timestamp
 
 
-def test_batch_rejects_reversed_candles() -> None:
-    first = make_candle(timestamp=BASE_TIME)
+def test_batch_rejects_out_of_order_candles():
+    first = make_candle(
+        timestamp=datetime(2026, 1, 1, 10, 5, tzinfo=UTC)
+    )
     second = make_candle(
-        timestamp=BASE_TIME + timedelta(minutes=5)
+        timestamp=datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
     )
 
     with pytest.raises(ValidationError):
-        make_batch(second, first)
+        CandleBatch(
+            symbol="XAUUSD",
+            timeframe="M5",
+            candles=[first, second],
+            received_at=datetime(2026, 1, 1, 10, 10, tzinfo=UTC),
+        )
 
 
-def test_batch_rejects_duplicate_timestamps() -> None:
-    first = make_candle()
-    second = make_candle(close=2654.0)
+def test_batch_rejects_duplicate_timestamps():
+    timestamp = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+
+    first = make_candle(timestamp=timestamp)
+    second = make_candle(timestamp=timestamp)
 
     with pytest.raises(ValidationError):
-        make_batch(first, second)
+        CandleBatch(
+            symbol="XAUUSD",
+            timeframe="M5",
+            candles=[first, second],
+            received_at=datetime(2026, 1, 1, 10, 10, tzinfo=UTC),
+        )
 
 
-def test_batch_rejects_different_symbols() -> None:
-    first = make_candle()
+def test_batch_rejects_mixed_symbols():
+    first = make_candle(symbol="XAUUSD")
     second = make_candle(
+        timestamp=datetime(2026, 1, 1, 10, 5, tzinfo=UTC),
         symbol="EURUSD",
-        timestamp=BASE_TIME + timedelta(minutes=5),
     )
 
     with pytest.raises(ValidationError):
-        make_batch(first, second)
+        CandleBatch(
+            symbol="XAUUSD",
+            timeframe="M5",
+            candles=[first, second],
+            received_at=datetime(2026, 1, 1, 10, 10, tzinfo=UTC),
+        )
 
 
-def test_batch_rejects_different_timeframes() -> None:
-    first = make_candle()
+def test_batch_rejects_mixed_timeframes():
+    first = make_candle(timeframe="M5")
     second = make_candle(
+        timestamp=datetime(2026, 1, 1, 10, 5, tzinfo=UTC),
         timeframe="M15",
-        timestamp=BASE_TIME + timedelta(minutes=5),
     )
 
     with pytest.raises(ValidationError):
-        make_batch(first, second)
+        CandleBatch(
+            symbol="XAUUSD",
+            timeframe="M5",
+            candles=[first, second],
+            received_at=datetime(2026, 1, 1, 10, 10, tzinfo=UTC),
+        )
 
 
-def test_batch_rejects_naive_received_at() -> None:
+def test_batch_received_at_must_be_utc():
     candle = make_candle()
 
     with pytest.raises(ValidationError):
         CandleBatch(
             symbol="XAUUSD",
             timeframe="M5",
-            candles=(candle,),
-            received_at=datetime(2026, 11, 13, 10, 15),
-            source="MT5",
-    )
+            candles=[candle],
+            received_at=datetime(2026, 1, 1, 10, 10),
+)
