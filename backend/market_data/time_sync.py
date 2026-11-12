@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from enum import Enum
 from statistics import median
 
@@ -51,7 +51,7 @@ class TimeSynchronizationService:
     def __init__(
         self,
         *,
-        max_samples: int =  nine,
+        max_samples: int = 9,
         max_round_trip_ms: float = 2000.0,
         max_offset_ms: float = 5000.0,
     ) -> None:
