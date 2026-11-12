@@ -1,4 +1,5 @@
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -9,6 +10,9 @@ from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
+
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,10 +36,28 @@ async def lifespan(app: FastAPI):
 
         yield
     finally:
+        monitor_stopped = False
+
         try:
-            monitor.stop()
-        finally:
-            adapter.shutdown()
+            monitor_stopped = monitor.stop()
+        except Exception:
+            logger.exception(
+                "Failed to stop MT5 connection monitor."
+            )
+
+        if monitor_stopped is True:
+            try:
+                adapter.shutdown()
+            except Exception:
+                logger.exception(
+                    "Failed to shut down MT5 adapter."
+                )
+                raise
+        else:
+            logger.critical(
+                "MT5 adapter shutdown skipped because the monitor "
+                "worker may still be running. Manual recovery is required."
+            )
 
 
 def create_app() -> FastAPI:
