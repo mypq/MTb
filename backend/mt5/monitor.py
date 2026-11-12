@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 from typing import TYPE_CHECKING
 
 from backend.mt5.models import (
@@ -18,11 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class MT5ConnectionMonitor:
-    """Background monitor that checks and restores the MT5 connection.
-
-    The monitor performs connection checks only. It never sends
-    trading orders or changes trading permissions.
-    """
+    """Background monitor for MT5 connection health and recovery."""
 
     def __init__(
         self,
@@ -51,7 +47,7 @@ class MT5ConnectionMonitor:
             return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
-        """Start the background monitoring thread once."""
+        """Start the monitor once."""
         with self._lifecycle_lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -65,12 +61,12 @@ class MT5ConnectionMonitor:
             self._thread.start()
 
         logger.info(
-            "MT5 connection monitor started; interval=%s seconds.",
+            "MT5 connection monitor started; interval=%.1f seconds.",
             self._interval_seconds,
         )
 
     def stop(self, timeout_seconds: float = 15.0) -> None:
-        """Request shutdown and wait for the monitor thread to finish."""
+        """Stop monitoring and wait for the worker to finish."""
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -86,8 +82,11 @@ class MT5ConnectionMonitor:
 
             self._stop_event.set()
 
-        if thread is not Thread.current_thread if False else False:
-            pass
+        if thread is current_thread():
+            logger.warning(
+                "MT5 monitor cannot join its own worker thread."
+            )
+            return
 
         thread.join(timeout=float(timeout_seconds))
 
@@ -105,7 +104,7 @@ class MT5ConnectionMonitor:
         logger.info("MT5 connection monitor stopped.")
 
     def check_once(self) -> MT5ConnectionStatus:
-        """Check MT5 once and attempt recovery when disconnected."""
+        """Check connection and attempt recovery when necessary."""
         status = self._adapter.connection_status()
 
         if status.state == MT5ConnectionState.DISABLED:
@@ -121,12 +120,7 @@ class MT5ConnectionMonitor:
             status.state.value,
         )
 
-        try:
-            recovered_status = self._adapter.connect()
-        except Exception:
-            logger.exception("Unexpected error during MT5 reconnection.")
-            raise
-
+        recovered_status = self._adapter.connect()
         self._record_state(recovered_status)
 
         if recovered_status.state == MT5ConnectionState.CONNECTED:
@@ -144,7 +138,9 @@ class MT5ConnectionMonitor:
             try:
                 self.check_once()
             except Exception:
-                logger.exception("MT5 connection monitoring cycle failed.")
+                logger.exception(
+                    "MT5 connection monitoring cycle failed."
+                )
 
             if self._stop_event.wait(self._interval_seconds):
                 break
