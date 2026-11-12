@@ -3,7 +3,6 @@
 from types import MappingProxyType
 from typing import Any
 
-
 _TIMEFRAME_CONSTANTS = MappingProxyType(
     {
         "M1": "TIMEFRAME_M1",
@@ -37,9 +36,7 @@ def normalize_timeframe(timeframe: str) -> str:
     normalized = timeframe.strip().upper()
 
     if normalized not in _TIMEFRAME_CONSTANTS:
-        raise ValueError(
-            f"Unsupported timeframe: {timeframe!r}."
-        )
+        raise ValueError(f"Unsupported timeframe: {timeframe!r}.")
 
     return normalized
 
