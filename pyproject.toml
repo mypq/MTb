@@ -1,0 +1,38 @@
+[tool.pytest.ini_options]
+minversion = "8.3"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config"
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+indent-width = 4
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist"
+]
+
+[tool.ruff.lint]
+select = [
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "I"
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
