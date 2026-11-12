@@ -1,5 +1,22 @@
 """MetaTrader 5 integration package.
 
-This package provides the isolated boundary between GOLD BOT
-and the MetaTrader 5 terminal.
+This package currently provides read-only terminal connectivity
+and normalized account and symbol information.
 """
+
+from backend.mt5.adapter import MT5Adapter, MT5AdapterError
+from backend.mt5.models import (
+    MT5AccountInfo,
+    MT5ConnectionState,
+    MT5ConnectionStatus,
+    MT5SymbolInfo,
+)
+
+__all__ = [
+    "MT5Adapter",
+    "MT5AdapterError",
+    "MT5AccountInfo",
+    "MT5ConnectionState",
+    "MT5ConnectionStatus",
+    "MT5SymbolInfo",
+]
