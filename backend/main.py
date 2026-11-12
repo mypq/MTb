@@ -10,7 +10,6 @@ from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
 
-
 logger = logging.getLogger(__name__)
 
 
