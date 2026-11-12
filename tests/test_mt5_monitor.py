@@ -17,13 +17,24 @@ def make_status(state, message="Test status"):
     )
 
 
-@pytest.mark.parametrize("interval", [0, -1, True, "10"])
+@pytest.mark.parametrize("interval", [0, -1, True, "10", float("nan"), float("inf")])
 def test_invalid_monitor_interval_is_rejected(interval):
     with pytest.raises(ValueError):
         MT5ConnectionMonitor(
             adapter=Mock(),
             interval_seconds=interval,
         )
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [-1, True, "1", float("nan"), float("inf")],
+)
+def test_invalid_stop_timeout_is_rejected(timeout):
+    monitor = MT5ConnectionMonitor(adapter=Mock())
+
+    with pytest.raises(ValueError):
+        monitor.stop(timeout_seconds=timeout)
 
 
 def test_connected_status_does_not_trigger_reconnection():
@@ -96,14 +107,11 @@ def test_failed_reconnection_returns_failure_status():
     adapter.connect.assert_called_once()
 
 
-def test_stop_before_start_is_safe():
-    adapter = Mock()
-    monitor = MT5ConnectionMonitor(adapter)
+def test_stop_before_start_returns_true():
+    monitor = MT5ConnectionMonitor(adapter=Mock())
 
-    monitor.stop()
-
+    assert monitor.stop() is True
     assert monitor.is_running is False
-    adapter.connection_status.assert_not_called()
 
 
 def test_start_is_idempotent_and_stop_joins_worker():
@@ -133,8 +141,36 @@ def test_start_is_idempotent_and_stop_joins_worker():
     assert monitor.is_running is True
     adapter.connection_status.assert_called_once()
 
-    monitor.stop(timeout_seconds=2.0)
+    assert monitor.stop(timeout_seconds=2.0) is True
+    assert monitor.is_running is False
 
+
+def test_stop_returns_false_when_worker_exceeds_timeout():
+    adapter = Mock()
+    worker_entered = Event()
+    release_worker = Event()
+
+    def blocking_connection_status():
+        worker_entered.set()
+        release_worker.wait(timeout=5.0)
+        return make_status(MT5ConnectionState.CONNECTED)
+
+    adapter.connection_status.side_effect = blocking_connection_status
+
+    monitor = MT5ConnectionMonitor(
+        adapter,
+        interval_seconds=60.0,
+    )
+
+    monitor.start()
+
+    assert worker_entered.wait(timeout=2.0)
+    assert monitor.stop(timeout_seconds=0.01) is False
+    assert monitor.is_running is True
+
+    release_worker.set()
+
+    assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.is_running is False
 
 
@@ -150,7 +186,7 @@ def test_stop_is_idempotent():
     )
 
     monitor.start()
-    monitor.stop(timeout_seconds=2.0)
-    monitor.stop(timeout_seconds=2.0)
 
+    assert monitor.stop(timeout_seconds=2.0) is True
+    assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.is_running is False
