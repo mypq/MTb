@@ -1,3 +1,5 @@
+
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,6 +11,7 @@ from backend.mt5 import (
     MT5AdapterError,
     MT5ConnectionState,
 )
+from backend.market_data import VolumeSource
 
 
 def make_settings(**overrides):
@@ -67,8 +70,49 @@ def make_mt5_module(
     mt5.account_info.return_value = account
     mt5.symbol_info.return_value = symbol
     mt5.last_error.return_value = (1, "Test error")
+    mt5.TIMEFRAME_M5 = 5
 
     return mt5
+
+
+def make_rate(
+    timestamp=None,
+    open_price=2000.0,
+    high=2005.0,
+    low=1995.0,
+    close=2002.0,
+    tick_volume=120,
+    real_volume=0,
+):
+    if timestamp is None:
+        timestamp = int(
+            (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        )
+
+    return {
+        "time": timestamp,
+        "open": open_price,
+        "high": high,
+        "low": low,
+        "close": close,
+        "tick_volume": tick_volume,
+        "spread": 25,
+        "real_volume": real_volume,
+    }
+
+
+def make_connected_adapter(mt5=None):
+    module = mt5 or make_mt5_module()
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=module,
+    )
+
+    status = adapter.connect()
+    assert status.state == MT5ConnectionState.CONNECTED
+
+    return adapter, module
 
 
 def test_disabled_mt5_does_not_initialize():
@@ -222,3 +266,216 @@ def test_repeated_connect_does_not_initialize_twice():
     adapter.connect()
 
     mt5.initialize.assert_called_once()
+
+
+def test_closed_candles_exclude_current_forming_candle():
+    adapter, mt5 = make_connected_adapter()
+
+    first_time = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=20)).timestamp()
+    )
+    second_time = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=15)).timestamp()
+    )
+
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=first_time),
+        make_rate(timestamp=second_time),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+    mt5.copy_rates_from_pos.assert_called_once_with(
+        "XAUUSD",
+        5,
+        1,
+        2,
+    )
+
+    assert len(batch.candles) == 2
+    assert all(candle.is_closed for candle in batch.candles)
+
+
+def test_candle_timestamps_are_converted_to_utc():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+    candle = batch.candles[0]
+
+    assert candle.timestamp.tzinfo is not None
+    assert candle.timestamp.utcoffset() == timedelta(0)
+    assert candle.timestamp == datetime.fromtimestamp(
+        timestamp,
+        tz=timezone.utc,
+    )
+
+
+def test_real_volume_and_tick_volume_remain_separate():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(
+            timestamp=timestamp,
+            tick_volume=150,
+            real_volume=75,
+        ),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+    candle = batch.candles[0]
+
+    assert candle.tick_volume == 150
+    assert candle.real_volume == 75
+    assert candle.volume_source == VolumeSource.REAL
+
+
+def test_zero_real_volume_is_not_misrepresented_as_real_volume():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(
+            timestamp=timestamp,
+            tick_volume=150,
+            real_volume=0,
+        ),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+    candle = batch.candles[0]
+
+    assert candle.tick_volume == 150
+    assert candle.real_volume is None
+    assert candle.volume_source == VolumeSource.TICK
+
+
+def test_candles_are_sorted_oldest_to_newest():
+    adapter, mt5 = make_connected_adapter()
+
+    now = datetime.now(timezone.utc)
+    older = int((now - timedelta(minutes=20)).timestamp())
+    newer = int((now - timedelta(minutes=10)).timestamp())
+
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=newer),
+        make_rate(timestamp=older),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+    assert batch.candles[0].timestamp < batch.candles[1].timestamp
+
+
+def test_duplicate_candle_timestamps_are_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+        make_rate(timestamp=timestamp),
+    ]
+
+    with pytest.raises(MT5AdapterError):
+        adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+
+def test_future_candle_timestamp_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    future_timestamp = int(
+        (datetime.now(timezone.utc) + timedelta(hours=1)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=future_timestamp),
+    ]
+
+    with pytest.raises(MT5AdapterError, match="future timestamp"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+def test_empty_candle_history_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_rates_from_pos.return_value = []
+
+    with pytest.raises(MT5AdapterError, match="empty candle history"):
+        adapter.get_closed_candles("XAUUSD", "M5", 10)
+
+
+def test_none_candle_history_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_rates_from_pos.return_value = None
+
+    with pytest.raises(MT5AdapterError, match="no candle data"):
+        adapter.get_closed_candles("XAUUSD", "M5", 10)
+
+
+def test_invalid_ohlc_data_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(
+            timestamp=timestamp,
+            open_price=2010.0,
+            high=2005.0,
+            low=1995.0,
+            close=2002.0,
+        ),
+    ]
+
+    with pytest.raises(MT5AdapterError):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+def test_negative_volume_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(
+            timestamp=timestamp,
+            tick_volume=-1,
+        ),
+    ]
+
+    with pytest.raises(MT5AdapterError, match="negative volume"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+@pytest.mark.parametrize("count", [0, -1, 10001, True, 1.5])
+def test_invalid_candle_count_is_rejected(count):
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=make_mt5_module(),
+    )
+
+    with pytest.raises((ValueError, TypeError)):
+        adapter.get_closed_candles("XAUUSD", "M5", count)
+
+
+def test_unsupported_timeframe_is_rejected():
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=make_mt5_module(),
+    )
+
+    with pytest.raises(ValueError):
+        adapter.get_closed_candles("XAUUSD", "M2", 10)
