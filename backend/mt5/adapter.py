@@ -55,7 +55,30 @@ class MT5Adapter:
                 )
 
             if self._initialized_by_client:
-                return self.connection_status()
+                current_status = self.connection_status()
+
+                if current_status.state == MT5ConnectionState.CONNECTED:
+                    return current_status
+
+                mt5 = self._mt5
+
+                if mt5 is None:
+                    self._initialized_by_client = False
+                    return self._status(
+                        MT5ConnectionState.ERROR,
+                        "MT5 module is unavailable during reconnection.",
+                    )
+
+                try:
+                    mt5.shutdown()
+                except Exception as exc:
+                    return self._status(
+                        MT5ConnectionState.ERROR,
+                        "MT5 cleanup before reconnection raised "
+                        f"{type(exc).__name__}.",
+                    )
+                finally:
+                    self._initialized_by_client = False
 
             mt5 = self._mt5
 
@@ -316,8 +339,6 @@ class MT5Adapter:
                             "MT5 returned a negative volume value."
                         )
 
-                    # A zero real_volume is not treated as proof
-                    # that genuine traded volume is available.
                     if raw_real_volume > 0:
                         real_volume: int | None = raw_real_volume
                         volume_source = VolumeSource.REAL
@@ -374,11 +395,11 @@ class MT5Adapter:
             finally:
                 self._initialized_by_client = False
 
-                if self._mt5 is not None:
-                    self._mt5 = None
-
     def _require_connection(self) -> Any:
         status = self.connection_status()
+
+        if status.state != MT5ConnectionState.CONNECTED:
+            status = self.connect()
 
         if status.state != MT5ConnectionState.CONNECTED:
             raise MT5AdapterError(
