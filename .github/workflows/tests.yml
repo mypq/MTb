@@ -1,3 +1,4 @@
+
 name: GOLD BOT - Automated Tests
 
 on:
@@ -45,7 +46,10 @@ jobs:
       - name: Run Ruff lint checks
         run: python -m ruff check .
 
-      - name: Check code formatting
+      - name: Apply Ruff formatting
+        run: python -m ruff format .
+
+      - name: Verify Ruff formatting
         run: python -m ruff format --check .
 
       - name: Run test suite
