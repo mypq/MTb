@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from math import isfinite
 from threading import Event, Lock, Thread, current_thread
 from typing import TYPE_CHECKING
 
@@ -29,9 +30,10 @@ class MT5ConnectionMonitor:
         if (
             isinstance(interval_seconds, bool)
             or not isinstance(interval_seconds, (int, float))
+            or not isfinite(interval_seconds)
             or interval_seconds <= 0
         ):
-            raise ValueError("interval_seconds must be a positive number.")
+            raise ValueError("interval_seconds must be a positive finite number.")
 
         self._adapter = adapter
         self._interval_seconds = float(interval_seconds)
@@ -65,28 +67,31 @@ class MT5ConnectionMonitor:
             self._interval_seconds,
         )
 
-    def stop(self, timeout_seconds: float = 15.0) -> None:
-        """Stop monitoring and wait for the worker to finish."""
+    def stop(self, timeout_seconds: float = 15.0) -> bool:
+        """Stop monitoring and report whether the worker has fully stopped."""
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
+            or not isfinite(timeout_seconds)
             or timeout_seconds < 0
         ):
-            raise ValueError("timeout_seconds cannot be negative.")
+            raise ValueError(
+                "timeout_seconds must be a non-negative finite number."
+            )
 
         with self._lifecycle_lock:
             thread = self._thread
 
             if thread is None:
-                return
+                return True
 
             self._stop_event.set()
 
         if thread is current_thread():
-            logger.warning(
+            logger.error(
                 "MT5 monitor cannot join its own worker thread."
             )
-            return
+            return False
 
         thread.join(timeout=float(timeout_seconds))
 
@@ -95,13 +100,14 @@ class MT5ConnectionMonitor:
                 "MT5 monitor did not stop within %.1f seconds.",
                 timeout_seconds,
             )
-            return
+            return False
 
         with self._lifecycle_lock:
             if self._thread is thread:
                 self._thread = None
 
         logger.info("MT5 connection monitor stopped.")
+        return True
 
     def check_once(self) -> MT5ConnectionStatus:
         """Check connection and attempt recovery when necessary."""
