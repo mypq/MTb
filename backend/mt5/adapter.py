@@ -16,12 +16,7 @@ class MT5AdapterError(RuntimeError):
 
 
 class MT5Adapter:
-    """Read-only MetaTrader 5 terminal adapter.
-
-    This adapter deliberately does not expose order_send or any trade
-    execution method. Trading must later pass through the central
-    execution gateway and risk manager.
-    """
+    """Read-only MetaTrader 5 terminal adapter."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -35,15 +30,16 @@ class MT5Adapter:
                 message="MetaTrader 5 integration is disabled by configuration.",
             )
 
+        if self._initialized:
+            return self.connection_status()
+
         try:
             import MetaTrader5 as mt5
-        except ImportError as exc:
+        except ImportError:
             return MT5ConnectionStatus(
                 state=MT5ConnectionState.ERROR,
                 message="MetaTrader5 package is not installed.",
             )
-
-        self._mt5 = mt5
 
         initialize_args: dict[str, object] = {
             "timeout": self._settings.MT5_TIMEOUT_MS,
@@ -71,13 +67,19 @@ class MT5Adapter:
             )
 
         if not initialized:
-            error = mt5.last_error()
+            try:
+                error = mt5.last_error()
+            except Exception:
+                error = "MT5 error details unavailable."
+
             return MT5ConnectionStatus(
                 state=MT5ConnectionState.DISCONNECTED,
                 message=f"MT5 initialization failed: {error}",
             )
 
+        self._mt5 = mt5
         self._initialized = True
+
         return self.connection_status()
 
     def connection_status(self) -> MT5ConnectionStatus:
@@ -103,14 +105,23 @@ class MT5Adapter:
                     message=f"MT5 status unavailable: {self._mt5.last_error()}",
                 )
 
+            if not bool(terminal.connected):
+                return MT5ConnectionStatus(
+                    state=MT5ConnectionState.DISCONNECTED,
+                    terminal_connected=False,
+                    trading_allowed=False,
+                    message="MT5 terminal is not connected to the trade server.",
+                )
+
             return MT5ConnectionStatus(
                 state=MT5ConnectionState.CONNECTED,
-                terminal_connected=bool(terminal.connected),
+                terminal_connected=True,
                 trading_allowed=bool(
                     terminal.trade_allowed and account.trade_allowed
                 ),
                 message="MetaTrader 5 connection status retrieved.",
             )
+
         except Exception as exc:
             return MT5ConnectionStatus(
                 state=MT5ConnectionState.ERROR,
@@ -141,12 +152,13 @@ class MT5Adapter:
 
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
         normalized_symbol = symbol.strip()
+
         if not normalized_symbol:
             raise ValueError("Symbol name cannot be empty.")
 
         mt5 = self._require_connection()
-
         info = mt5.symbol_info(normalized_symbol)
+
         if info is None:
             raise MT5AdapterError(
                 f"Symbol {normalized_symbol!r} is unavailable: {mt5.last_error()}"
@@ -169,8 +181,10 @@ class MT5Adapter:
 
     def shutdown(self) -> None:
         if self._initialized and self._mt5 is not None:
+            mt5 = self._mt5
+
             try:
-                self._mt5.shutdown()
+                mt5.shutdown()
             finally:
                 self._initialized = False
                 self._mt5 = None
@@ -187,8 +201,10 @@ class MT5Adapter:
 
     def __enter__(self) -> MT5Adapter:
         status = self.connect()
+
         if status.state != MT5ConnectionState.CONNECTED:
             raise MT5AdapterError(status.message)
+
         return self
 
     def __exit__(
