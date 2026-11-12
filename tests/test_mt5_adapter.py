@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,12 +5,12 @@ from unittest.mock import Mock
 import pytest
 
 from backend.config import Settings
+from backend.market_data import VolumeSource
 from backend.mt5 import (
     MT5Adapter,
     MT5AdapterError,
     MT5ConnectionState,
 )
-from backend.market_data import VolumeSource
 
 
 def make_settings(**overrides):
