@@ -1,18 +1,31 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 from backend import __version__
 from backend.config import get_settings
+from backend.market_data.service import MarketDataService
+from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.security import verify_api_token
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    adapter = MT5Adapter(settings=settings)
+
+    if settings.MT5_ENABLED:
+        adapter.connect()
+
     app.state.settings = settings
-    yield
+    app.state.mt5_adapter = adapter
+    app.state.market_data_service = MarketDataService(source=adapter)
+
+    try:
+        yield
+    finally:
+        adapter.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -35,6 +48,9 @@ def create_app() -> FastAPI:
         dependencies=[Depends(verify_api_token)],
     )
     async def system_status() -> dict[str, object]:
+        adapter: MT5Adapter = application.state.mt5_adapter
+        connection = adapter.connection_status()
+
         return {
             "application": settings.APP_NAME,
             "version": __version__,
@@ -46,7 +62,47 @@ def create_app() -> FastAPI:
             "trading_blocked": settings.trading_must_be_blocked,
             "live_trading_blocked": settings.live_trading_must_be_blocked,
             "mt5_enabled": settings.MT5_ENABLED,
+            "mt5_connection": connection.model_dump(mode="json"),
         }
+
+    @application.get(
+        "/api/v1/market-data/candles",
+        tags=["Market Data"],
+        dependencies=[Depends(verify_api_token)],
+    )
+    def market_data_candles(
+        symbol: str | None = None,
+        timeframe: str = settings.DEFAULT_TIMEFRAME,
+        count: int = Query(default=300, ge=1, le=10000),
+    ) -> dict[str, object]:
+        selected_symbol = (symbol or settings.MT5_SYMBOL).strip()
+
+        if not selected_symbol:
+            raise HTTPException(
+                status_code=400,
+                detail="A market symbol must be configured or supplied.",
+            )
+
+        service: MarketDataService = application.state.market_data_service
+
+        try:
+            snapshot = service.get_snapshot(
+                symbol=selected_symbol,
+                timeframe=timeframe,
+                count=count,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+        except MT5AdapterError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Market data is currently unavailable.",
+            ) from exc
+
+        return snapshot.model_dump(mode="json")
 
     return application
 
