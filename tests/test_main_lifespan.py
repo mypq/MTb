@@ -23,10 +23,18 @@ class FakeAdapter:
 
 
 class FakeMonitor:
-    def __init__(self, adapter, interval_seconds):
+    def __init__(
+        self,
+        adapter,
+        interval_seconds,
+        stop_result=True,
+        stop_error=None,
+    ):
         self.adapter = adapter
         self.interval_seconds = interval_seconds
         self.events = adapter.events
+        self.stop_result = stop_result
+        self.stop_error = stop_error
 
     @property
     def is_running(self):
@@ -37,6 +45,9 @@ class FakeMonitor:
 
     def stop(self):
         self.events.append("monitor.stop")
+        if self.stop_error is not None:
+            raise self.stop_error
+        return self.stop_result
 
 
 class FakeMarketDataService:
@@ -44,7 +55,14 @@ class FakeMarketDataService:
         self.source = source
 
 
-def configure_lifecycle(monkeypatch, *, mt5_enabled, connect_error=None):
+def configure_lifecycle(
+    monkeypatch,
+    *,
+    mt5_enabled,
+    connect_error=None,
+    monitor_stop_result=True,
+    monitor_stop_error=None,
+):
     events = []
     settings = SimpleNamespace(MT5_ENABLED=mt5_enabled)
 
@@ -55,9 +73,17 @@ def configure_lifecycle(monkeypatch, *, mt5_enabled, connect_error=None):
             connect_error=connect_error,
         )
 
+    def create_monitor(adapter, interval_seconds):
+        return FakeMonitor(
+            adapter=adapter,
+            interval_seconds=interval_seconds,
+            stop_result=monitor_stop_result,
+            stop_error=monitor_stop_error,
+        )
+
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "MT5Adapter", create_adapter)
-    monkeypatch.setattr(main, "MT5ConnectionMonitor", FakeMonitor)
+    monkeypatch.setattr(main, "MT5ConnectionMonitor", create_monitor)
     monkeypatch.setattr(
         main,
         "MarketDataService",
@@ -139,4 +165,48 @@ def test_lifespan_cleans_up_when_initial_connection_raises(
         "adapter.connect",
         "monitor.stop",
         "adapter.shutdown",
+    ]
+
+
+def test_lifespan_skips_adapter_shutdown_when_monitor_does_not_stop(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        monitor_stop_result=False,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            pass
+
+    asyncio.run(run())
+
+    assert events == [
+        "adapter.connect",
+        "monitor.start",
+        "monitor.stop",
+    ]
+
+
+def test_lifespan_skips_adapter_shutdown_when_monitor_stop_raises(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        monitor_stop_error=RuntimeError("Simulated stop failure"),
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            pass
+
+    asyncio.run(run())
+
+    assert events == [
+        "adapter.connect",
+        "monitor.start",
+        "monitor.stop",
     ]
