@@ -1,7 +1,8 @@
+
 from datetime import datetime, timedelta, timezone
 
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
 from backend.market_data import (
     CandleBatch,
@@ -240,4 +241,4 @@ def test_batch_received_at_must_be_utc():
             timeframe="M5",
             candles=[candle],
             received_at=datetime(2026, 1, 1, 10, 10),
-)
+        )
