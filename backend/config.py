@@ -1,8 +1,9 @@
+
 from functools import lru_cache
 from typing import Literal
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BotMode = Literal[
@@ -109,7 +110,9 @@ class Settings(BaseSettings):
     @classmethod
     def validate_risk_percentages(cls, value: float) -> float:
         if not 0 < value <= 100:
-            raise ValueError("Risk percentages must be greater than 0 and at most 100.")
+            raise ValueError(
+                "Risk percentages must be greater than 0 and at most 100."
+            )
         return value
 
     @field_validator("MAX_OPEN_POSITIONS")
