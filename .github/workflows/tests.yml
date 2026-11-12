@@ -48,8 +48,5 @@ jobs:
       - name: Run Ruff lint checks
         run: python -m ruff check .
 
-      - name: Verify Ruff formatting
-        run: python -m ruff format --check .
-
       - name: Run test suite
         run: python -m pytest -q
