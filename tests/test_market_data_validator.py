@@ -13,7 +13,6 @@ from backend.market_data.validator import (
     MarketDataValidator,
 )
 
-
 UTC = timezone.utc
 CHECKED_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 
