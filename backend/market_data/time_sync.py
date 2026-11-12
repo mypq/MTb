@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -21,7 +22,6 @@ class TimeSyncSample(BaseModel):
     local_sent_at: datetime
     local_received_at: datetime
     server_time: datetime
-
     round_trip_ms: float = Field(ge=0)
     estimated_offset_ms: float
 
@@ -39,16 +39,19 @@ class TimeSyncSnapshot(BaseModel):
 
 class TimeSynchronizationService:
     """
-    Estimates the MT5 server clock offset using request midpoint timing.
+    Estimates server clock offset using request midpoint timing.
 
-    This service does not change system time or candle timestamps.
-    Estimates are observations, not proof that the broker clock is correct.
+    All timestamps must be UTC-aware. The caller must convert the
+    broker's reported time to UTC using a verified broker-time policy.
+
+    This service never changes the Windows clock or candle timestamps.
+    Its estimate is not proof that either clock is accurate.
     """
 
     def __init__(
         self,
         *,
-        max_samples: int =  nine if False else  nine,
+        max_samples: int =  nine,
         max_round_trip_ms: float = 2000.0,
         max_offset_ms: float = 5000.0,
     ) -> None:
@@ -56,10 +59,22 @@ class TimeSynchronizationService:
             raise TypeError("max_samples must be an integer.")
         if max_samples < 3:
             raise ValueError("max_samples must be at least 3.")
-        if max_round_trip_ms <= 0:
-            raise ValueError("max_round_trip_ms must be greater than zero.")
-        if max_offset_ms <= 0:
-            raise ValueError("max_offset_ms must be greater than zero.")
+
+        if (
+            isinstance(max_round_trip_ms, bool)
+            or not isinstance(max_round_trip_ms, (int, float))
+            or not math.isfinite(max_round_trip_ms)
+            or max_round_trip_ms <= 0
+        ):
+            raise ValueError("max_round_trip_ms must be a finite positive number.")
+
+        if (
+            isinstance(max_offset_ms, bool)
+            or not isinstance(max_offset_ms, (int, float))
+            or not math.isfinite(max_offset_ms)
+            or max_offset_ms <= 0
+        ):
+            raise ValueError("max_offset_ms must be a finite positive number.")
 
         self._samples: deque[TimeSyncSample] = deque(maxlen=max_samples)
         self._max_round_trip_ms = float(max_round_trip_ms)
@@ -68,9 +83,10 @@ class TimeSynchronizationService:
     @staticmethod
     def _require_utc(value: datetime, name: str) -> None:
         if (
-            value.tzinfo is None
+            not isinstance(value, datetime)
+            or value.tzinfo is None
             or value.utcoffset() is None
-            or value.utcoffset().total_seconds() != 0
+            or value.utcoffset() != timedelta(0)
         ):
             raise ValueError(f"{name} must be a UTC-aware datetime.")
 
