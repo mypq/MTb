@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -20,11 +21,7 @@ class CandleQuality(str, Enum):
 
 
 class MarketCandle(BaseModel):
-    """Normalized OHLC candle with explicit timestamp and volume provenance.
-
-    timestamp represents the candle opening time in UTC.
-    Tick volume and real volume are stored separately and never conflated.
-    """
+    """Normalized OHLC candle with explicit timestamp and volume provenance."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -49,10 +46,8 @@ class MarketCandle(BaseModel):
     @classmethod
     def normalize_required_text(cls, value: str) -> str:
         normalized = value.strip()
-
         if not normalized:
             raise ValueError("Value cannot be empty.")
-
         return normalized
 
     @field_validator("timestamp")
@@ -78,7 +73,7 @@ class MarketCandle(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_ohlc_relationships(self) -> MarketCandle:
+    def validate_candle(self) -> MarketCandle:
         if self.high < self.low:
             raise ValueError("Candle high cannot be lower than candle low.")
 
@@ -90,18 +85,16 @@ class MarketCandle(BaseModel):
 
         if self.volume_source == VolumeSource.REAL:
             if self.real_volume is None:
+                raise ValueError("REAL volume source requires real_volume.")
+
+        elif self.volume_source == VolumeSource.TICK:
+            if self.real_volume is not None:
                 raise ValueError(
-                    "REAL volume source requires a real_volume value."
+                    "TICK volume source must not contain real_volume."
                 )
 
-        if self.volume_source == VolumeSource.TICK:
-            if self.tick_volume < 0:
-                raise ValueError("Tick volume cannot be negative.")
-
         if self.quality == CandleQuality.VERIFIED and not self.is_closed:
-            raise ValueError(
-                "An unclosed candle cannot be marked VERIFIED."
-            )
+            raise ValueError("An unclosed candle cannot be marked VERIFIED.")
 
         return self
 
@@ -129,31 +122,31 @@ class CandleBatch(BaseModel):
 
         return value.astimezone(timezone.utc)
 
+    @field_validator("source")
+    @classmethod
+    def normalize_source(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Batch source cannot be empty.")
+        return normalized
+
     @model_validator(mode="after")
     def validate_batch(self) -> CandleBatch:
         timestamps = []
 
         for candle in self.candles:
             if candle.symbol != self.symbol:
-                raise ValueError(
-                    "All candles must belong to the batch symbol."
-                )
+                raise ValueError("All candles must belong to the batch symbol.")
 
             if candle.timeframe != self.timeframe:
-                raise ValueError(
-                    "All candles must use the batch timeframe."
-                )
+                raise ValueError("All candles must use the batch timeframe.")
 
             timestamps.append(candle.timestamp)
 
         if timestamps != sorted(timestamps):
-            raise ValueError(
-                "Candles must be ordered from oldest to newest."
-            )
+            raise ValueError("Candles must be ordered from oldest to newest.")
 
         if len(timestamps) != len(set(timestamps)):
-            raise ValueError(
-                "Duplicate candle timestamps are not allowed."
-            )
+            raise ValueError("Duplicate candle timestamps are not allowed.")
 
         return self
