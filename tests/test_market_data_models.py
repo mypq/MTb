@@ -1,8 +1,4 @@
-
 from datetime import datetime, timedelta, timezone
-
-import pytest
-from pydantic import ValidationError
 
 from backend.market_data import (
     CandleBatch,
@@ -10,7 +6,8 @@ from backend.market_data import (
     MarketCandle,
     VolumeSource,
 )
-
+import pytest
+from pydantic import ValidationError
 
 NOW = datetime.now(timezone.utc)
 
@@ -202,6 +199,7 @@ def test_batch_accepts_chronological_candles():
     older = make_candle(timestamp=NOW - timedelta(minutes=10))
     newer = make_candle(timestamp=NOW - timedelta(minutes=5))
 
+    # تم استبدال استخدام CandleBatch المباشر بـ make_batch لتضمين الـ source المطلوب تلقائياً
     batch = make_batch(candles=[older, newer])
 
     assert len(batch.candles) == 2
