@@ -1,9 +1,11 @@
+
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from backend import __version__
 from backend.config import get_settings
+from backend.security import verify_api_token
 
 
 @asynccontextmanager
@@ -25,14 +27,13 @@ def create_app() -> FastAPI:
 
     @application.get("/health", tags=["System"])
     async def health() -> dict[str, str]:
-        return {
-            "status": "ok",
-            "application": settings.APP_NAME,
-            "version": __version__,
-            "mode": settings.BOT_MODE,
-        }
+        return {"status": "ok"}
 
-    @application.get("/api/v1/system/status", tags=["System"])
+    @application.get(
+        "/api/v1/system/status",
+        tags=["System"],
+        dependencies=[Depends(verify_api_token)],
+    )
     async def system_status() -> dict[str, object]:
         return {
             "application": settings.APP_NAME,
