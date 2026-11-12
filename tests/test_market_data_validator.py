@@ -1,5 +1,6 @@
-
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from backend.market_data.models import (
     CandleBatch,
@@ -11,8 +12,6 @@ from backend.market_data.validator import (
     MarketDataIssueCode,
     MarketDataValidator,
 )
-
-import pytest
 
 
 UTC = timezone.utc
