@@ -2,14 +2,13 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-
 from backend import __version__
 from backend.config import get_settings
 from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
+from fastapi import Depends, FastAPI, HTTPException, Query
 
 
 logger = logging.getLogger(__name__)
