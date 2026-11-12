@@ -1,0 +1,217 @@
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from backend.market_data.models import (
+    CandleBatch,
+    CandleQuality,
+    VolumeSource,
+)
+
+
+class MarketDataIssueCode(str, Enum):
+    FUTURE_CANDLE = "FUTURE_CANDLE"
+    FUTURE_RECEIVE_TIME = "FUTURE_RECEIVE_TIME"
+    UNCLOSED_CANDLE = "UNCLOSED_CANDLE"
+    UNVERIFIED_CANDLE = "UNVERIFIED_CANDLE"
+    UNKNOWN_VOLUME_SOURCE = "UNKNOWN_VOLUME_SOURCE"
+    TIME_GAP = "TIME_GAP"
+
+
+class MarketDataIssue(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: MarketDataIssueCode
+    message: str = Field(min_length=1)
+    candle_timestamp: datetime | None = None
+    details: dict[str, int | float | str] = Field(default_factory=dict)
+
+
+class MarketDataGap(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    previous_candle: datetime
+    next_candle: datetime
+    expected_interval_seconds: int = Field(gt=0)
+    actual_interval_seconds: int = Field(gt=0)
+    missing_intervals: int = Field(ge=1)
+
+
+class MarketDataValidationReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    source: str
+    checked_at: datetime
+
+    candle_count: int = Field(ge=1)
+
+    structurally_valid: bool
+    analysis_eligible: bool
+    volume_data_available: bool
+
+    issues: tuple[MarketDataIssue, ...] = ()
+    gaps: tuple[MarketDataGap, ...] = ()
+
+
+class MarketDataValidator:
+    """
+    Conservative market-data validation.
+
+    This validator does not assume that every time gap is a missing
+    market candle. Gaps can be caused by broker trading sessions,
+    weekends, holidays, or unavailable historical data.
+
+    Until a trusted trading-session calendar classifies a gap,
+    the batch is not eligible for analysis.
+    """
+
+    def validate(
+        self,
+        batch: CandleBatch,
+        timeframe_seconds: int,
+        checked_at: datetime | None = None,
+    ) -> MarketDataValidationReport:
+        if isinstance(timeframe_seconds, bool) or not isinstance(
+            timeframe_seconds, int
+        ):
+            raise TypeError("timeframe_seconds must be an integer.")
+
+        if timeframe_seconds <= 0:
+            raise ValueError("timeframe_seconds must be greater than zero.")
+
+        validation_time = checked_at or datetime.now(timezone.utc)
+
+        if (
+            validation_time.tzinfo is None
+            or validation_time.utcoffset() is None
+            or validation_time.utcoffset().total_seconds() != 0
+        ):
+            raise ValueError("checked_at must be a UTC-aware datetime.")
+
+        validation_time = validation_time.astimezone(timezone.utc)
+
+        issues: list[MarketDataIssue] = []
+        gaps: list[MarketDataGap] = []
+
+        structurally_valid = True
+        volume_data_available = True
+
+        if batch.received_at > validation_time:
+            structurally_valid = False
+            issues.append(
+                MarketDataIssue(
+                    code=MarketDataIssueCode.FUTURE_RECEIVE_TIME,
+                    message="Batch receive time is later than validation time.",
+                    details={
+                        "received_at": batch.received_at.isoformat(),
+                        "checked_at": validation_time.isoformat(),
+                    },
+                )
+            )
+
+        candles = batch.candles
+
+        for candle in candles:
+            if candle.timestamp > validation_time:
+                structurally_valid = False
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.FUTURE_CANDLE,
+                        message="Candle timestamp is later than validation time.",
+                        candle_timestamp=candle.timestamp,
+                    )
+                )
+
+            if not candle.is_closed:
+                structurally_valid = False
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.UNCLOSED_CANDLE,
+                        message="An unclosed candle cannot be used for analysis.",
+                        candle_timestamp=candle.timestamp,
+                    )
+                )
+
+            if candle.quality != CandleQuality.VERIFIED:
+                structurally_valid = False
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.UNVERIFIED_CANDLE,
+                        message=(
+                            "Candle quality is not VERIFIED. "
+                            "The candle is blocked from analysis."
+                        ),
+                        candle_timestamp=candle.timestamp,
+                        details={"quality": candle.quality.value},
+                    )
+                )
+
+            if candle.volume_source == VolumeSource.UNKNOWN:
+                volume_data_available = False
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.UNKNOWN_VOLUME_SOURCE,
+                        message=(
+                            "Volume provenance is unknown. "
+                            "Volume-dependent analysis must not use this candle."
+                        ),
+                        candle_timestamp=candle.timestamp,
+                    )
+                )
+
+        for previous, current in zip(candles, candles[1:]):
+            actual_seconds = int(
+                (current.timestamp - previous.timestamp).total_seconds()
+            )
+
+            if actual_seconds > timeframe_seconds:
+                missing_intervals = max(
+                    1,
+                    (actual_seconds // timeframe_seconds) - 1,
+                )
+
+                gap = MarketDataGap(
+                    previous_candle=previous.timestamp,
+                    next_candle=current.timestamp,
+                    expected_interval_seconds=timeframe_seconds,
+                    actual_interval_seconds=actual_seconds,
+                    missing_intervals=missing_intervals,
+                )
+                gaps.append(gap)
+
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.TIME_GAP,
+                        message=(
+                            "A time gap was detected. Its cause has not "
+                            "been classified by a trading-session calendar."
+                        ),
+                        candle_timestamp=current.timestamp,
+                        details={
+                            "expected_interval_seconds": timeframe_seconds,
+                            "actual_interval_seconds": actual_seconds,
+                            "missing_intervals": missing_intervals,
+                        },
+                    )
+                )
+
+        analysis_eligible = structurally_valid and not gaps
+
+        return MarketDataValidationReport(
+            symbol=batch.symbol,
+            timeframe=batch.timeframe,
+            source=batch.source,
+            checked_at=validation_time,
+            candle_count=len(candles),
+            structurally_valid=structurally_valid,
+            analysis_eligible=analysis_eligible,
+            volume_data_available=volume_data_available,
+            issues=tuple(issues),
+            gaps=tuple(gaps),
+        )
