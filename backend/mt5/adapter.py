@@ -1,14 +1,27 @@
+
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from math import isfinite
 from threading import RLock
 from typing import Any
 
 from backend.config import Settings, get_settings
+from backend.market_data import (
+    CandleBatch,
+    CandleQuality,
+    MarketCandle,
+    VolumeSource,
+)
 from backend.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionState,
     MT5ConnectionStatus,
     MT5SymbolInfo,
+)
+from backend.mt5.timeframes import (
+    normalize_timeframe,
+    resolve_mt5_timeframe,
 )
 
 
@@ -194,6 +207,160 @@ class MT5Adapter:
                 spread=int(info.spread),
                 visible=bool(info.visible),
             )
+
+    def get_closed_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+    ) -> CandleBatch:
+        """Retrieve and validate closed candles from MT5.
+
+        Position zero is deliberately excluded because it is the
+        currently forming candle. MT5 rate timestamps are Unix
+        timestamps and are converted explicitly to UTC.
+
+        VERIFIED here means the returned candle passed the local
+        structural and closed-bar checks. It does not prove broker
+        clock alignment or that no historical bars are missing.
+        """
+        normalized_symbol = symbol.strip()
+
+        if not normalized_symbol:
+            raise ValueError("Symbol name cannot be empty.")
+
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("Candle count must be an integer.")
+
+        if not 1 <= count <= 10000:
+            raise ValueError("Candle count must be between 1 and 10000.")
+
+        normalized_timeframe = normalize_timeframe(timeframe)
+
+        with self._lock:
+            mt5 = self._require_connection()
+
+            mt5_timeframe = resolve_mt5_timeframe(
+                mt5,
+                normalized_timeframe,
+            )
+
+            try:
+                rates = mt5.copy_rates_from_pos(
+                    normalized_symbol,
+                    mt5_timeframe,
+                    1,
+                    count,
+                )
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 candle retrieval raised "
+                    f"{type(exc).__name__}."
+                ) from exc
+
+            if rates is None:
+                raise MT5AdapterError(
+                    "MT5 returned no candle data. "
+                    f"{self._last_error_message(mt5)}"
+                )
+
+            if len(rates) == 0:
+                raise MT5AdapterError(
+                    "MT5 returned an empty candle history."
+                )
+
+            received_at = datetime.now(timezone.utc)
+            candles: list[MarketCandle] = []
+
+            try:
+                for rate in rates:
+                    timestamp_value = int(rate["time"])
+
+                    if timestamp_value <= 0:
+                        raise ValueError(
+                            "MT5 returned an invalid candle timestamp."
+                        )
+
+                    candle_time = datetime.fromtimestamp(
+                        timestamp_value,
+                        tz=timezone.utc,
+                    )
+
+                    if candle_time > received_at:
+                        raise ValueError(
+                            "MT5 returned a candle with a future timestamp."
+                        )
+
+                    open_price = float(rate["open"])
+                    high_price = float(rate["high"])
+                    low_price = float(rate["low"])
+                    close_price = float(rate["close"])
+
+                    prices = (
+                        open_price,
+                        high_price,
+                        low_price,
+                        close_price,
+                    )
+
+                    if not all(isfinite(price) for price in prices):
+                        raise ValueError(
+                            "MT5 returned a non-finite candle price."
+                        )
+
+                    tick_volume = int(rate["tick_volume"])
+                    raw_real_volume = int(rate["real_volume"])
+
+                    if tick_volume < 0 or raw_real_volume < 0:
+                        raise ValueError(
+                            "MT5 returned a negative volume value."
+                        )
+
+                    # A zero real_volume is not treated as proof
+                    # that genuine traded volume is available.
+                    if raw_real_volume > 0:
+                        real_volume: int | None = raw_real_volume
+                        volume_source = VolumeSource.REAL
+                    else:
+                        real_volume = None
+                        volume_source = VolumeSource.TICK
+
+                    candle = MarketCandle(
+                        symbol=normalized_symbol,
+                        timeframe=normalized_timeframe,
+                        timestamp=candle_time,
+                        open=open_price,
+                        high=high_price,
+                        low=low_price,
+                        close=close_price,
+                        tick_volume=tick_volume,
+                        real_volume=real_volume,
+                        volume_source=volume_source,
+                        is_closed=True,
+                        quality=CandleQuality.VERIFIED,
+                    )
+
+                    candles.append(candle)
+
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise MT5AdapterError(
+                    f"MT5 candle data failed validation: {exc}"
+                ) from exc
+
+            candles.sort(key=lambda candle: candle.timestamp)
+
+            try:
+                return CandleBatch(
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
+                    candles=tuple(candles),
+                    received_at=received_at,
+                    source="MT5",
+                )
+            except Exception as exc:
+                raise MT5AdapterError(
+                    f"MT5 candle batch validation failed: {exc}"
+                ) from exc
 
     def shutdown(self) -> None:
         with self._lock:
