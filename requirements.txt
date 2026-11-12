@@ -1,0 +1,24 @@
+# GOLD BOT - Runtime Dependencies
+# Target platform: Windows 10/11 x64
+# Target Python: 3.12.x
+
+# MetaTrader 5 official Python integration
+MetaTrader5==5.0.6231
+
+# Backend API
+fastapi>=0.115,<1.0
+uvicorn>=0.34,<1.0
+
+# Configuration and environment variables
+pydantic-settings>=2.7,<3.0
+python-dotenv>=1.0,<2.0
+
+# Database and schema migrations
+SQLAlchemy>=2.0,<3.0
+alembic>=1.14,<2.0
+
+# Numerical and quantitative calculations
+numpy>=2.2,<3.0
+
+# Reliable IANA timezone database on Windows
+tzdata>=2025.2,<2027
