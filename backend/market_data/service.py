@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Protocol
@@ -10,7 +9,7 @@ from backend.market_data.validator import (
     MarketDataValidationReport,
     MarketDataValidator,
 )
-from backend.mt5.timeframes import timeframe_seconds
+from backend.mt5.timeframes import normalize_timeframe, timeframe_seconds
 
 
 class MarketDataSource(Protocol):
@@ -23,6 +22,10 @@ class MarketDataSource(Protocol):
         count: int,
     ) -> CandleBatch:
         ...
+
+
+class MarketDataContractError(ValueError):
+    """Raised when a market-data source violates the requested data contract."""
 
 
 class MarketDataSnapshot(BaseModel):
@@ -88,9 +91,9 @@ class MarketDataRejectedError(RuntimeError):
 
 class MarketDataService:
     """
-    Retrieves market data and applies validation before analysis.
+    Retrieves market data and applies strict contract and data validation.
 
-    This service does not repair candles, fill gaps, infer real volume,
+    The service does not repair candles, fill gaps, infer real volume,
     or override validation failures.
     """
 
@@ -112,13 +115,49 @@ class MarketDataService:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
 
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("Count must be an integer.")
+
+        if count <= 0:
+            raise ValueError("Count must be greater than zero.")
+
+        requested_symbol = symbol.strip()
+        requested_timeframe = normalize_timeframe(timeframe)
+        expected_seconds = timeframe_seconds(requested_timeframe)
+
         batch = self._source.get_closed_candles(
-            symbol=symbol.strip(),
-            timeframe=timeframe,
+            symbol=requested_symbol,
+            timeframe=requested_timeframe,
             count=count,
         )
 
-        expected_seconds = timeframe_seconds(batch.timeframe)
+        if not isinstance(batch, CandleBatch):
+            raise MarketDataContractError(
+                "Market-data source must return a CandleBatch."
+            )
+
+        if batch.symbol.strip() != requested_symbol:
+            raise MarketDataContractError(
+                "Returned symbol does not match the requested symbol."
+            )
+
+        try:
+            returned_timeframe = normalize_timeframe(batch.timeframe)
+        except (TypeError, ValueError) as exc:
+            raise MarketDataContractError(
+                "Market-data source returned an unsupported timeframe."
+            ) from exc
+
+        if returned_timeframe != requested_timeframe:
+            raise MarketDataContractError(
+                "Returned timeframe does not match the requested timeframe."
+            )
+
+        if len(batch.candles) != count:
+            raise MarketDataContractError(
+                f"Requested {count} candles but received "
+                f"{len(batch.candles)}."
+            )
 
         report = self._validator.validate(
             batch=batch,
