@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -287,3 +288,57 @@ def test_report_preserves_batch_identity():
     assert report.timeframe == "M5"
     assert report.source == "MT5"
     assert report.checked_at == CHECKED_AT
+
+
+def test_freshness_diagnostics_are_calculated_correctly():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    received_at = CHECKED_AT - timedelta(seconds=30)
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,), received_at=received_at),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.expected_latest_close_at == CHECKED_AT
+    assert report.latest_candle_close_delay_seconds == 0
+    assert report.data_age_seconds == 30
+    assert report.freshness_verified is False
+
+
+@pytest.mark.parametrize(
+    ("candle_timestamp", "expected_delay"),
+    [
+        (CHECKED_AT - timedelta(minutes=10), 300),
+        (CHECKED_AT, -300),
+    ],
+)
+def test_latest_candle_close_delay_can_be_positive_or_negative(
+    candle_timestamp,
+    expected_delay,
+):
+    candle = make_candle(candle_timestamp)
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == expected_delay
+
+
+def test_freshness_diagnostics_do_not_block_analysis():
+    old_candle = make_candle(
+        CHECKED_AT - timedelta(hours=2),
+    )
+    report = MarketDataValidator().validate(
+        make_batch((old_candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.data_age_seconds == 0
+    assert report.freshness_verified is False
+    assert report.structurally_valid is True
+    assert report.analysis_eligible is True
