@@ -100,7 +100,6 @@ class ChronyStatusService:
         for line in output.splitlines():
             if ":" not in line:
                 continue
-
             key, value = line.split(":", 1)
             parsed[key.strip()] = value.strip()
 
@@ -113,7 +112,6 @@ class ChronyStatusService:
         }
 
         missing = required.difference(parsed)
-
         if missing:
             raise ChronyStatusError(
                 "Chrony tracking output is missing required fields: "
@@ -180,6 +178,11 @@ class ChronyStatusService:
 
     @staticmethod
     def _parse_authdata(output: str) -> int:
+        """Count healthy NTS authentication records.
+
+        An empty table is a valid query result, but it provides zero
+        authenticated sources and therefore cannot satisfy the quorum.
+        """
         authenticated_sources = 0
         seen_sources: set[str] = set()
         header_found = False
@@ -197,8 +200,13 @@ class ChronyStatusService:
             if fields[0].startswith("="):
                 continue
 
-            if not header_found or len(fields) != 10:
+            if not header_found:
                 continue
+
+            if len(fields) != 10:
+                raise ChronyStatusError(
+                    "Chrony returned an invalid authdata row."
+                )
 
             (
                 source,
@@ -223,9 +231,7 @@ class ChronyStatusService:
             seen_sources.add(source_key)
 
             if mode != "NTS":
-                raise ChronyStatusError(
-                    f"NTS authentication is not active for source: {source}."
-                )
+                continue
 
             try:
                 attempts_count = int(attempts)
@@ -236,10 +242,12 @@ class ChronyStatusService:
                     "Chrony returned invalid NTS authentication statistics."
                 ) from exc
 
-            if attempts_count < 0 or nak_count != 0 or cookie_count <= 0:
-                raise ChronyStatusError(
-                    f"NTS authentication health check failed for source: {source}."
-                )
+            if (
+                attempts_count < 0
+                or nak_count != 0
+                or cookie_count <= 0
+            ):
+                continue
 
             authenticated_sources += 1
 
@@ -248,16 +256,10 @@ class ChronyStatusService:
                 "Chrony authdata output is missing its expected header."
             )
 
-        if authenticated_sources != REQUIRED_NTS_SOURCES:
-            raise ChronyStatusError(
-                "Expected exactly three authenticated NTS sources; "
-                f"found {authenticated_sources}."
-            )
-
         return authenticated_sources
 
     def snapshot(self) -> ChronyStatus:
-        """Return current Chrony status; failures are reported as unavailable."""
+        """Return current Chrony status; query failures are unavailable."""
         try:
             tracking = self._parse_tracking(
                 self._run("-n", "tracking")
@@ -269,7 +271,10 @@ class ChronyStatusService:
             selected_source, healthy_sources = self._parse_sources(
                 sources_output
             )
-            authenticated_sources = self._parse_authdata(authdata_output)
+
+            authenticated_sources = self._parse_authdata(
+                authdata_output
+            )
 
             reference_id = tracking["Reference ID"]
             stratum = int(tracking["Stratum"].split()[0])
@@ -304,6 +309,15 @@ class ChronyStatusService:
                 healthy_sources=healthy_sources,
                 nts_authenticated_sources=authenticated_sources,
                 quorum_met=quorum_met,
+                error=(
+                    None
+                    if quorum_met
+                    else (
+                        "NTS quorum not met: "
+                        f"{authenticated_sources} of "
+                        f"{REQUIRED_NTS_SOURCES} sources authenticated."
+                    )
+                ),
             )
 
         except (ChronyStatusError, ValueError, IndexError) as exc:
