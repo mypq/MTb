@@ -113,7 +113,9 @@ def test_chrony_does_not_synchronize_without_selected_source():
 
 def test_chrony_does_not_synchronize_with_fewer_than_three_sources():
     service = ChronyStatusService(command=["chronyc"])
-    two_sources = "\n".join(SOURCES_OUTPUT.splitlines()[:4])
+
+    # Keep the header and exactly two source rows.
+    two_sources = "\n".join(SOURCES_OUTPUT.splitlines()[:5])
 
     with patch(
         "backend.market_data.chrony.subprocess.run",
