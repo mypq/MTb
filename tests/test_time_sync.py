@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -178,6 +179,33 @@ def test_wall_clock_jump_after_samples_degrades_service():
     add_three_samples(service, clock)
 
     clock.advance(100, wall_adjustment_ms=1000)
+
+    snapshot = service.snapshot()
+
+    assert snapshot.status == TimeSyncStatus.DEGRADED
+    assert snapshot.sample_count == 0
+    assert snapshot.offset_ms is None
+
+
+def test_begin_sample_detects_clock_jump_between_samples():
+    clock = FakeClock()
+    service = make_service(clock)
+
+    add_three_samples(service, clock)
+
+    assert (
+        service.snapshot().status
+        == TimeSyncStatus.SYNCHRONIZED
+    )
+
+    clock.advance(100, wall_adjustment_ms=1000)
+
+    request_start = service.begin_sample()
+
+    assert request_start.local_sent_at == clock.wall_time
+    assert request_start.monotonic_sent_ns == clock.monotonic_ns
+    assert len(service._samples) == 0
+    assert service._clock_untrusted is True
 
     snapshot = service.snapshot()
 
