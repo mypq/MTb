@@ -1,11 +1,10 @@
-
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from backend.market_data.time_sync import (
-    TimeSyncStatus,
     TimeSynchronizationService,
+    TimeSyncStatus,
 )
 
 UTC = timezone.utc
