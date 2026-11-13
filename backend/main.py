@@ -110,6 +110,11 @@ def create_app() -> FastAPI:
                 "last_offset_seconds": chrony.last_offset_seconds,
                 "root_dispersion_seconds": chrony.root_dispersion_seconds,
                 "selected_source": chrony.selected_source,
+                "healthy_sources": chrony.healthy_sources,
+                "nts_authenticated_sources": (
+                    chrony.nts_authenticated_sources
+                ),
+                "quorum_met": chrony.quorum_met,
                 "error": chrony.error,
                 "broker_time_verified": False,
             },
