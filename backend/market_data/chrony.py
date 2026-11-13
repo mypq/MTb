@@ -1,4 +1,3 @@
-
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -92,6 +91,46 @@ class ChronyStatusService:
             )
 
         return result.stdout
+
+    def _run_authdata(self) -> str:
+        """Read NTS authentication records with the required WSL privilege."""
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    [
+                        "wsl.exe",
+                        "--exec",
+                        "sudo",
+                        "-n",
+                        "/usr/bin/chronyc",
+                        "authdata",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self._timeout_seconds,
+                    shell=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ChronyStatusError(
+                    f"Unable to execute Chrony authdata query: "
+                    f"{type(exc).__name__}."
+                ) from exc
+
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise ChronyStatusError(
+                    detail or (
+                        "Chrony authdata query exited with code "
+                        f"{result.returncode}."
+                    )
+                )
+
+            return result.stdout
+
+        return self._run("authdata")
 
     @staticmethod
     def _parse_tracking(output: str) -> dict[str, str]:
@@ -266,7 +305,7 @@ class ChronyStatusService:
             )
 
             sources_output = self._run("-n", "sources", "-v")
-            authdata_output = self._run("authdata")
+            authdata_output = self._run_authdata()
 
             selected_source, healthy_sources = self._parse_sources(
                 sources_output
