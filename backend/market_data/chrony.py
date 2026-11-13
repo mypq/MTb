@@ -1,13 +1,15 @@
+
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Sequence
+
 
 REQUIRED_NTS_SOURCES = 3
 
