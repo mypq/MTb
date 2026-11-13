@@ -1,11 +1,9 @@
-
-from subprocess import TimeoutExpired
+from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
-from backend.market_data.chrony import (
-    ChronyStatusService,
-)
+import pytest
 
+from backend.market_data.chrony import ChronyStatusService
 
 TRACKING_OUTPUT = """
 Reference ID    : A29FC87B (time.cloudflare.com)
@@ -25,8 +23,6 @@ MS Name/IP address         Stratum Poll Reach LastRx Last sample
 
 
 def successful_command(*args, **kwargs):
-    from subprocess import CompletedProcess
-
     if "tracking" in args:
         return CompletedProcess(args, 0, TRACKING_OUTPUT, "")
 
@@ -59,8 +55,6 @@ def test_chrony_does_not_treat_candidate_as_selected_source():
     candidate_only = SOURCES_OUTPUT.replace("^*", "^ ")
 
     def command_without_selected(*args, **kwargs):
-        from subprocess import CompletedProcess
-
         if "tracking" in args:
             return CompletedProcess(args, 0, TRACKING_OUTPUT, "")
 
@@ -109,8 +103,6 @@ def test_chrony_rejects_incomplete_tracking_output():
     service = ChronyStatusService(command=["chronyc"])
 
     def incomplete_command(*args, **kwargs):
-        from subprocess import CompletedProcess
-
         return CompletedProcess(args, 0, "Stratum : 0\n", "")
 
     with patch(
@@ -125,7 +117,5 @@ def test_chrony_rejects_incomplete_tracking_output():
 
 
 def test_chrony_rejects_non_positive_timeout():
-    import pytest
-
     with pytest.raises(ValueError):
         ChronyStatusService(command=["chronyc"], timeout_seconds=0)
