@@ -1,3 +1,4 @@
+
 import asyncio
 from types import SimpleNamespace
 
@@ -73,6 +74,9 @@ def test_system_status_includes_chrony_and_mt5_information(
         last_offset_seconds=0.0001,
         root_dispersion_seconds=0.002,
         selected_source="time.cloudflare.com",
+        healthy_sources=3,
+        nts_authenticated_sources=3,
+        quorum_met=True,
         error=None,
     )
 
@@ -101,6 +105,9 @@ def test_system_status_includes_chrony_and_mt5_information(
         "last_offset_seconds": 0.0001,
         "root_dispersion_seconds": 0.002,
         "selected_source": "time.cloudflare.com",
+        "healthy_sources": 3,
+        "nts_authenticated_sources": 3,
+        "quorum_met": True,
         "error": None,
         "broker_time_verified": False,
     }
@@ -114,10 +121,13 @@ def test_system_status_reports_unavailable_chrony(
         synchronized=False,
         reference_id=None,
         stratum=None,
-        leap_status="Not synchronised",
+        leap_status=None,
         last_offset_seconds=None,
         root_dispersion_seconds=None,
         selected_source=None,
+        healthy_sources=0,
+        nts_authenticated_sources=0,
+        quorum_met=False,
         error="Chrony command timed out.",
     )
 
@@ -127,5 +137,8 @@ def test_system_status_reports_unavailable_chrony(
     assert result["time_sync"]["available"] is False
     assert result["time_sync"]["synchronized"] is False
     assert result["time_sync"]["selected_source"] is None
+    assert result["time_sync"]["healthy_sources"] == 0
+    assert result["time_sync"]["nts_authenticated_sources"] == 0
+    assert result["time_sync"]["quorum_met"] is False
     assert result["time_sync"]["error"] == "Chrony command timed out."
     assert result["time_sync"]["broker_time_verified"] is False
