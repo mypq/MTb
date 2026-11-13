@@ -1,9 +1,11 @@
+
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
 import pytest
 
 from backend.market_data.chrony import ChronyStatusService
+
 
 TRACKING_OUTPUT = """
 Reference ID    : A29FC87B (time.cloudflare.com)
@@ -94,7 +96,7 @@ def test_chrony_reports_synchronized_with_three_nts_sources():
 
 def test_chrony_does_not_synchronize_without_selected_source():
     service = ChronyStatusService(command=["chronyc"])
-    candidate_only = SOURCES_OUTPUT.replace("^*", "^ ")
+    candidate_only = SOURCES_OUTPUT.replace("^*", "^+")
 
     with patch(
         "backend.market_data.chrony.subprocess.run",
@@ -105,6 +107,7 @@ def test_chrony_does_not_synchronize_without_selected_source():
     assert status.available is True
     assert status.synchronized is False
     assert status.selected_source is None
+    assert status.healthy_sources == 3
     assert status.quorum_met is True
 
 
