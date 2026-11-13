@@ -6,6 +6,3 @@
 # Testing framework
 pytest>=8.3,<10
 pytest-cov>=6,<8
-
-# Python linting and code quality
-ruff==0.17.5
