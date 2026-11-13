@@ -55,6 +55,11 @@ class MarketDataValidationReport(BaseModel):
     analysis_eligible: bool
     volume_data_available: bool
 
+    expected_latest_close_at: datetime
+    latest_candle_close_delay_seconds: float
+    data_age_seconds: float
+    freshness_verified: bool = False
+
     issues: tuple[MarketDataIssue, ...] = ()
     gaps: tuple[MarketDataGap, ...] = ()
 
@@ -116,6 +121,23 @@ class MarketDataValidator:
             )
 
         candles = batch.candles
+        latest_candle = candles[-1]
+
+        expected_latest_close_at = (
+            latest_candle.timestamp.timestamp() + timeframe_seconds
+        )
+        expected_latest_close_at = datetime.fromtimestamp(
+            expected_latest_close_at,
+            tz=timezone.utc,
+        )
+
+        latest_candle_close_delay_seconds = (
+            validation_time - expected_latest_close_at
+        ).total_seconds()
+
+        data_age_seconds = (
+            validation_time - batch.received_at
+        ).total_seconds()
 
         for candle in candles:
             if candle.timestamp > validation_time:
@@ -212,6 +234,12 @@ class MarketDataValidator:
             structurally_valid=structurally_valid,
             analysis_eligible=analysis_eligible,
             volume_data_available=volume_data_available,
+            expected_latest_close_at=expected_latest_close_at,
+            latest_candle_close_delay_seconds=(
+                latest_candle_close_delay_seconds
+            ),
+            data_age_seconds=data_age_seconds,
+            freshness_verified=False,
             issues=tuple(issues),
             gaps=tuple(gaps),
         )
