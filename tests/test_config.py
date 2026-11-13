@@ -1,3 +1,4 @@
+
 import pytest
 from pydantic import ValidationError
 
@@ -56,12 +57,44 @@ def test_live_trading_requires_explicit_authorization() -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
-    [0, -1, 100.1],
+    ("field", "value"),
+    [
+        ("MAX_RISK_PER_TRADE_PERCENT", 0),
+        ("MAX_RISK_PER_TRADE_PERCENT", -1),
+        ("MAX_RISK_PER_TRADE_PERCENT", 1.01),
+        ("MAX_RISK_PER_TRADE_PERCENT", 100),
+        ("MAX_DAILY_LOSS_PERCENT", 0),
+        ("MAX_DAILY_LOSS_PERCENT", -1),
+        ("MAX_DAILY_LOSS_PERCENT", 2.01),
+        ("MAX_DAILY_LOSS_PERCENT", 100),
+    ],
 )
-def test_invalid_risk_percentage_is_rejected(value: float) -> None:
+def test_invalid_risk_limits_are_rejected(
+    field: str,
+    value: float,
+) -> None:
     with pytest.raises(ValidationError):
-        make_settings(MAX_RISK_PER_TRADE_PERCENT=value)
+        make_settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("MAX_RISK_PER_TRADE_PERCENT", 0.01),
+        ("MAX_RISK_PER_TRADE_PERCENT", 0.5),
+        ("MAX_RISK_PER_TRADE_PERCENT", 1.0),
+        ("MAX_DAILY_LOSS_PERCENT", 0.01),
+        ("MAX_DAILY_LOSS_PERCENT", 1.0),
+        ("MAX_DAILY_LOSS_PERCENT", 2.0),
+    ],
+)
+def test_valid_risk_limits_are_accepted(
+    field: str,
+    value: float,
+) -> None:
+    settings = make_settings(**{field: value})
+
+    assert getattr(settings, field) == value
 
 
 @pytest.mark.parametrize(
