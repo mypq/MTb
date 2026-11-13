@@ -1,3 +1,4 @@
+
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -91,6 +92,48 @@ class ChronyStatusService:
             )
 
         return result.stdout
+
+    def _run_sources(self) -> str:
+        """Read Chrony sources with the required WSL privilege."""
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    [
+                        "wsl.exe",
+                        "--exec",
+                        "sudo",
+                        "-n",
+                        "/usr/bin/chronyc",
+                        "-n",
+                        "sources",
+                        "-v",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=self._timeout_seconds,
+                    shell=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise ChronyStatusError(
+                    f"Unable to execute Chrony sources query: "
+                    f"{type(exc).__name__}."
+                ) from exc
+
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip()
+                raise ChronyStatusError(
+                    detail or (
+                        "Chrony sources query exited with code "
+                        f"{result.returncode}."
+                    )
+                )
+
+            return result.stdout
+
+        return self._run("-n", "sources", "-v")
 
     def _run_authdata(self) -> str:
         """Read NTS authentication records with the required WSL privilege."""
@@ -304,7 +347,7 @@ class ChronyStatusService:
                 self._run("-n", "tracking")
             )
 
-            sources_output = self._run("-n", "sources", "-v")
+            sources_output = self._run_sources()
             authdata_output = self._run_authdata()
 
             selected_source, healthy_sources = self._parse_sources(
