@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -67,6 +66,7 @@ def test_valid_batch_is_eligible_for_analysis():
     )
 
     assert report.structurally_valid is True
+    assert report.freshness_eligible is True
     assert report.analysis_eligible is True
     assert report.volume_data_available is True
     assert report.candle_count == 2
@@ -76,8 +76,8 @@ def test_valid_batch_is_eligible_for_analysis():
 
 def test_exact_timeframe_interval_has_no_gap():
     candles = (
+        make_candle(CHECKED_AT - timedelta(minutes=10)),
         make_candle(CHECKED_AT - timedelta(minutes=5)),
-        make_candle(CHECKED_AT),
     )
     report = MarketDataValidator().validate(
         make_batch(candles),
@@ -91,8 +91,8 @@ def test_exact_timeframe_interval_has_no_gap():
 
 def test_time_gap_blocks_analysis():
     candles = (
-        make_candle(CHECKED_AT - timedelta(minutes=15)),
-        make_candle(CHECKED_AT),
+        make_candle(CHECKED_AT - timedelta(minutes=20)),
+        make_candle(CHECKED_AT - timedelta(minutes=5)),
     )
     report = MarketDataValidator().validate(
         make_batch(candles),
@@ -303,6 +303,7 @@ def test_freshness_diagnostics_are_calculated_correctly():
     assert report.expected_latest_close_at == CHECKED_AT
     assert report.latest_candle_close_delay_seconds == 0
     assert report.data_age_seconds == 30
+    assert report.freshness_eligible is True
     assert report.freshness_verified is False
 
 
@@ -328,7 +329,7 @@ def test_latest_candle_close_delay_can_be_positive_or_negative(
     assert report.latest_candle_close_delay_seconds == expected_delay
 
 
-def test_freshness_diagnostics_do_not_block_analysis():
+def test_old_candle_is_rejected_even_if_received_now():
     old_candle = make_candle(
         CHECKED_AT - timedelta(hours=2),
     )
@@ -339,6 +340,62 @@ def test_freshness_diagnostics_do_not_block_analysis():
     )
 
     assert report.data_age_seconds == 0
-    assert report.freshness_verified is False
+    assert report.freshness_eligible is False
     assert report.structurally_valid is True
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.STALE_DATA
+        for issue in report.issues
+    )
+
+
+def test_candle_at_maximum_allowed_delay_is_eligible():
+    candle = make_candle(
+        CHECKED_AT - timedelta(minutes=15),
+    )
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == 600
+    assert report.freshness_eligible is True
     assert report.analysis_eligible is True
+
+
+def test_candle_beyond_maximum_allowed_delay_is_rejected():
+    candle = make_candle(
+        CHECKED_AT - timedelta(minutes=16),
+    )
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == 660
+    assert report.freshness_eligible is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.STALE_DATA
+        for issue in report.issues
+    )
+
+
+def test_future_expected_close_blocks_analysis():
+    candle = make_candle(CHECKED_AT)
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == -300
+    assert report.freshness_eligible is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.FUTURE_EXPECTED_CLOSE
+        for issue in report.issues
+    )
