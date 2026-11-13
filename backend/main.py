@@ -1,3 +1,4 @@
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -5,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 
 from backend import __version__
 from backend.config import get_settings
+from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
@@ -21,11 +23,13 @@ async def lifespan(app: FastAPI):
         adapter=adapter,
         interval_seconds=10.0,
     )
+    chrony_service = ChronyStatusService()
 
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
     app.state.market_data_service = MarketDataService(source=adapter)
+    app.state.chrony_status_service = chrony_service
 
     try:
         if settings.MT5_ENABLED:
@@ -76,7 +80,12 @@ def create_app() -> FastAPI:
     async def system_status() -> dict[str, object]:
         adapter: MT5Adapter = application.state.mt5_adapter
         monitor: MT5ConnectionMonitor = application.state.mt5_monitor
+        chrony_service: ChronyStatusService = (
+            application.state.chrony_status_service
+        )
+
         connection = adapter.connection_status()
+        chrony = chrony_service.snapshot()
 
         return {
             "application": settings.APP_NAME,
@@ -91,6 +100,19 @@ def create_app() -> FastAPI:
             "mt5_enabled": settings.MT5_ENABLED,
             "mt5_connection": connection.model_dump(mode="json"),
             "mt5_monitor_running": monitor.is_running,
+            "time_sync": {
+                "provider": "chrony",
+                "available": chrony.available,
+                "synchronized": chrony.synchronized,
+                "reference_id": chrony.reference_id,
+                "stratum": chrony.stratum,
+                "leap_status": chrony.leap_status,
+                "last_offset_seconds": chrony.last_offset_seconds,
+                "root_dispersion_seconds": chrony.root_dispersion_seconds,
+                "selected_source": chrony.selected_source,
+                "error": chrony.error,
+                "broker_time_verified": False,
+            },
         }
 
     @application.get(
