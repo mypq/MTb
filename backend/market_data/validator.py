@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -20,6 +19,8 @@ class MarketDataIssueCode(str, Enum):
     UNVERIFIED_CANDLE = "UNVERIFIED_CANDLE"
     UNKNOWN_VOLUME_SOURCE = "UNKNOWN_VOLUME_SOURCE"
     TIME_GAP = "TIME_GAP"
+    STALE_DATA = "STALE_DATA"
+    FUTURE_EXPECTED_CLOSE = "FUTURE_EXPECTED_CLOSE"
 
 
 class MarketDataIssue(BaseModel):
@@ -58,6 +59,8 @@ class MarketDataValidationReport(BaseModel):
     expected_latest_close_at: datetime
     latest_candle_close_delay_seconds: float
     data_age_seconds: float
+
+    freshness_eligible: bool
     freshness_verified: bool = False
 
     issues: tuple[MarketDataIssue, ...] = ()
@@ -68,6 +71,14 @@ class MarketDataValidator:
     """
     Conservative market-data validation.
 
+    Freshness is evaluated using the expected close time of the
+    latest candle, not only the time at which the batch was received.
+
+    The maximum permitted delay is twice the timeframe duration.
+
+    A future expected close time is rejected because it conflicts
+    with the claim that the latest candle is already closed.
+
     This validator does not assume that every time gap is a missing
     market candle. Gaps can be caused by broker trading sessions,
     weekends, holidays, or unavailable historical data.
@@ -75,6 +86,8 @@ class MarketDataValidator:
     Until a trusted trading-session calendar classifies a gap,
     the batch is not eligible for analysis.
     """
+
+    MAX_STALENESS_TIMEFRAME_MULTIPLIER = 2
 
     def validate(
         self,
@@ -123,11 +136,8 @@ class MarketDataValidator:
         candles = batch.candles
         latest_candle = candles[-1]
 
-        expected_latest_close_at = (
-            latest_candle.timestamp.timestamp() + timeframe_seconds
-        )
         expected_latest_close_at = datetime.fromtimestamp(
-            expected_latest_close_at,
+            latest_candle.timestamp.timestamp() + timeframe_seconds,
             tz=timezone.utc,
         )
 
@@ -138,6 +148,50 @@ class MarketDataValidator:
         data_age_seconds = (
             validation_time - batch.received_at
         ).total_seconds()
+
+        max_staleness_seconds = (
+            timeframe_seconds * self.MAX_STALENESS_TIMEFRAME_MULTIPLIER
+        )
+
+        freshness_eligible = (
+            0 <= latest_candle_close_delay_seconds
+            <= max_staleness_seconds
+        )
+
+        if latest_candle_close_delay_seconds < 0:
+            issues.append(
+                MarketDataIssue(
+                    code=MarketDataIssueCode.FUTURE_EXPECTED_CLOSE,
+                    message=(
+                        "The expected close time of the latest candle "
+                        "is later than the validation time."
+                    ),
+                    candle_timestamp=latest_candle.timestamp,
+                    details={
+                        "delay_seconds": latest_candle_close_delay_seconds,
+                        "expected_close_at": (
+                            expected_latest_close_at.isoformat()
+                        ),
+                    },
+                )
+            )
+
+        elif latest_candle_close_delay_seconds > max_staleness_seconds:
+            issues.append(
+                MarketDataIssue(
+                    code=MarketDataIssueCode.STALE_DATA,
+                    message=(
+                        "The latest candle exceeds the maximum permitted "
+                        "data delay and is blocked from analysis."
+                    ),
+                    candle_timestamp=latest_candle.timestamp,
+                    details={
+                        "delay_seconds": latest_candle_close_delay_seconds,
+                        "maximum_delay_seconds": max_staleness_seconds,
+                        "timeframe_seconds": timeframe_seconds,
+                    },
+                )
+            )
 
         for candle in candles:
             if candle.timestamp > validation_time:
@@ -223,7 +277,11 @@ class MarketDataValidator:
                     )
                 )
 
-        analysis_eligible = structurally_valid and not gaps
+        analysis_eligible = (
+            structurally_valid
+            and freshness_eligible
+            and not gaps
+        )
 
         return MarketDataValidationReport(
             symbol=batch.symbol,
@@ -239,6 +297,7 @@ class MarketDataValidator:
                 latest_candle_close_delay_seconds
             ),
             data_age_seconds=data_age_seconds,
+            freshness_eligible=freshness_eligible,
             freshness_verified=False,
             issues=tuple(issues),
             gaps=tuple(gaps),
