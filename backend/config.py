@@ -1,3 +1,4 @@
+
 from functools import lru_cache
 from typing import Literal
 
@@ -101,15 +102,23 @@ class Settings(BaseSettings):
             raise ValueError("MT5_TIMEOUT_MS must be at least 1000.")
         return value
 
-    @field_validator(
-        "MAX_RISK_PER_TRADE_PERCENT",
-        "MAX_DAILY_LOSS_PERCENT",
-    )
+    @field_validator("MAX_RISK_PER_TRADE_PERCENT")
     @classmethod
-    def validate_risk_percentages(cls, value: float) -> float:
-        if not 0 < value <= 100:
+    def validate_risk_per_trade(cls, value: float) -> float:
+        if not 0 < value <= 1.0:
             raise ValueError(
-                "Risk percentages must be greater than 0 and at most 100."
+                "MAX_RISK_PER_TRADE_PERCENT must be greater than 0 "
+                "and at most 1.0."
+            )
+        return value
+
+    @field_validator("MAX_DAILY_LOSS_PERCENT")
+    @classmethod
+    def validate_daily_loss(cls, value: float) -> float:
+        if not 0 < value <= 2.0:
+            raise ValueError(
+                "MAX_DAILY_LOSS_PERCENT must be greater than 0 "
+                "and at most 2.0."
             )
         return value
 
