@@ -149,7 +149,7 @@ class TimeSynchronizationService:
             raise ValueError(f"{name} cannot be negative.")
 
     def begin_sample(self) -> TimeSyncRequestStart:
-        """Capture local clocks immediately before requesting server time."""
+        """Capture clocks and detect adjustments before a new request."""
         local_sent_at = self._wall_clock()
         monotonic_sent_ns = self._monotonic_clock_ns()
 
@@ -158,6 +158,12 @@ class TimeSynchronizationService:
             monotonic_sent_ns,
             "monotonic_sent_ns",
         )
+
+        if self._detect_clock_jump(
+            local_sent_at,
+            monotonic_sent_ns,
+        ):
+            self._invalidate_samples()
 
         return TimeSyncRequestStart(
             local_sent_at=local_sent_at,
