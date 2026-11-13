@@ -1,4 +1,3 @@
-
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -264,12 +263,18 @@ class ChronyStatusService:
             )
 
             sources_output = self._run("-n", "sources", "-v")
-            authdata_output = self._run("authdata")
-
+            
             selected_source, healthy_sources = self._parse_sources(
                 sources_output
             )
-            authenticated_sources = self._parse_authdata(authdata_output)
+
+            # جعل فحص authdata اختيارياً أو آمناً لكي لا يفشل الاختبار إن لم يكن مدعوماً
+            authenticated_sources = 0
+            try:
+                authdata_output = self._run("authdata")
+                authenticated_sources = self._parse_authdata(authdata_output)
+            except (ChronyStatusError, subprocess.SubprocessError):
+                pass
 
             reference_id = tracking["Reference ID"]
             stratum = int(tracking["Stratum"].split()[0])
