@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from statistics import median
 
@@ -42,10 +42,16 @@ class TimeSynchronizationService:
     Estimates server clock offset using request midpoint timing.
 
     All timestamps must be UTC-aware. The caller must convert the
-    broker's reported time to UTC using a verified broker-time policy.
+    server-reported time to UTC using a verified time policy.
+
+    Samples expire after max_sample_age_seconds. Expired samples
+    are never used to report a synchronized status or estimate time.
+
+    The estimated uncertainty is based on half the median round-trip
+    time. It does not include operating-system clock uncertainty or
+    prove that either clock is accurate.
 
     This service never changes the Windows clock or candle timestamps.
-    Its estimate is not proof that either clock is accurate.
     """
 
     def __init__(
@@ -54,6 +60,7 @@ class TimeSynchronizationService:
         max_samples: int = 9,
         max_round_trip_ms: float = 2000.0,
         max_offset_ms: float = 5000.0,
+        max_sample_age_seconds: float = 30.0,
     ) -> None:
         if isinstance(max_samples, bool) or not isinstance(max_samples, int):
             raise TypeError("max_samples must be an integer.")
@@ -76,9 +83,22 @@ class TimeSynchronizationService:
         ):
             raise ValueError("max_offset_ms must be a finite positive number.")
 
+        if (
+            isinstance(max_sample_age_seconds, bool)
+            or not isinstance(max_sample_age_seconds, (int, float))
+            or not math.isfinite(max_sample_age_seconds)
+            or max_sample_age_seconds <= 0
+        ):
+            raise ValueError(
+                "max_sample_age_seconds must be a finite positive number."
+            )
+
         self._samples: deque[TimeSyncSample] = deque(maxlen=max_samples)
         self._max_round_trip_ms = float(max_round_trip_ms)
         self._max_offset_ms = float(max_offset_ms)
+        self._max_sample_age = timedelta(
+            seconds=float(max_sample_age_seconds)
+        )
 
     @staticmethod
     def _require_utc(value: datetime, name: str) -> None:
@@ -126,37 +146,57 @@ class TimeSynchronizationService:
         self._samples.append(sample)
         return sample
 
-    def snapshot(self) -> TimeSyncSnapshot:
+    def snapshot(
+        self,
+        now: datetime | None = None,
+    ) -> TimeSyncSnapshot:
         if not self._samples:
             return TimeSyncSnapshot(
                 status=TimeSyncStatus.UNSYNCHRONIZED,
                 sample_count=0,
             )
 
-        usable = [
+        checked_at = now or datetime.now(timezone.utc)
+        self._require_utc(checked_at, "now")
+
+        fresh_samples = [
             sample
             for sample in self._samples
+            if timedelta(0)
+            <= checked_at - sample.local_received_at
+            <= self._max_sample_age
+        ]
+
+        usable_samples = [
+            sample
+            for sample in fresh_samples
             if sample.round_trip_ms <= self._max_round_trip_ms
         ]
 
-        if not usable:
+        if not usable_samples:
             return TimeSyncSnapshot(
                 status=TimeSyncStatus.DEGRADED,
                 sample_count=len(self._samples),
-                measured_at=self._samples[-1].local_received_at,
+                measured_at=max(
+                    sample.local_received_at
+                    for sample in self._samples
+                ),
             )
 
         offset_ms = median(
-            sample.estimated_offset_ms for sample in usable
+            sample.estimated_offset_ms
+            for sample in usable_samples
         )
+
         median_rtt_ms = median(
-            sample.round_trip_ms for sample in usable
+            sample.round_trip_ms
+            for sample in usable_samples
         )
 
         uncertainty_ms = median_rtt_ms / 2.0
 
         synchronized = (
-            len(usable) >= 3
+            len(usable_samples) >= 3
             and abs(offset_ms) <= self._max_offset_ms
         )
 
@@ -170,7 +210,10 @@ class TimeSynchronizationService:
             offset_ms=offset_ms,
             median_round_trip_ms=median_rtt_ms,
             uncertainty_ms=uncertainty_ms,
-            measured_at=usable[-1].local_received_at,
+            measured_at=max(
+                sample.local_received_at
+                for sample in usable_samples
+            ),
         )
 
     def estimate_server_time(
@@ -179,7 +222,7 @@ class TimeSynchronizationService:
     ) -> datetime | None:
         self._require_utc(local_time, "local_time")
 
-        snapshot = self.snapshot()
+        snapshot = self.snapshot(now=local_time)
 
         if (
             snapshot.status != TimeSyncStatus.SYNCHRONIZED
