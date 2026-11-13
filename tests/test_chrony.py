@@ -1,4 +1,3 @@
-
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
