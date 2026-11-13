@@ -32,21 +32,10 @@ gbg1-ts.nts.netnod.se        NTS     1   15  256  23m    0    0    8  100
 ntppool1.time.nl             NTS     1   30  128  23m    0    0    8   64
 """
 
-
-def successful_command(*args, **kwargs):
-    cmd = args[0] if args else []
-    cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-
-    if "tracking" in cmd_str:
-        return CompletedProcess(args, 0, TRACKING_OUTPUT, "")
-
-    if "sources" in cmd_str:
-        return CompletedProcess(args, 0, SOURCES_OUTPUT, "")
-
-    if "authdata" in cmd_str:
-        return CompletedProcess(args, 0, AUTHDATA_OUTPUT, "")
-
-    return CompletedProcess(args, 1, "", "Unexpected command")
+EMPTY_AUTHDATA_OUTPUT = """
+Name/IP address             Mode KeyID Type KLen Last Atmp  NAK Cook CLen
+=========================================================================
+"""
 
 
 def run_with_outputs(
@@ -73,6 +62,10 @@ def run_with_outputs(
     return command
 
 
+def successful_command(*args, **kwargs):
+    return run_with_outputs()(*args, **kwargs)
+
+
 def test_chrony_reports_synchronized_with_three_nts_sources():
     service = ChronyStatusService(command=["chronyc"])
 
@@ -90,8 +83,52 @@ def test_chrony_reports_synchronized_with_three_nts_sources():
     assert status.healthy_sources == 3
     assert status.nts_authenticated_sources == 3
     assert status.quorum_met is True
+    assert status.error is None
     assert status.last_offset_seconds == -0.000281089
     assert status.root_dispersion_seconds == 0.002205403
+
+
+def test_chrony_preserves_healthy_sources_when_authdata_is_empty():
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(
+            authdata=EMPTY_AUTHDATA_OUTPUT,
+        ),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.selected_source == "162.159.200.123"
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 0
+    assert status.quorum_met is False
+    assert status.error is not None
+    assert "0 of 3" in status.error
+
+
+def test_chrony_does_not_synchronize_with_only_two_nts_sources():
+    service = ChronyStatusService(command=["chronyc"])
+
+    two_sources_authdata = "\n".join(
+        AUTHDATA_OUTPUT.splitlines()[:-1]
+    )
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(
+            authdata=two_sources_authdata,
+        ),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 2
+    assert status.quorum_met is False
 
 
 def test_chrony_does_not_synchronize_without_selected_source():
@@ -114,7 +151,6 @@ def test_chrony_does_not_synchronize_without_selected_source():
 def test_chrony_does_not_synchronize_with_fewer_than_three_sources():
     service = ChronyStatusService(command=["chronyc"])
 
-    # Keep the header and exactly two source rows.
     two_sources = "\n".join(SOURCES_OUTPUT.splitlines()[:5])
 
     with patch(
@@ -131,6 +167,7 @@ def test_chrony_does_not_synchronize_with_fewer_than_three_sources():
 
 def test_chrony_rejects_nts_authentication_with_nonzero_nak():
     service = ChronyStatusService(command=["chronyc"])
+
     invalid_authdata = AUTHDATA_OUTPUT.replace(
         "23m    0    0    8",
         "23m    0    1    8",
@@ -143,13 +180,15 @@ def test_chrony_rejects_nts_authentication_with_nonzero_nak():
     ):
         status = service.snapshot()
 
-    assert status.available is False
+    assert status.available is True
     assert status.synchronized is False
-    assert "authentication health check failed" in status.error
+    assert status.nts_authenticated_sources == 2
+    assert status.quorum_met is False
 
 
-def test_chrony_rejects_source_without_nts_mode():
+def test_chrony_does_not_count_source_without_nts_mode():
     service = ChronyStatusService(command=["chronyc"])
+
     invalid_authdata = AUTHDATA_OUTPUT.replace("NTS", "NTP", 1)
 
     with patch(
@@ -158,28 +197,15 @@ def test_chrony_rejects_source_without_nts_mode():
     ):
         status = service.snapshot()
 
-    assert status.available is False
+    assert status.available is True
     assert status.synchronized is False
-    assert "NTS authentication is not active" in status.error
-
-
-def test_chrony_rejects_missing_authenticated_source():
-    service = ChronyStatusService(command=["chronyc"])
-    incomplete_authdata = "\n".join(AUTHDATA_OUTPUT.splitlines()[:-1])
-
-    with patch(
-        "backend.market_data.chrony.subprocess.run",
-        side_effect=run_with_outputs(authdata=incomplete_authdata),
-    ):
-        status = service.snapshot()
-
-    assert status.available is False
-    assert status.synchronized is False
-    assert "Expected exactly three" in status.error
+    assert status.nts_authenticated_sources == 2
+    assert status.quorum_met is False
 
 
 def test_chrony_rejects_source_without_cookies():
     service = ChronyStatusService(command=["chronyc"])
+
     invalid_authdata = AUTHDATA_OUTPUT.replace(
         "23m    0    0    8",
         "23m    0    0    0",
@@ -192,9 +218,10 @@ def test_chrony_rejects_source_without_cookies():
     ):
         status = service.snapshot()
 
-    assert status.available is False
+    assert status.available is True
     assert status.synchronized is False
-    assert "authentication health check failed" in status.error
+    assert status.nts_authenticated_sources == 2
+    assert status.quorum_met is False
 
 
 def test_chrony_reports_unavailable_when_command_fails():
@@ -240,6 +267,37 @@ def test_chrony_rejects_incomplete_tracking_output():
     assert status.available is False
     assert status.synchronized is False
     assert "missing required fields" in status.error
+
+
+def test_chrony_rejects_authdata_without_header():
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=""),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert "missing its expected header" in status.error
+
+
+def test_chrony_rejects_duplicate_authdata_sources():
+    service = ChronyStatusService(command=["chronyc"])
+
+    duplicate_authdata = AUTHDATA_OUTPUT + (
+        "time.cloudflare.com NTS 1 30 128 23m 0 0 8 64\n"
+    )
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=duplicate_authdata),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert "duplicate sources" in status.error
 
 
 def test_chrony_rejects_non_positive_timeout():
