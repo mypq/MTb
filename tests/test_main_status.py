@@ -1,4 +1,4 @@
-
+import asyncio
 from types import SimpleNamespace
 
 import backend.main as main
@@ -77,7 +77,7 @@ def test_system_status_includes_chrony_and_mt5_information(
     )
 
     endpoint = create_status_endpoint(monkeypatch, chrony_status)
-    result = endpoint()
+    result = asyncio.run(endpoint())
 
     assert result["application"] == "GOLD_BOT"
     assert result["mode"] == "ANALYSIS_ONLY"
@@ -122,7 +122,7 @@ def test_system_status_reports_unavailable_chrony(
     )
 
     endpoint = create_status_endpoint(monkeypatch, chrony_status)
-    result = endpoint()
+    result = asyncio.run(endpoint())
 
     assert result["time_sync"]["available"] is False
     assert result["time_sync"]["synchronized"] is False
