@@ -5,7 +5,6 @@ import pytest
 
 from backend.market_data.chrony import ChronyStatusService
 
-
 TRACKING_OUTPUT = """
 Reference ID    : A29FC87B (time.cloudflare.com)
 Stratum         : 4
