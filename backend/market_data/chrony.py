@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from typing import Sequence
 
 
+REQUIRED_NTS_SOURCES = 3
+
+
 @dataclass(frozen=True, slots=True)
 class ChronyStatus:
     """A read-only snapshot of Chrony's synchronization state."""
@@ -23,6 +26,9 @@ class ChronyStatus:
     last_offset_seconds: float | None = None
     root_dispersion_seconds: float | None = None
     selected_source: str | None = None
+    healthy_sources: int = 0
+    nts_authenticated_sources: int = 0
+    quorum_met: bool = False
     error: str | None = None
 
 
@@ -129,14 +135,126 @@ class ChronyStatusService:
         return float(match.group())
 
     @staticmethod
-    def _parse_selected_source(output: str) -> str | None:
+    def _parse_sources(output: str) -> tuple[str | None, int]:
+        selected_source: str | None = None
+        healthy_sources = 0
+
         for line in output.splitlines():
             fields = line.split()
 
-            if len(fields) >= 2 and fields[0] == "^*":
-                return fields[1]
+            if len(fields) < 6:
+                continue
 
-        return None
+            mode_state = fields[0]
+
+            if (
+                len(mode_state) != 2
+                or mode_state[0] != "^"
+                or mode_state[1] not in {"*", "+"}
+            ):
+                continue
+
+            source = fields[1]
+
+            try:
+                stratum = int(fields[2])
+                reach = int(fields[4], 8)
+            except ValueError as exc:
+                raise ChronyStatusError(
+                    "Chrony returned invalid source statistics."
+                ) from exc
+
+            if stratum <= 0 or reach <= 0:
+                continue
+
+            healthy_sources += 1
+
+            if mode_state[1] == "*":
+                if selected_source is not None:
+                    raise ChronyStatusError(
+                        "Chrony returned multiple selected sources."
+                    )
+                selected_source = source
+
+        return selected_source, healthy_sources
+
+    @staticmethod
+    def _parse_authdata(output: str) -> int:
+        authenticated_sources = 0
+        seen_sources: set[str] = set()
+        header_found = False
+
+        for line in output.splitlines():
+            fields = line.split()
+
+            if not fields:
+                continue
+
+            if fields[0] == "Name/IP":
+                header_found = True
+                continue
+
+            if fields[0].startswith("="):
+                continue
+
+            if not header_found or len(fields) != 10:
+                continue
+
+            (
+                source,
+                mode,
+                _key_id,
+                _auth_type,
+                _key_length,
+                _last_attempt,
+                attempts,
+                nak,
+                cookies,
+                _cookie_length,
+            ) = fields
+
+            source_key = source.casefold()
+
+            if source_key in seen_sources:
+                raise ChronyStatusError(
+                    "Chrony authdata contains duplicate sources."
+                )
+
+            seen_sources.add(source_key)
+
+            if mode != "NTS":
+                raise ChronyStatusError(
+                    f"NTS authentication is not active for source: {source}."
+                )
+
+            try:
+                attempts_count = int(attempts)
+                nak_count = int(nak)
+                cookie_count = int(cookies)
+            except ValueError as exc:
+                raise ChronyStatusError(
+                    "Chrony returned invalid NTS authentication statistics."
+                ) from exc
+
+            if attempts_count < 0 or nak_count != 0 or cookie_count <= 0:
+                raise ChronyStatusError(
+                    f"NTS authentication health check failed for source: {source}."
+                )
+
+            authenticated_sources += 1
+
+        if not header_found:
+            raise ChronyStatusError(
+                "Chrony authdata output is missing its expected header."
+            )
+
+        if authenticated_sources != REQUIRED_NTS_SOURCES:
+            raise ChronyStatusError(
+                "Expected exactly three authenticated NTS sources; "
+                f"found {authenticated_sources}."
+            )
+
+        return authenticated_sources
 
     def snapshot(self) -> ChronyStatus:
         """Return current Chrony status; failures are reported as unavailable."""
@@ -145,18 +263,29 @@ class ChronyStatusService:
                 self._run("-n", "tracking")
             )
 
-            sources = self._run("-n", "sources", "-v")
+            sources_output = self._run("-n", "sources", "-v")
+            authdata_output = self._run("authdata")
+
+            selected_source, healthy_sources = self._parse_sources(
+                sources_output
+            )
+            authenticated_sources = self._parse_authdata(authdata_output)
 
             reference_id = tracking["Reference ID"]
             stratum = int(tracking["Stratum"].split()[0])
             leap_status = tracking["Leap status"]
-            selected_source = self._parse_selected_source(sources)
+
+            quorum_met = (
+                healthy_sources >= REQUIRED_NTS_SOURCES
+                and authenticated_sources == REQUIRED_NTS_SOURCES
+            )
 
             synchronized = (
                 stratum > 0
                 and leap_status.lower() == "normal"
                 and reference_id not in {"00000000", "00000000 ()"}
                 and selected_source is not None
+                and quorum_met
             )
 
             return ChronyStatus(
@@ -172,6 +301,9 @@ class ChronyStatusService:
                     tracking["Root dispersion"]
                 ),
                 selected_source=selected_source,
+                healthy_sources=healthy_sources,
+                nts_authenticated_sources=authenticated_sources,
+                quorum_met=quorum_met,
             )
 
         except (ChronyStatusError, ValueError, IndexError) as exc:
