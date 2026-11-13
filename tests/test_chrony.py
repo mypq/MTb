@@ -23,10 +23,13 @@ MS Name/IP address         Stratum Poll Reach LastRx Last sample
 
 
 def successful_command(*args, **kwargs):
-    if "tracking" in args:
+    cmd = args[0] if args else []
+    cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+
+    if "tracking" in cmd_str:
         return CompletedProcess(args, 0, TRACKING_OUTPUT, "")
 
-    if "sources" in args:
+    if "sources" in cmd_str:
         return CompletedProcess(args, 0, SOURCES_OUTPUT, "")
 
     return CompletedProcess(args, 1, "", "Unexpected command")
@@ -55,7 +58,10 @@ def test_chrony_does_not_treat_candidate_as_selected_source():
     candidate_only = SOURCES_OUTPUT.replace("^*", "^ ")
 
     def command_without_selected(*args, **kwargs):
-        if "tracking" in args:
+        cmd = args[0] if args else []
+        cmd_str = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+
+        if "tracking" in cmd_str:
             return CompletedProcess(args, 0, TRACKING_OUTPUT, "")
 
         return CompletedProcess(args, 0, candidate_only, "")
