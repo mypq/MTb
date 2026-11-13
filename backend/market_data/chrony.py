@@ -7,9 +7,8 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Sequence
-
 from dataclasses import dataclass
+from typing import Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +133,7 @@ class ChronyStatusService:
         for line in output.splitlines():
             fields = line.split()
 
-            if len(fields) >= 2 and fields[0] in {"^*", "^+"}:
+            if len(fields) >= 2 and fields[0] == "^*":
                 return fields[1]
 
         return None
