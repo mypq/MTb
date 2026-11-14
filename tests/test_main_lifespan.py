@@ -1,3 +1,4 @@
+
 import asyncio
 from types import SimpleNamespace
 
@@ -70,6 +71,11 @@ class FakeDatabase:
 class FakeMarketDataService:
     def __init__(self, source):
         self.source = source
+
+
+class FakeMarketDataRepository:
+    def __init__(self, database):
+        self.database = database
 
 
 class FakeChronyStatusService:
@@ -149,6 +155,11 @@ def configure_lifecycle(
     )
     monkeypatch.setattr(
         main,
+        "MarketDataRepository",
+        FakeMarketDataRepository,
+    )
+    monkeypatch.setattr(
+        main,
         "ChronyStatusService",
         FakeChronyStatusService,
     )
@@ -175,6 +186,11 @@ def test_lifespan_starts_monitor_and_stops_it_before_adapter_shutdown(
             ]
             assert app.state.chrony_status_service is not None
             assert app.state.database is not None
+            assert app.state.market_data_repository is not None
+            assert (
+                app.state.market_data_repository.database
+                is app.state.database
+            )
 
     asyncio.run(run())
 
@@ -211,6 +227,11 @@ def test_lifespan_does_not_start_monitor_when_mt5_is_disabled(
                 "database.migrations",
             ]
             assert app.state.chrony_status_service is not None
+            assert app.state.market_data_repository is not None
+            assert (
+                app.state.market_data_repository.database
+                is app.state.database
+            )
 
     asyncio.run(run())
 
