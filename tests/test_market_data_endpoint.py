@@ -197,3 +197,51 @@ def test_mt5_unavailable_returns_http_503(monkeypatch):
         "Market data is currently unavailable."
     )
     assert repository.saved == []
+def test_missing_symbol_uses_configured_default(monkeypatch):
+    snapshot = FakeSnapshot(eligible=True)
+
+    endpoint, service, repository = create_endpoint(
+        monkeypatch,
+        snapshot=snapshot,
+    )
+
+    result = endpoint(
+        timeframe="M5",
+        count=100,
+    )
+
+    assert result == {"analysis_eligible": True}
+    assert service.calls == [
+        {
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "count": 100,
+        }
+    ]
+    assert repository.saved == [snapshot]
+
+
+def test_symbol_whitespace_is_removed_before_service_call(
+    monkeypatch,
+):
+    snapshot = FakeSnapshot(eligible=True)
+
+    endpoint, service, repository = create_endpoint(
+        monkeypatch,
+        snapshot=snapshot,
+    )
+
+    endpoint(
+        symbol="  XAUUSD  ",
+        timeframe="M5",
+        count=100,
+    )
+
+    assert service.calls == [
+        {
+            "symbol": "XAUUSD",
+            "timeframe": "M5",
+            "count": 100,
+        }
+    ]
+    assert repository.saved == [snapshot]
