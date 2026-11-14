@@ -1,4 +1,3 @@
-
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
@@ -106,7 +105,8 @@ def test_chrony_preserves_healthy_sources_when_authdata_is_empty():
     assert status.nts_authenticated_sources == 0
     assert status.quorum_met is False
     assert status.error is not None
-    assert "0 of 3" in status.error
+    assert "0 authenticated NTS sources" in status.error
+    assert "required exactly 3" in status.error
 
 
 def test_chrony_does_not_synchronize_with_only_two_nts_sources():
