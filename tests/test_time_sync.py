@@ -401,6 +401,8 @@ def test_reset_clears_samples_and_status():
     assert snapshot.status == TimeSyncStatus.UNSYNCHRONIZED
     assert snapshot.sample_count == 0
     assert snapshot.offset_ms is None
+
+
 @pytest.mark.parametrize(
     "setting,value",
     [
@@ -463,10 +465,9 @@ def test_expired_samples_are_removed_from_snapshot_count():
         max_sample_age_seconds=1,
     )
 
-    add_sample(service, clock)
-    add_sample(service, clock)
+    add_three_samples(service, clock)
 
-    clock.advance(800)
+    clock.advance(1100)
 
     add_sample(service, clock)
 
