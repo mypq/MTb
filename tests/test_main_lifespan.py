@@ -144,6 +144,19 @@ def configure_lifecycle(
     migration_error=None,
 ):
     events = []
+    collectors = []
+
+    def create_collector(service, repository, *, symbol, timeframe, count):
+        collector = FakeMarketDataCollector(
+            service,
+            repository,
+            symbol=symbol,
+            timeframe=timeframe,
+            count=count,
+        )
+        collector.events = events
+        collectors.append(collector)
+        return collector
 
     settings = SimpleNamespace(
         MT5_ENABLED=mt5_enabled,
@@ -216,7 +229,7 @@ def configure_lifecycle(
     monkeypatch.setattr(
         main,
         "MarketDataCollector",
-        FakeMarketDataCollector,
+        create_collector,
     )
     monkeypatch.setattr(
         main,
