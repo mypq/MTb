@@ -56,7 +56,8 @@ class MarketSessionCalendar:
             raise MarketSessionCalendarError("symbol must be non-empty.")
 
         if (
-            self.generated_at_utc.tzinfo is None
+            not isinstance(self.generated_at_utc, datetime)
+            or self.generated_at_utc.tzinfo is None
             or self.generated_at_utc.utcoffset() != timedelta(0)
         ):
             raise MarketSessionCalendarError(
@@ -73,7 +74,10 @@ class MarketSessionCalendar:
                 "Broker UTC offset is outside the supported range."
             )
 
-        if len(self.trade_sessions) != 7:
+        if (
+            not isinstance(self.trade_sessions, tuple)
+            or len(self.trade_sessions) != 7
+        ):
             raise MarketSessionCalendarError(
                 "Exactly seven weekday session lists are required."
             )
@@ -82,6 +86,15 @@ class MarketSessionCalendar:
             raise MarketSessionCalendarError(
                 "The weekly schedule contains no trading sessions."
             )
+
+        for sessions in self.trade_sessions:
+            if not isinstance(sessions, tuple) or any(
+                not isinstance(session, TradingSession)
+                for session in sessions
+            ):
+                raise MarketSessionCalendarError(
+                    "Every weekday must contain valid trading sessions."
+                )
 
     @classmethod
     def from_json(cls, content: str) -> "MarketSessionCalendar":
@@ -114,19 +127,25 @@ class MarketSessionCalendar:
                 "Session JSON has missing or unexpected root fields."
             )
 
-        if data["schema_version"] != 1 or isinstance(
-            data["schema_version"], bool
-        ):
+        version = data["schema_version"]
+        if isinstance(version, bool) or version != 1:
             raise MarketSessionCalendarError(
                 "Unsupported session schema version."
             )
+
         if data["status"] != "ok":
             raise MarketSessionCalendarError(
                 "Broker session export status is not ok."
             )
+
         if data["schedule_kind"] != "weekly_recurring":
             raise MarketSessionCalendarError(
                 "Unsupported broker session schedule kind."
+            )
+
+        if not isinstance(data["symbol"], str) or not data["symbol"].strip():
+            raise MarketSessionCalendarError(
+                "symbol must be a non-empty string."
             )
 
         epoch = data["generated_at_utc_epoch"]
@@ -136,6 +155,7 @@ class MarketSessionCalendar:
             raise MarketSessionCalendarError(
                 "generated_at_utc_epoch must be a positive integer."
             )
+
         if isinstance(offset, bool) or not isinstance(offset, int):
             raise MarketSessionCalendarError(
                 "server_utc_offset_seconds must be an integer."
@@ -162,6 +182,7 @@ class MarketSessionCalendar:
                 raise MarketSessionCalendarError(
                     "day_of_week must be an integer."
                 )
+
             if not 0 <= day <= 6 or day in by_day:
                 raise MarketSessionCalendarError(
                     "Weekday values must be unique integers from 0 to 6."
@@ -235,7 +256,8 @@ class MarketSessionCalendar:
 
     def is_trading_time(self, timestamp_utc: datetime) -> bool:
         if (
-            timestamp_utc.tzinfo is None
+            not isinstance(timestamp_utc, datetime)
+            or timestamp_utc.tzinfo is None
             or timestamp_utc.utcoffset() != timedelta(0)
         ):
             raise ValueError("timestamp_utc must be UTC-aware.")
@@ -272,17 +294,65 @@ class MarketSessionCalendar:
 
         return False
 
+    def _interval_overlaps_trading_session(
+        self,
+        interval_start_utc: datetime,
+        interval_end_utc: datetime,
+    ) -> bool:
+        """Check exact overlap with weekly sessions using the broker offset."""
+
+        offset = timedelta(seconds=self.server_utc_offset_seconds)
+
+        start = (
+            interval_start_utc + offset
+        ).replace(tzinfo=None)
+
+        end = (
+            interval_end_utc + offset
+        ).replace(tzinfo=None)
+
+        day = start.date() - timedelta(days=1)
+        last_day = end.date()
+
+        while day <= last_day:
+            weekday = (day.weekday() + 1) % 7
+
+            for session in self.trade_sessions[weekday]:
+                session_start = datetime.combine(
+                    day,
+                    datetime.min.time(),
+                ) + timedelta(seconds=session.from_seconds)
+
+                session_end = datetime.combine(
+                    day,
+                    datetime.min.time(),
+                ) + timedelta(seconds=session.to_seconds)
+
+                if session.from_seconds > session.to_seconds:
+                    session_end += timedelta(days=1)
+
+                if (
+                    session_start < end
+                    and session_end > start
+                ):
+                    return True
+
+            day += timedelta(days=1)
+
+        return False
+
     def gap_is_confirmed_closed(
         self,
         previous_candle_utc: datetime,
         next_candle_utc: datetime,
         timeframe_seconds: int,
     ) -> bool:
-        """True only when every missing candle open is outside trade sessions."""
+        """True only if every missing candle interval is outside trading."""
 
         for value in (previous_candle_utc, next_candle_utc):
             if (
-                value.tzinfo is None
+                not isinstance(value, datetime)
+                or value.tzinfo is None
                 or value.utcoffset() != timedelta(0)
             ):
                 raise ValueError("Candle timestamps must be UTC-aware.")
@@ -306,7 +376,15 @@ class MarketSessionCalendar:
         )
 
         while cursor < next_candle_utc:
-            if self.is_trading_time(cursor):
+            interval_end = min(
+                cursor + timedelta(seconds=timeframe_seconds),
+                next_candle_utc,
+            )
+
+            if self._interval_overlaps_trading_session(
+                cursor,
+                interval_end,
+            ):
                 return False
 
             cursor += timedelta(seconds=timeframe_seconds)
