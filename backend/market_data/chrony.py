@@ -1,10 +1,10 @@
+
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
 
 import math
 import os
-import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -12,6 +12,12 @@ from typing import Sequence
 
 
 REQUIRED_NTS_SOURCES = 3
+
+REQUIRED_NTS_SOURCE_NAMES = frozenset({
+    "time.cloudflare.com",
+    "gbg1-ts.nts.netnod.se",
+    "ntppool1.time.nl",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,8 +298,8 @@ class ChronyStatusService:
     def _parse_authdata(output: str) -> int:
         """Count healthy NTS authentication records.
 
-        An empty table is a valid query result, but it provides zero
-        authenticated sources and therefore cannot satisfy the quorum.
+        Only the three explicitly approved NTS sources are accepted.
+        An empty table provides zero authenticated sources.
         """
         authenticated_sources = 0
         seen_sources: set[str] = set()
@@ -344,6 +350,11 @@ class ChronyStatusService:
 
             if mode != "NTS":
                 continue
+
+            if source_key not in REQUIRED_NTS_SOURCE_NAMES:
+                raise ChronyStatusError(
+                    f"Unexpected NTS source: {source}."
+                )
 
             try:
                 attempts_count = int(attempts)
@@ -410,7 +421,7 @@ class ChronyStatusService:
                 )
 
             quorum_met = (
-                healthy_sources >= REQUIRED_NTS_SOURCES
+                healthy_sources == REQUIRED_NTS_SOURCES
                 and authenticated_sources == REQUIRED_NTS_SOURCES
             )
 
@@ -440,7 +451,7 @@ class ChronyStatusService:
                     else (
                         "NTS quorum not met: "
                         f"{healthy_sources} healthy Chrony sources "
-                        f"(minimum {REQUIRED_NTS_SOURCES}); "
+                        f"(required exactly {REQUIRED_NTS_SOURCES}); "
                         f"{authenticated_sources} authenticated NTS sources "
                         f"(required exactly {REQUIRED_NTS_SOURCES})."
                     )
