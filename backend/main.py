@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -89,7 +88,12 @@ async def lifespan(app: FastAPI):
     if sessions_file:
         try:
             session_calendar = MarketSessionCalendar.load(
-                sessions_file
+                sessions_file,
+                max_age_seconds=getattr(
+                    settings,
+                    "MT5_SESSIONS_MAX_AGE_SECONDS",
+                    604800,
+                ),
             )
         except MarketSessionCalendarError:
             logger.exception(
