@@ -1,169 +1,304 @@
 
-from __future__ import annotations
-
-from contextlib import contextmanager
 from pathlib import Path
-from threading import Condition, RLock
-from typing import Iterator
+from threading import Event, Thread
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine, make_url
-from sqlalchemy.orm import Session, sessionmaker
+import pytest
+from sqlalchemy import text
 
-
-class DatabaseError(RuntimeError):
-    """Raised when database initialization or access fails."""
+from backend.database import Database, DatabaseError
 
 
-class Database:
-    """Owns the SQLAlchemy engine, sessions, and exclusive maintenance."""
+def test_database_requires_non_empty_url():
+    with pytest.raises(DatabaseError):
+        Database("")
 
-    def __init__(self, database_url: str) -> None:
-        if not isinstance(database_url, str) or not database_url.strip():
-            raise DatabaseError("DATABASE_URL must be a non-empty string.")
+    with pytest.raises(DatabaseError):
+        Database("   ")
 
-        self._database_url = database_url.strip()
-        self._engine: Engine | None = None
-        self._session_factory: sessionmaker[Session] | None = None
 
-        self._condition = Condition(RLock())
-        self._active_sessions = 0
-        self._maintenance_active = False
+def test_database_must_be_initialized_before_access():
+    database = Database("sqlite:///:memory:")
 
-    @property
-    def engine(self) -> Engine:
-        with self._condition:
-            if self._engine is None:
-                raise DatabaseError("Database has not been initialized.")
-            return self._engine
+    with pytest.raises(DatabaseError):
+        _ = database.engine
 
-    def initialize(self) -> None:
-        with self._condition:
-            if self._engine is not None:
-                return
+    with pytest.raises(DatabaseError):
+        with database.session():
+            pass
 
-            try:
-                url = make_url(self._database_url)
-                self._prepare_sqlite_directory(url)
 
-                connect_args: dict[str, object] = {}
+def test_initialize_creates_sqlite_directory(tmp_path: Path):
+    database_path = tmp_path / "storage" / "gold_bot.db"
+    database = Database(f"sqlite:///{database_path.as_posix()}")
 
-                if url.get_backend_name() == "sqlite":
-                    connect_args["check_same_thread"] = False
+    try:
+        database.initialize()
 
-                engine = create_engine(
-                    url,
-                    connect_args=connect_args,
-                    pool_pre_ping=True,
+        assert database_path.parent.is_dir()
+
+        with database.session() as session:
+            result = session.execute(text("SELECT 1")).scalar_one()
+
+        assert result == 1
+        assert database_path.is_file()
+    finally:
+        database.dispose()
+
+
+def test_session_commits_successful_transaction(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'commit.db').as_posix()}"
+    )
+
+    try:
+        database.initialize()
+
+        with database.session() as session:
+            session.execute(
+                text("CREATE TABLE records (value INTEGER NOT NULL)")
+            )
+            session.execute(
+                text("INSERT INTO records (value) VALUES (42)")
+            )
+
+        with database.session() as session:
+            value = session.execute(
+                text("SELECT value FROM records")
+            ).scalar_one()
+
+        assert value == 42
+    finally:
+        database.dispose()
+
+
+def test_session_rolls_back_failed_transaction(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'rollback.db').as_posix()}"
+    )
+
+    try:
+        database.initialize()
+
+        with database.session() as session:
+            session.execute(
+                text("CREATE TABLE records (value INTEGER NOT NULL)")
+            )
+
+        with pytest.raises(RuntimeError, match="force rollback"):
+            with database.session() as session:
+                session.execute(
+                    text("INSERT INTO records (value) VALUES (99)")
                 )
+                raise RuntimeError("force rollback")
 
-                factory = sessionmaker(
-                    bind=engine,
-                    autoflush=False,
-                    expire_on_commit=False,
-                )
+        with database.session() as session:
+            count = session.execute(
+                text("SELECT COUNT(*) FROM records")
+            ).scalar_one()
 
-                self._engine = engine
-                self._session_factory = factory
+        assert count == 0
+    finally:
+        database.dispose()
 
-            except Exception as exc:
-                raise DatabaseError(
-                    "Failed to initialize the database."
-                ) from exc
 
-    @staticmethod
-    def _prepare_sqlite_directory(url) -> None:
-        if url.get_backend_name() != "sqlite":
-            return
+def test_dispose_releases_database_engine():
+    database = Database("sqlite:///:memory:")
+    database.initialize()
 
-        database_name = url.database
+    database.dispose()
 
-        if not database_name or database_name == ":memory:":
-            return
+    with pytest.raises(DatabaseError):
+        _ = database.engine
 
-        database_path = Path(database_name).expanduser()
-        parent = database_path.parent
 
-        if str(parent) not in ("", "."):
-            parent.mkdir(parents=True, exist_ok=True)
+def test_dispose_is_safe_when_not_initialized():
+    database = Database("sqlite:///:memory:")
 
-    @contextmanager
-    def session(self) -> Iterator[Session]:
-        with self._condition:
-            while self._maintenance_active:
-                self._condition.wait()
+    database.dispose()
+    database.dispose()
 
-            if self._session_factory is None:
-                raise DatabaseError(
-                    "Database has not been initialized."
-                )
 
-            factory = self._session_factory
-            self._active_sessions += 1
+def test_maintenance_waits_for_active_sessions(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'maintenance.db').as_posix()}"
+    )
+    database.initialize()
 
-        db_session = None
+    session_entered = Event()
+    release_session = Event()
+    maintenance_attempted = Event()
+    maintenance_entered = Event()
+    errors = []
 
+    def hold_session():
         try:
-            db_session = factory()
+            with database.session():
+                session_entered.set()
+                if not release_session.wait(timeout=10):
+                    raise RuntimeError("Session release timed out")
+        except Exception as exc:
+            errors.append(exc)
 
-            try:
-                yield db_session
-                db_session.commit()
-            except Exception:
-                db_session.rollback()
-                raise
-
-        finally:
-            try:
-                if db_session is not None:
-                    db_session.close()
-            finally:
-                with self._condition:
-                    self._active_sessions -= 1
-                    self._condition.notify_all()
-
-    @contextmanager
-    def maintenance(self) -> Iterator[None]:
-        """Block new sessions and wait for active sessions to finish."""
-
-        with self._condition:
-            while self._maintenance_active:
-                self._condition.wait()
-
-            self._maintenance_active = True
-
-            try:
-                while self._active_sessions > 0:
-                    self._condition.wait()
-            except BaseException:
-                self._maintenance_active = False
-                self._condition.notify_all()
-                raise
-
+    def enter_maintenance():
+        maintenance_attempted.set()
         try:
-            yield
-        finally:
-            with self._condition:
-                self._maintenance_active = False
-                self._condition.notify_all()
+            with database.maintenance():
+                maintenance_entered.set()
+        except Exception as exc:
+            errors.append(exc)
 
-    def dispose(self) -> None:
-        with self._condition:
-            if self._maintenance_active:
-                raise DatabaseError(
-                    "Cannot dispose database during active maintenance."
-                )
+    session_thread = Thread(target=hold_session)
+    maintenance_thread = Thread(target=enter_maintenance)
 
-            if self._engine is None:
-                return
+    try:
+        session_thread.start()
+        assert session_entered.wait(timeout=5)
 
-            if self._active_sessions > 0:
-                raise DatabaseError(
-                    "Cannot dispose database while sessions are active."
-                )
+        maintenance_thread.start()
+        assert maintenance_attempted.wait(timeout=5)
 
-            engine = self._engine
-            self._engine = None
-            self._session_factory = None
+        assert not maintenance_entered.wait(timeout=0.2)
 
-        engine.dispose()
+        release_session.set()
+
+        assert maintenance_entered.wait(timeout=5)
+
+        session_thread.join(timeout=5)
+        maintenance_thread.join(timeout=5)
+
+        assert not session_thread.is_alive()
+        assert not maintenance_thread.is_alive()
+        assert errors == []
+    finally:
+        release_session.set()
+        session_thread.join(timeout=5)
+        if maintenance_thread.ident is not None:
+            maintenance_thread.join(timeout=5)
+        database.dispose()
+
+
+def test_new_sessions_wait_during_maintenance(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'blocked-sessions.db').as_posix()}"
+    )
+    database.initialize()
+
+    session_attempted = Event()
+    session_entered = Event()
+    errors = []
+
+    def open_session():
+        session_attempted.set()
+        try:
+            with database.session():
+                session_entered.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    session_thread = None
+
+    try:
+        with database.maintenance():
+            session_thread = Thread(target=open_session)
+            session_thread.start()
+
+            assert session_attempted.wait(timeout=5)
+            assert not session_entered.wait(timeout=0.2)
+
+        assert session_entered.wait(timeout=5)
+
+        session_thread.join(timeout=5)
+
+        assert not session_thread.is_alive()
+        assert errors == []
+    finally:
+        if session_thread is not None:
+            session_thread.join(timeout=5)
+        database.dispose()
+
+
+def test_maintenance_releases_after_exception(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'maintenance-error.db').as_posix()}"
+    )
+    database.initialize()
+
+    try:
+        with pytest.raises(RuntimeError, match="forced maintenance failure"):
+            with database.maintenance():
+                raise RuntimeError("forced maintenance failure")
+
+        with database.session() as session:
+            result = session.execute(text("SELECT 1")).scalar_one()
+
+        assert result == 1
+    finally:
+        database.dispose()
+
+
+def test_dispose_rejects_active_sessions(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'active-session.db').as_posix()}"
+    )
+    database.initialize()
+
+    session_entered = Event()
+    release_session = Event()
+    errors = []
+
+    def hold_session():
+        try:
+            with database.session():
+                session_entered.set()
+                if not release_session.wait(timeout=10):
+                    raise RuntimeError("Session release timed out")
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = Thread(target=hold_session)
+
+    try:
+        thread.start()
+        assert session_entered.wait(timeout=5)
+
+        with pytest.raises(DatabaseError, match="sessions are active"):
+            database.dispose()
+
+        release_session.set()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert errors == []
+
+        database.dispose()
+
+        with pytest.raises(DatabaseError):
+            _ = database.engine
+    finally:
+        release_session.set()
+        thread.join(timeout=5)
+        database.dispose()
+
+
+def test_dispose_rejects_active_maintenance(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'active-maintenance.db').as_posix()}"
+    )
+    database.initialize()
+
+    try:
+        with database.maintenance():
+            with pytest.raises(
+                DatabaseError,
+                match="active maintenance",
+            ):
+                database.dispose()
+
+            assert database.engine is not None
+
+        with database.session() as session:
+            result = session.execute(text("SELECT 1")).scalar_one()
+
+        assert result == 1
+    finally:
+        database.dispose()
