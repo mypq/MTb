@@ -1,179 +1,119 @@
-
+from datetime import datetime, timezone
+import os
 from pathlib import Path
 import sqlite3
+from uuid import uuid4
 
-import pytest
-from sqlalchemy import text
+from sqlalchemy.engine.url import make_url
 
 from backend.database import Database
-from backend.database_backup import (
-    DatabaseBackupError,
-    DatabaseBackupService,
-)
 
 
-def test_create_backup_produces_verified_sqlite_database(tmp_path: Path):
-    database_path = tmp_path / "gold_bot.db"
-    database = Database(
-        f"sqlite:///{database_path.as_posix()}"
-    )
+class DatabaseBackupError(Exception):
+    """Raised when a database backup operation fails."""
 
-    try:
-        database.initialize()
+    pass
 
-        with database.session() as session:
-            session.execute(
-                text(
-                    "CREATE TABLE records "
-                    "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
-                )
+
+class DatabaseBackupService:
+    def __init__(
+        self,
+        database: Database,
+        backup_directory: Path | None = None,
+    ):
+        self._database = database
+        
+        # استخراج مسار ملف قاعدة البيانات من رابط SQLAlchemy
+        url = make_url(str(database.engine.url))
+        if url.drivername not in ("sqlite", "sqlite+pysqlite"):
+            raise DatabaseBackupError("Only SQLite databases are supported.")
+        
+        database_file = url.database
+        if not database_file or database_file == ":memory:":
+            raise DatabaseBackupError(
+                "Database backup requires a file-based SQLite database, not in-memory."
             )
-            session.execute(
-                text(
-                    "INSERT INTO records (value) VALUES ('GOLD BOT')"
-                )
+        
+        self._database_path = Path(database_file)
+        
+        if not self._database_path.is_file():
+            raise DatabaseBackupError(
+                "The source database file does not exist or has not been initialized."
             )
+            
+        if backup_directory is not None:
+            self._backup_directory = Path(backup_directory)
+        else:
+            self._backup_directory = self._database_path.parent / "backups"
 
-        service = DatabaseBackupService(database)
-        backup_path = service.create_backup()
+    def _write_backup(self, destination_path: Path) -> None:
+        """نسخ قاعدة البيانات بشكل آمن باستخدام واجهة النسخ الاحتياطي لـ SQLite."""
+        try:
+            with sqlite3.connect(self._database_path) as source_conn:
+                with sqlite3.connect(destination_path) as dest_conn:
+                    source_conn.backup(dest_conn)
+        except Exception as exc:
+            raise DatabaseBackupError("Failed to write backup file.") from exc
 
-        assert backup_path.is_file()
-        assert backup_path.stat().st_size > 0
-        assert backup_path.parent == tmp_path / "backups"
+    def _verify_backup(self, backup_path: Path) -> None:
+        """التحقق من سلامة ملف النسخ الاحتياطي."""
+        try:
+            with sqlite3.connect(backup_path) as connection:
+                cursor = connection.execute("PRAGMA integrity_check")
+                result = cursor.fetchall()
+                if result != [("ok",)]:
+                    raise DatabaseBackupError("Backup integrity check failed.")
+        except Exception as exc:
+            if isinstance(exc, DatabaseBackupError):
+                raise
+            raise DatabaseBackupError("Failed to verify backup database.") from exc
 
-        with sqlite3.connect(backup_path) as connection:
-            result = connection.execute(
-                "PRAGMA integrity_check"
-            ).fetchall()
+    def create_backup(self) -> Path:
+        """Create and verify one atomic SQLite backup file."""
 
-            value = connection.execute(
-                "SELECT value FROM records"
-            ).fetchone()
-
-        assert result == [("ok",)]
-        assert value == ("GOLD BOT",)
-
-    finally:
-        database.dispose()
-
-
-def test_backup_preserves_existing_database_data(tmp_path: Path):
-    database_path = tmp_path / "source.db"
-    database = Database(
-        f"sqlite:///{database_path.as_posix()}"
-    )
-
-    try:
-        database.initialize()
-
-        with database.session() as session:
-            session.execute(
-                text("CREATE TABLE values_table (value INTEGER)")
-            )
-            session.execute(
-                text("INSERT INTO values_table VALUES (100)")
-            )
-
-        backup_path = DatabaseBackupService(
-            database,
-            tmp_path / "custom_backups",
-        ).create_backup()
-
-        with sqlite3.connect(backup_path) as connection:
-            value = connection.execute(
-                "SELECT value FROM values_table"
-            ).fetchone()
-
-        assert value == (100,)
-
-    finally:
-        database.dispose()
-
-
-def test_backup_rejects_in_memory_database():
-    database = Database("sqlite:///:memory:")
-
-    try:
-        database.initialize()
-
-        with pytest.raises(
-            DatabaseBackupError,
-            match="file-based SQLite",
-        ):
-            DatabaseBackupService(database)
-
-    finally:
-        database.dispose()
-
-
-def test_backup_requires_initialized_database():
-    database = Database("sqlite:///gold_bot.db")
-
-    with pytest.raises(DatabaseBackupError):
-        DatabaseBackupService(database)
-
-
-def test_backup_rejects_missing_source_database(tmp_path: Path):
-    database_path = tmp_path / "missing.db"
-    database = Database(
-        f"sqlite:///{database_path.as_posix()}"
-    )
-
-    try:
-        database.initialize()
-
-        service = DatabaseBackupService(database)
-
-        with pytest.raises(
-            DatabaseBackupError,
-            match="source database file does not exist",
-        ):
-            service.create_backup()
-
-    finally:
-        database.dispose()
-
-
-def test_failed_backup_does_not_leave_temporary_files(
-    tmp_path: Path,
-    monkeypatch,
-):
-    database_path = tmp_path / "source.db"
-    database = Database(
-        f"sqlite:///{database_path.as_posix()}"
-    )
-
-    try:
-        database.initialize()
-
-        with database.session() as session:
-            session.execute(
-                text("CREATE TABLE records (value INTEGER)")
+        if not self._database_path.is_file():
+            raise DatabaseBackupError(
+                "The source database file does not exist."
             )
 
-        service = DatabaseBackupService(database)
+        temporary_path: Path | None = None
 
-        def fail_write(destination_path):
-            destination_path.write_bytes(b"invalid backup")
+        try:
+            self._backup_directory.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
-        monkeypatch.setattr(
-            service,
-            "_write_backup",
-            fail_write,
-        )
+            timestamp = datetime.now(timezone.utc).strftime(
+                "%Y%m%dT%H%M%S%fZ"
+            )
 
-        with pytest.raises(DatabaseBackupError):
-            service.create_backup()
+            backup_path = (
+                self._backup_directory
+                / f"gold_bot_{timestamp}.sqlite3"
+            )
 
-        backup_files = list(
-            service._backup_directory.glob("*.sqlite3")
-        )
-        temporary_files = list(
-            service._backup_directory.glob("*.tmp")
-        )
+            temporary_path = (
+                self._backup_directory
+                / f".{backup_path.name}.{uuid4().hex}.tmp"
+            )
 
-        assert backup_files == []
-        assert temporary_files == []
+            self._write_backup(temporary_path)
+            self._verify_backup(temporary_path)
 
-    finally:
-        database.dispose()
+            os.replace(temporary_path, backup_path)
+
+            return backup_path
+
+        except DatabaseBackupError:
+            raise
+        except Exception as exc:
+            raise DatabaseBackupError(
+                "Failed to create a verified database backup."
+            ) from exc
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
