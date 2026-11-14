@@ -137,6 +137,7 @@ def configure_lifecycle(
     monkeypatch,
     *,
     mt5_enabled,
+    mt5_symbol="XAUUSD",
     connect_error=None,
     monitor_stop_result=True,
     monitor_stop_error=None,
@@ -160,7 +161,7 @@ def configure_lifecycle(
 
     settings = SimpleNamespace(
         MT5_ENABLED=mt5_enabled,
-        MT5_SYMBOL="XAUUSD",
+        MT5_SYMBOL=mt5_symbol,
         DEFAULT_TIMEFRAME="M5",
         DATABASE_URL="sqlite:///./data/test.db",
     )
@@ -304,6 +305,7 @@ def test_lifespan_starts_backup_when_mt5_is_disabled(monkeypatch):
             ]
 
             assert app.state.database_backup_service is not None
+            assert app.state.market_data_collector is None
 
     asyncio.run(run())
 
@@ -311,6 +313,35 @@ def test_lifespan_starts_backup_when_mt5_is_disabled(monkeypatch):
         "database.initialize",
         "database.migrations",
         "backup_service.initialize",
+        "backup.start",
+        "backup.stop",
+        "monitor.stop",
+        "adapter.shutdown",
+        "database.dispose",
+    ]
+
+
+def test_lifespan_skips_collector_when_mt5_symbol_is_empty(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        mt5_symbol="   ",
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            assert app.state.market_data_collector is None
+
+    asyncio.run(run())
+
+    assert events == [
+        "database.initialize",
+        "database.migrations",
+        "backup_service.initialize",
+        "adapter.connect",
+        "monitor.start",
         "backup.start",
         "backup.stop",
         "monitor.stop",
