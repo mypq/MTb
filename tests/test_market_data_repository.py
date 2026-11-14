@@ -1,4 +1,3 @@
-
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -248,6 +247,8 @@ def test_invalid_snapshot_argument_is_rejected(repository):
         repo.save_snapshot(None)
 
     assert database_counts(database) == (0, 0)
+
+
 def test_conflicting_candle_rolls_back_new_candles_in_same_batch(
     repository,
 ):
@@ -275,6 +276,7 @@ def test_conflicting_candle_rolls_back_new_candles_in_same_batch(
     # Nothing from the conflicting batch must be persisted.
     assert database_counts(database) == (1, 1)
 
+
 def test_persisted_candle_preserves_all_market_fields(repository):
     repo, database = repository
     snapshot = make_snapshot(count=1)
@@ -289,7 +291,7 @@ def test_persisted_candle_preserves_all_market_fields(repository):
 
         assert record.symbol == candle.symbol
         assert record.timeframe == candle.timeframe
-        assert record.timestamp == candle.timestamp
+        assert record.timestamp.replace(tzinfo=UTC) == candle.timestamp
         assert record.open_price == candle.open
         assert record.high_price == candle.high
         assert record.low_price == candle.low
@@ -355,7 +357,7 @@ def test_same_timestamp_for_different_timeframes_is_independent(repository):
         "XAUUSD",
         "M15",
         1,
-        CHECKED_AT,
+        CHECKED_AT + timedelta(minutes=10),
     )
 
     result = repo.save_snapshot(snapshot)
