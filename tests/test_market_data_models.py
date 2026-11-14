@@ -304,3 +304,32 @@ def test_boolean_real_volume_is_rejected():
             volume_source=VolumeSource.REAL,
             real_volume=True,
         )
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        1,
+        "true",
+        "false",
+        "yes",
+        None,
+    ],
+)
+def test_invalid_is_closed_values_are_rejected(value):
+    values = {
+        "symbol": "XAUUSD",
+        "timeframe": "M5",
+        "timestamp": NOW - timedelta(minutes=5),
+        "open": 2000.0,
+        "high": 2005.0,
+        "low": 1995.0,
+        "close": 2002.0,
+        "tick_volume": 100,
+        "real_volume": None,
+        "volume_source": VolumeSource.TICK,
+        "quality": CandleQuality.VERIFIED,
+        "is_closed": value,
+    }
+
+    with pytest.raises(ValidationError):
+        MarketCandle(**values)
