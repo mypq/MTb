@@ -438,3 +438,92 @@ def test_any_existing_candle_field_conflict_is_rejected(
         repo.save_snapshot(make_snapshot(count=1))
 
     assert database_counts(database) == (1, 1)
+
+def test_get_history_returns_latest_candles_in_ascending_order(repository):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=5))
+
+    candles = repo.get_history("XAUUSD", "M5", 3)
+
+    assert len(candles) == 3
+    assert [c.timestamp for c in candles] == sorted(
+        c.timestamp for c in candles
+    )
+
+    expected = make_snapshot(count=5).batch.candles[-3:]
+    assert [c.timestamp for c in candles] == [
+        c.timestamp for c in expected
+    ]
+
+
+def test_get_history_returns_all_candles_when_count_is_large(repository):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=3))
+
+    candles = repo.get_history("XAUUSD", "M5", 100)
+
+    assert len(candles) == 3
+
+
+def test_get_history_returns_empty_tuple_when_no_data_exists(repository):
+    repo, database = repository
+
+    assert repo.get_history("XAUUSD", "M5", 10) == ()
+
+
+def test_get_history_filters_by_symbol_and_timeframe(repository):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=2))
+
+    assert repo.get_history("EURUSD", "M5", 10) == ()
+    assert repo.get_history("XAUUSD", "M15", 10) == ()
+
+
+@pytest.mark.parametrize(
+    ("symbol", "timeframe", "count", "error"),
+    [
+        ("", "M5", 10, ValueError),
+        ("   ", "M5", 10, ValueError),
+        ("XAUUSD", "", 10, ValueError),
+        ("XAUUSD", "   ", 10, ValueError),
+        ("XAUUSD", "M5", True, TypeError),
+        ("XAUUSD", "M5", False, TypeError),
+        ("XAUUSD", "M5", 0, ValueError),
+        ("XAUUSD", "M5", -1, ValueError),
+        ("XAUUSD", "M5", 10001, ValueError),
+        ("XAUUSD", "M5", 1.5, TypeError),
+    ],
+)
+def test_get_history_rejects_invalid_arguments(
+    repository,
+    symbol,
+    timeframe,
+    count,
+    error,
+):
+    repo, database = repository
+
+    with pytest.raises(error):
+        repo.get_history(symbol, timeframe, count)
+
+
+def test_get_history_normalizes_symbol_and_timeframe(repository):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=2))
+
+    candles = repo.get_history(" XAUUSD ", " m5 ", 2)
+
+    assert len(candles) == 2
+    assert all(c.symbol == "XAUUSD" for c in candles)
+    assert all(c.timeframe == "M5" for c in candles)
+
+
+def test_get_history_returns_utc_aware_timestamps(repository):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=2))
+
+    candles = repo.get_history("XAUUSD", "M5", 2)
+
+    assert len(candles) == 2
+    assert all(c.timestamp.tzinfo is not None for c in candles)
+    assert all(c.timestamp.utcoffset() == timedelta(0) for c in candles)
