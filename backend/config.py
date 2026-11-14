@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     MT5_SERVER: str | None = None
     MT5_TIMEOUT_MS: int = 10_000
     MT5_SESSIONS_FILE: str | None = None
+    MT5_SESSIONS_MAX_AGE_SECONDS: int = 604800
 
     # Market
     MT5_SYMBOL: str = ""
@@ -113,6 +114,15 @@ class Settings(BaseSettings):
     def validate_mt5_timeout(cls, value: int) -> int:
         if value < 1000:
             raise ValueError("MT5_TIMEOUT_MS must be at least 1000.")
+        return value
+
+    @field_validator("MT5_SESSIONS_MAX_AGE_SECONDS")
+    @classmethod
+    def validate_mt5_sessions_max_age(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(
+                "MT5_SESSIONS_MAX_AGE_SECONDS must be a positive integer."
+            )
         return value
 
     @field_validator("MAX_RISK_PER_TRADE_PERCENT")
