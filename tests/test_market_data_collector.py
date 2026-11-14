@@ -1,6 +1,6 @@
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -278,6 +278,48 @@ def test_collector_run_collects_and_stops(monkeypatch):
     asyncio.run(collector.run(stop_event))
 
     assert calls == [collector.collect_once]
+    assert len(repository.saved_snapshots) == 1
+
+
+def test_collector_run_waits_for_next_candle_close(monkeypatch):
+    collector, service, repository = make_collector()
+    stop_event = asyncio.Event()
+    scheduled_timeframes = []
+    collected = []
+
+    async def fake_to_thread(function, *args, **kwargs):
+        collected.append(function)
+        return function(*args, **kwargs)
+
+    def fake_next_collection_time(*, timeframe_seconds):
+        scheduled_timeframes.append(timeframe_seconds)
+        return datetime.now(timezone.utc) + timedelta(seconds=17)
+
+    async def fake_wait_for(awaitable, *, timeout):
+        assert 16.0 < timeout <= 17.0
+
+        stop_event.set()
+
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.to_thread",
+        fake_to_thread,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.next_collection_time",
+        fake_next_collection_time,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.wait_for",
+        fake_wait_for,
+    )
+
+    asyncio.run(collector.run(stop_event))
+
+    assert collected == [collector.collect_once]
+    assert scheduled_timeframes == [300]
     assert len(repository.saved_snapshots) == 1
 
 
