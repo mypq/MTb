@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -128,7 +127,7 @@ class DatabaseBackupService:
             self._restore_backup(backup_path)
 
     def _restore_backup(self, backup_path: str | Path) -> None:
-        """Safely replace the primary database with a verified backup."""
+        """Safely restore a verified backup under exclusive database maintenance."""
 
         try:
             selected_backup = Path(
@@ -156,8 +155,6 @@ class DatabaseBackupService:
             / f".{self._database_path.name}.restore.{uuid4().hex}.tmp"
         )
 
-        database_disposed = False
-
         try:
             self._database_path.parent.mkdir(
                 parents=True,
@@ -172,16 +169,32 @@ class DatabaseBackupService:
 
             self._verify_backup(temporary_path)
 
-            self._database.dispose()
-            database_disposed = True
+            with self._database.maintenance():
+                database_disposed = False
 
-            os.replace(
-                temporary_path,
-                self._database_path,
-            )
+                try:
+                    self._database.dispose()
+                    database_disposed = True
 
-            self._database.initialize()
-            database_disposed = False
+                    os.replace(
+                        temporary_path,
+                        self._database_path,
+                    )
+
+                    self._database.initialize()
+                    database_disposed = False
+
+                except Exception:
+                    if database_disposed:
+                        try:
+                            self._database.initialize()
+                            database_disposed = False
+                        except Exception as recovery_exc:
+                            raise DatabaseBackupError(
+                                "Restore failed and the primary database "
+                                "could not be reinitialized."
+                            ) from recovery_exc
+                    raise
 
         except DatabaseBackupError:
             raise
@@ -194,15 +207,6 @@ class DatabaseBackupService:
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
-
-            if database_disposed:
-                try:
-                    self._database.initialize()
-                except Exception as exc:
-                    raise DatabaseBackupError(
-                        "Restore failed and the primary database "
-                        "could not be reinitialized."
-                    ) from exc
 
     def _prune_backups(self) -> None:
         backups = sorted(
