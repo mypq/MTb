@@ -399,3 +399,218 @@ def test_future_expected_close_blocks_analysis():
         issue.code == MarketDataIssueCode.FUTURE_EXPECTED_CLOSE
         for issue in report.issues
     )
+
+@pytest.mark.parametrize(
+    ("delay_seconds", "expected_eligible"),
+    [
+        (0, True),
+        (1, True),
+        (599, True),
+        (600, True),
+        (601, False),
+    ],
+)
+def test_freshness_boundary_values(
+    delay_seconds,
+    expected_eligible,
+):
+    candle = make_candle(
+        CHECKED_AT - timedelta(seconds=300 + delay_seconds)
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == delay_seconds
+    assert report.freshness_eligible is expected_eligible
+
+
+def test_future_expected_close_by_one_second_is_rejected():
+    candle = make_candle(
+        CHECKED_AT - timedelta(seconds=299)
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.latest_candle_close_delay_seconds == -1
+    assert report.freshness_eligible is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.FUTURE_EXPECTED_CLOSE
+        for issue in report.issues
+    )
+
+
+def test_future_receive_time_produces_negative_data_age():
+    candle = make_candle(
+        CHECKED_AT - timedelta(minutes=5)
+    )
+
+    batch = make_batch(
+        (candle,),
+        received_at=CHECKED_AT + timedelta(seconds=30),
+    )
+
+    report = MarketDataValidator().validate(
+        batch,
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.data_age_seconds == -30
+    assert report.structurally_valid is False
+    assert report.analysis_eligible is False
+
+
+def test_time_gap_blocks_analysis_without_invalidating_structure():
+    candles = (
+        make_candle(CHECKED_AT - timedelta(minutes=20)),
+        make_candle(CHECKED_AT - timedelta(minutes=5)),
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch(candles),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.structurally_valid is True
+    assert report.freshness_eligible is True
+    assert report.analysis_eligible is False
+    assert len(report.gaps) == 1
+
+
+def test_multiple_time_gaps_are_all_reported():
+    candles = (
+        make_candle(CHECKED_AT - timedelta(minutes=20)),
+        make_candle(CHECKED_AT - timedelta(minutes=10)),
+        make_candle(CHECKED_AT - timedelta(minutes=5)),
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch(candles),
+        300,
+        CHECKED_AT,
+    )
+
+    assert len(report.gaps) == 1
+    assert report.gaps[0].missing_intervals == 1
+    assert report.analysis_eligible is False
+
+
+def test_gap_details_match_detected_interval():
+    candles = (
+        make_candle(CHECKED_AT - timedelta(minutes=15)),
+        make_candle(CHECKED_AT - timedelta(minutes=5)),
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch(candles),
+        300,
+        CHECKED_AT,
+    )
+
+    assert len(report.gaps) == 1
+
+    gap = report.gaps[0]
+
+    assert gap.expected_interval_seconds == 300
+    assert gap.actual_interval_seconds == 600
+    assert gap.missing_intervals == 1
+    assert gap.previous_candle == candles[0].timestamp
+    assert gap.next_candle == candles[1].timestamp
+
+
+def test_unknown_volume_is_reported_for_each_affected_candle():
+    candles = (
+        make_candle(
+            CHECKED_AT - timedelta(minutes=10),
+            volume_source=VolumeSource.UNKNOWN,
+        ),
+        make_candle(
+            CHECKED_AT - timedelta(minutes=5),
+            volume_source=VolumeSource.UNKNOWN,
+        ),
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch(candles),
+        300,
+        CHECKED_AT,
+    )
+
+    unknown_volume_issues = [
+        issue
+        for issue in report.issues
+        if issue.code == MarketDataIssueCode.UNKNOWN_VOLUME_SOURCE
+    ]
+
+    assert len(unknown_volume_issues) == 2
+    assert report.volume_data_available is False
+    assert report.analysis_eligible is True
+
+
+def test_known_volume_keeps_volume_data_available():
+    candles = (
+        make_candle(
+            CHECKED_AT - timedelta(minutes=10),
+            volume_source=VolumeSource.TICK,
+        ),
+        make_candle(
+            CHECKED_AT - timedelta(minutes=5),
+            volume_source=VolumeSource.TICK,
+        ),
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch(candles),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.volume_data_available is True
+    assert not any(
+        issue.code == MarketDataIssueCode.UNKNOWN_VOLUME_SOURCE
+        for issue in report.issues
+    )
+
+
+def test_freshness_verified_remains_false_without_trusted_verification():
+    candle = make_candle(
+        CHECKED_AT - timedelta(minutes=5)
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+
+
+def test_report_has_no_issues_for_valid_single_candle_batch():
+    candle = make_candle(
+        CHECKED_AT - timedelta(minutes=5)
+    )
+
+    report = MarketDataValidator().validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.structurally_valid is True
+    assert report.freshness_eligible is True
+    assert report.analysis_eligible is True
+    assert report.volume_data_available is True
+    assert report.issues == ()
+    assert report.gaps == ()
