@@ -401,3 +401,76 @@ def test_reset_clears_samples_and_status():
     assert snapshot.status == TimeSyncStatus.UNSYNCHRONIZED
     assert snapshot.sample_count == 0
     assert snapshot.offset_ms is None
+@pytest.mark.parametrize(
+    "setting,value",
+    [
+        ("max_round_trip_ms", 0),
+        ("max_round_trip_ms", -1),
+        ("max_round_trip_ms", float("inf")),
+        ("max_round_trip_ms", float("nan")),
+        ("max_round_trip_ms", True),
+        ("max_round_trip_ms", "100"),
+        ("max_offset_ms", 0),
+        ("max_offset_ms", -1),
+        ("max_offset_ms", float("inf")),
+        ("max_offset_ms", float("nan")),
+        ("max_offset_ms", True),
+        ("max_offset_ms", "500"),
+        ("max_sample_age_seconds", 0),
+        ("max_sample_age_seconds", -1),
+        ("max_sample_age_seconds", float("inf")),
+        ("max_sample_age_seconds", float("nan")),
+        ("max_sample_age_seconds", True),
+        ("max_sample_age_seconds", "30"),
+        ("max_clock_jump_ms", 0),
+        ("max_clock_jump_ms", -1),
+        ("max_clock_jump_ms", float("inf")),
+        ("max_clock_jump_ms", float("nan")),
+        ("max_clock_jump_ms", True),
+        ("max_clock_jump_ms", "250"),
+    ],
+)
+def test_invalid_numeric_configuration_is_rejected(setting, value):
+    with pytest.raises(ValueError):
+        TimeSynchronizationService(**{setting: value})
+
+
+def test_max_samples_minimum_boundary_is_valid():
+    service = TimeSynchronizationService(max_samples=3)
+
+    assert service.snapshot().status == TimeSyncStatus.UNSYNCHRONIZED
+
+
+def test_sample_history_never_exceeds_max_samples():
+    clock = FakeClock()
+    service = make_service(clock, max_samples=3)
+
+    for _ in range(5):
+        add_sample(service, clock)
+
+    assert len(service._samples) == 3
+
+    snapshot = service.snapshot()
+
+    assert snapshot.status == TimeSyncStatus.SYNCHRONIZED
+    assert snapshot.sample_count == 3
+
+
+def test_expired_samples_are_removed_from_snapshot_count():
+    clock = FakeClock()
+    service = make_service(
+        clock,
+        max_sample_age_seconds=1,
+    )
+
+    add_sample(service, clock)
+    add_sample(service, clock)
+
+    clock.advance(800)
+
+    add_sample(service, clock)
+
+    snapshot = service.snapshot()
+
+    assert snapshot.status == TimeSyncStatus.DEGRADED
+    assert snapshot.sample_count == 1
