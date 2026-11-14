@@ -177,3 +177,23 @@ def test_market_data_value_error_returns_http_400(monkeypatch):
 
     assert exc_info.value.status_code == 400
     assert repository.saved == []
+def test_mt5_unavailable_returns_http_503(monkeypatch):
+    endpoint, service, repository = create_endpoint(
+        monkeypatch,
+        service_error=main.MT5AdapterError(
+            "MT5 connection unavailable"
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        endpoint(
+            symbol="XAUUSD",
+            timeframe="M5",
+            count=100,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == (
+        "Market data is currently unavailable."
+    )
+    assert repository.saved == []
