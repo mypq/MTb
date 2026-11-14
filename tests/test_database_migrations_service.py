@@ -73,3 +73,30 @@ def test_upgrade_database_wraps_alembic_failure(monkeypatch):
         match="Failed to apply database migrations",
     ):
         migrations.upgrade_database()
+def test_upgrade_database_uses_absolute_migrations_path(monkeypatch):
+    command = Mock()
+    monkeypatch.setattr(migrations, "command", command)
+
+    migrations.upgrade_database()
+
+    config = command.upgrade.call_args.args[0]
+    script_location = Path(
+        config.get_main_option("script_location")
+    )
+
+    assert script_location.is_absolute()
+    assert script_location.name == "migrations"
+    assert script_location.is_dir()
+
+
+def test_upgrade_database_wraps_config_creation_failure(monkeypatch):
+    def fail_config(*args, **kwargs):
+        raise RuntimeError("Invalid Alembic configuration")
+
+    monkeypatch.setattr(migrations, "Config", fail_config)
+
+    with pytest.raises(
+        migrations.DatabaseMigrationError,
+        match="Failed to apply database migrations",
+    ):
+        migrations.upgrade_database()
