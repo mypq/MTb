@@ -408,3 +408,45 @@ def test_chrony_rejects_out_of_range_stratum(stratum):
     assert status.available is False
     assert status.synchronized is False
     assert "invalid stratum" in status.error
+
+def test_chrony_error_reports_insufficient_healthy_sources():
+    service = ChronyStatusService(command=["chronyc"])
+
+    two_sources = "\n".join(SOURCES_OUTPUT.splitlines()[:5])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(sources=two_sources),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.healthy_sources == 2
+    assert status.nts_authenticated_sources == 3
+    assert status.quorum_met is False
+    assert "2 healthy Chrony sources" in status.error
+    assert "minimum 3" in status.error
+
+
+def test_chrony_error_reports_authenticated_source_mismatch():
+    service = ChronyStatusService(command=["chronyc"])
+
+    two_sources_authdata = "\n".join(
+        AUTHDATA_OUTPUT.splitlines()[:-1]
+    )
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=two_sources_authdata),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 2
+    assert status.quorum_met is False
+    assert "3 healthy Chrony sources" in status.error
+    assert "2 authenticated NTS sources" in status.error
+    assert "required exactly 3" in status.error
