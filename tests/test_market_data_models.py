@@ -333,3 +333,66 @@ def test_invalid_is_closed_values_are_rejected(value):
 
     with pytest.raises(ValidationError):
         MarketCandle(**values)
+def test_candle_symbol_and_timeframe_are_normalized():
+    candle = make_candle(
+        symbol="  XAUUSD  ",
+        timeframe="  M5  ",
+    )
+
+    assert candle.symbol == "XAUUSD"
+    assert candle.timeframe == "M5"
+
+
+def test_candle_is_immutable():
+    candle = make_candle()
+
+    with pytest.raises(ValidationError):
+        candle.close = 2100.0
+
+
+def test_batch_is_immutable():
+    batch = make_batch()
+
+    with pytest.raises(ValidationError):
+        batch.source = "OTHER"
+
+
+def test_batch_candles_are_stored_as_tuple():
+    batch = make_batch(candles=[make_candle()])
+
+    assert isinstance(batch.candles, tuple)
+
+
+def test_batch_source_is_normalized():
+    batch = make_batch(source="  MT5  ")
+
+    assert batch.source == "MT5"
+
+
+def test_batch_symbol_and_timeframe_must_match_exactly():
+    candle = make_candle(symbol="XAUUSD")
+
+    with pytest.raises(ValidationError):
+        make_batch(
+            symbol="  XAUUSD  ",
+            candles=[candle],
+        )
+
+
+def test_unknown_volume_source_accepts_missing_real_volume():
+    candle = make_candle(
+        volume_source=VolumeSource.UNKNOWN,
+        real_volume=None,
+    )
+
+    assert candle.volume_source == VolumeSource.UNKNOWN
+    assert candle.real_volume is None
+
+
+def test_unknown_volume_source_preserves_available_real_volume():
+    candle = make_candle(
+        volume_source=VolumeSource.UNKNOWN,
+        real_volume=250,
+    )
+
+    assert candle.real_volume == 250
