@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -65,6 +66,14 @@ class MarketCandle(BaseModel):
     def reject_boolean_volume(cls, value):
         if isinstance(value, bool):
             raise ValueError("Volume values must not be boolean.")
+
+        return value
+
+    @field_validator("is_closed", mode="before")
+    @classmethod
+    def require_strict_boolean(cls, value):
+        if not isinstance(value, bool):
+            raise ValueError("is_closed must be a boolean.")
 
         return value
 
