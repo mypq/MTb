@@ -1,4 +1,3 @@
-
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ REQUIRED_NTS_SOURCES = 3
 
 REQUIRED_NTS_SOURCE_NAMES = frozenset({
     "time.cloudflare.com",
-    "gbg1-ts.nts.netnod.se",
+    "mmo1-ts.nts.netnod.se",
     "ntppool1.time.nl",
 })
 
