@@ -245,3 +245,44 @@ def test_restore_does_not_leave_temporary_files(
     )
 
     assert temporary_files == []
+def test_backup_retention_keeps_only_latest_30_valid_backups(
+    database,
+    tmp_path,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_paths = [
+        service.create_backup()
+        for _ in range(31)
+    ]
+
+    existing_backups = sorted(
+        service._backup_directory.glob("gold_bot_*.sqlite3")
+    )
+
+    assert len(existing_backups) == 30
+    assert backup_paths[-1].is_file()
+    assert not backup_paths[0].exists()
+
+
+def test_backup_retention_removes_corrupt_backups(
+    database,
+    tmp_path,
+):
+    backup_directory = tmp_path / "backups"
+    service = DatabaseBackupService(
+        database,
+        backup_directory,
+    )
+
+    corrupt_backup = backup_directory / "gold_bot_00000000T000000000000Z.sqlite3"
+    backup_directory.mkdir(parents=True, exist_ok=True)
+    corrupt_backup.write_bytes(b"invalid-sqlite-database")
+
+    service.create_backup()
+
+    assert not corrupt_backup.exists()
+    assert len(list(backup_directory.glob("gold_bot_*.sqlite3"))) == 1
