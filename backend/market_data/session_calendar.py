@@ -370,6 +370,27 @@ class MarketSessionCalendar:
                 "next candle must be later than previous candle."
             )
 
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+        if (
+            previous_candle_utc.microsecond != 0
+            or next_candle_utc.microsecond != 0
+        ):
+            return False
+
+        previous_seconds = int(
+            (previous_candle_utc - epoch).total_seconds()
+        )
+        next_seconds = int(
+            (next_candle_utc - epoch).total_seconds()
+        )
+
+        if (
+            previous_seconds % timeframe_seconds != 0
+            or next_seconds % timeframe_seconds != 0
+        ):
+            return False
+
         actual_seconds = (
             next_candle_utc - previous_candle_utc
         ).total_seconds()
