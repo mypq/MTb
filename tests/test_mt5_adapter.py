@@ -553,3 +553,28 @@ def test_connection_status_handles_terminal_exception():
 
     assert status.state == MT5ConnectionState.ERROR
     assert "RuntimeError" in status.message
+def test_monitor_recovers_real_adapter_after_initial_connection_failure():
+    from backend.mt5.monitor import MT5ConnectionMonitor
+
+    mt5 = make_mt5_module()
+    mt5.initialize.side_effect = [False, True]
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=mt5,
+    )
+
+    initial_status = adapter.connect()
+
+    assert initial_status.state == MT5ConnectionState.DISCONNECTED
+
+    monitor = MT5ConnectionMonitor(adapter)
+
+    recovered_status = monitor.check_once()
+
+    assert recovered_status.state == MT5ConnectionState.CONNECTED
+    assert adapter.connection_status().state == MT5ConnectionState.CONNECTED
+    assert mt5.initialize.call_count == 2
+
+    adapter.shutdown()
+    mt5.shutdown.assert_called_once()
