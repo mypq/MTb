@@ -26,14 +26,23 @@ def verify_api_token(
             detail="API access token is not configured.",
         )
 
-    if not authorization or not authorization.startswith("Bearer "):
+    if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing bearer token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    supplied_token = authorization.removeprefix("Bearer ").strip()
+    parts = authorization.strip().split(None, 1)
+
+    if len(parts) != 2 or parts[0].casefold() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    supplied_token = parts[1].strip()
 
     if not supplied_token or not secrets.compare_digest(
         supplied_token,
