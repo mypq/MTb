@@ -166,17 +166,16 @@ class MarketDataCollector:
         return result
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Run collection cycles until the supplied stop event is set."""
+        """Collect immediately, then align each cycle with candle closes."""
 
         if not isinstance(stop_event, asyncio.Event):
             raise TypeError("stop_event must be an asyncio.Event.")
 
         logger.info(
             "Market data collector started: "
-            "symbol=%s timeframe=%s interval=%.1f seconds",
+            "symbol=%s timeframe=%s",
             self._symbol,
             self._timeframe,
-            self._interval_seconds,
         )
 
         try:
@@ -194,10 +193,21 @@ class MarketDataCollector:
                 if stop_event.is_set():
                     break
 
+                next_run = next_collection_time(
+                    timeframe_seconds=self._timeframe_seconds,
+                )
+
+                wait_seconds = max(
+                    0.0,
+                    (
+                        next_run - datetime.now(timezone.utc)
+                    ).total_seconds(),
+                )
+
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
-                        timeout=self._interval_seconds,
+                        timeout=wait_seconds,
                     )
                 except asyncio.TimeoutError:
                     continue
