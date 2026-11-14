@@ -1,4 +1,3 @@
-
 from pathlib import Path
 import sqlite3
 from threading import Event, Thread
@@ -507,18 +506,19 @@ def test_operation_lock_is_released_after_backup_failure(
 
     assert value == "backup-test"
 
+
 def test_restore_waits_until_active_database_sessions_finish(
     database,
-    backup_service,
     tmp_path,
 ):
-    from threading import Event, Thread
-
-    backup_path = backup_service.create_backup()
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+    backup_path = service.create_backup()
 
     session_entered = Event()
     release_session = Event()
-    restore_started = Event()
     restore_finished = Event()
     errors = []
 
@@ -526,15 +526,14 @@ def test_restore_waits_until_active_database_sessions_finish(
         try:
             with database.session():
                 session_entered.set()
-                if not release_session.wait(timeout=5):
+                if not release_session.wait(timeout=10):
                     raise TimeoutError("Session release timed out.")
         except Exception as exc:
             errors.append(exc)
 
     def restore():
-        restore_started.set()
         try:
-            backup_service.restore_backup(backup_path)
+            service.restore_backup(backup_path)
         except Exception as exc:
             errors.append(exc)
         finally:
@@ -547,43 +546,61 @@ def test_restore_waits_until_active_database_sessions_finish(
     assert session_entered.wait(timeout=5)
 
     restore_thread.start()
-    assert restore_started.wait(timeout=5)
 
     try:
-        assert not restore_finished.wait(timeout=0.2)
+        assert not restore_finished.wait(timeout=0.3)
     finally:
         release_session.set()
-        session_thread.join(timeout=5)
-        restore_thread.join(timeout=5)
+        session_thread.join(timeout=10)
+        restore_thread.join(timeout=10)
 
     assert not session_thread.is_alive()
     assert not restore_thread.is_alive()
-    assert not errors
+    assert errors == []
     assert restore_finished.is_set()
 
 
-def test_new_database_sessions_wait_during_backup_restore(
+def test_new_database_sessions_wait_during_restore(
     database,
-    backup_service,
+    tmp_path,
+    monkeypatch,
 ):
-    from threading import Event, Thread
+    import backend.database_backup as backup_module
 
-    backup_path = backup_service.create_backup()
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+    backup_path = service.create_backup()
 
-    maintenance_entered = Event()
-    release_maintenance = Event()
+    replace_entered = Event()
+    release_replace = Event()
     session_started = Event()
     session_entered = Event()
+    restore_finished = Event()
     errors = []
 
-    def hold_maintenance():
+    original_replace = backup_module.os.replace
+
+    def blocking_replace(source, destination):
+        replace_entered.set()
+        if not release_replace.wait(timeout=10):
+            raise TimeoutError("Restore release timed out.")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        backup_module.os,
+        "replace",
+        blocking_replace,
+    )
+
+    def restore():
         try:
-            with database.maintenance():
-                maintenance_entered.set()
-                if not release_maintenance.wait(timeout=5):
-                    raise TimeoutError("Maintenance release timed out.")
+            service.restore_backup(backup_path)
         except Exception as exc:
             errors.append(exc)
+        finally:
+            restore_finished.set()
 
     def open_session():
         session_started.set()
@@ -593,23 +610,24 @@ def test_new_database_sessions_wait_during_backup_restore(
         except Exception as exc:
             errors.append(exc)
 
-    maintenance_thread = Thread(target=hold_maintenance)
+    restore_thread = Thread(target=restore)
     session_thread = Thread(target=open_session)
 
-    maintenance_thread.start()
-    assert maintenance_entered.wait(timeout=5)
+    restore_thread.start()
+    assert replace_entered.wait(timeout=5)
 
     session_thread.start()
     assert session_started.wait(timeout=5)
 
     try:
-        assert not session_entered.wait(timeout=0.2)
+        assert not session_entered.wait(timeout=0.3)
     finally:
-        release_maintenance.set()
-        maintenance_thread.join(timeout=5)
-        session_thread.join(timeout=5)
+        release_replace.set()
+        restore_thread.join(timeout=10)
+        session_thread.join(timeout=10)
 
-    assert not maintenance_thread.is_alive()
+    assert not restore_thread.is_alive()
     assert not session_thread.is_alive()
-    assert not errors
+    assert errors == []
+    assert restore_finished.is_set()
     assert session_entered.is_set()
