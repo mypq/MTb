@@ -681,3 +681,48 @@ def test_restore_recovers_database_when_replace_fails(
     )
 
     assert temporary_files == []
+def test_restore_recovers_when_database_reinitialization_fails_once(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_path = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'original-data'")
+        )
+
+    original_initialize = database.initialize
+    failed_once = False
+
+    def fail_initialize_once():
+        nonlocal failed_once
+
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("Forced initialization failure")
+
+        original_initialize()
+
+    monkeypatch.setattr(
+        database,
+        "initialize",
+        fail_initialize_once,
+    )
+
+    with pytest.raises(DatabaseBackupError):
+        service.restore_backup(backup_path)
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
+    assert failed_once is True
