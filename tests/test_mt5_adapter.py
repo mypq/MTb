@@ -515,3 +515,41 @@ def test_candle_retrieval_exception_is_wrapped_as_adapter_error():
         1,
         10,
     )
+def test_account_information_unavailable_raises_adapter_error():
+    adapter, mt5 = make_connected_adapter()
+    mt5.account_info.return_value = None
+
+    with pytest.raises(MT5AdapterError, match="Test error"):
+        adapter.get_account_info()
+
+
+@pytest.mark.parametrize(
+    "missing_info",
+    ["terminal", "account"],
+)
+def test_connection_status_handles_missing_terminal_or_account_info(
+    missing_info,
+):
+    adapter, mt5 = make_connected_adapter()
+
+    if missing_info == "terminal":
+        mt5.terminal_info.return_value = None
+    else:
+        mt5.account_info.return_value = None
+
+    status = adapter.connection_status()
+
+    assert status.state == MT5ConnectionState.DISCONNECTED
+    assert status.terminal_connected is False
+
+
+def test_connection_status_handles_terminal_exception():
+    adapter, mt5 = make_connected_adapter()
+    mt5.terminal_info.side_effect = RuntimeError(
+        "Terminal status unavailable"
+    )
+
+    status = adapter.connection_status()
+
+    assert status.state == MT5ConnectionState.ERROR
+    assert "RuntimeError" in status.message
