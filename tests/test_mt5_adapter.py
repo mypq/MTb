@@ -781,3 +781,41 @@ def test_point_and_tick_size_can_have_different_values():
 
     assert symbol.point == 0.001
     assert symbol.trade_tick_size == 0.005
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("point", True),
+        ("trade_contract_size", False),
+        ("trade_tick_size", "invalid"),
+        ("trade_tick_value", None),
+        ("volume_min", "invalid"),
+        ("volume_max", None),
+        ("volume_step", True),
+    ],
+)
+def test_malformed_symbol_numeric_fields_are_rejected(
+    field,
+    value,
+):
+    adapter, mt5 = make_connected_adapter()
+    setattr(mt5.symbol_info.return_value, field, value)
+
+    with pytest.raises(MT5AdapterError):
+        adapter.get_symbol_info("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("spread", -1),
+        ("spread", 1.5),
+        ("spread", True),
+        ("spread", "invalid"),
+    ],
+)
+def test_invalid_symbol_spread_is_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+    setattr(mt5.symbol_info.return_value, field, value)
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
