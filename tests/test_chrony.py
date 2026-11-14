@@ -1,4 +1,3 @@
-
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
@@ -28,7 +27,7 @@ AUTHDATA_OUTPUT = """
 Name/IP address             Mode KeyID Type KLen Last Atmp  NAK Cook CLen
 =========================================================================
 time.cloudflare.com          NTS     1   30  128  23m    0    0    8   64
-gbg1-ts.nts.netnod.se        NTS     1   15  256  23m    0    0    8  100
+mmo1-ts.nts.netnod.se        NTS     1   15  256  23m    0    0    8  100
 ntppool1.time.nl             NTS     1   30  128  23m    0    0    8   64
 """
 
@@ -394,7 +393,7 @@ def test_chrony_rejects_more_than_three_authenticated_nts_sources():
 
 def test_chrony_rejects_unapproved_nts_source():
     invalid_authdata = AUTHDATA_OUTPUT.replace(
-        "gbg1-ts.nts.netnod.se",
+        "mmo1-ts.nts.netnod.se",
         "other.nts.example",
     )
     service = ChronyStatusService(command=["chronyc"])
