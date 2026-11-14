@@ -1,8 +1,10 @@
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
 from backend.database_models import (
@@ -34,6 +36,32 @@ class FakeMarketDataSource:
 
     def get_closed_candles(self, symbol, timeframe, count):
         return self.batch
+
+
+class ConcurrentInsertDatabase:
+    """Simulates another request winning the insert race."""
+
+    def __init__(self, database, snapshot):
+        self.database = database
+        self.snapshot = snapshot
+        self.calls = 0
+
+    @contextmanager
+    def session(self):
+        self.calls += 1
+
+        if self.calls == 1:
+            MarketDataRepository(self.database).save_snapshot(
+                self.snapshot
+            )
+            raise IntegrityError(
+                "Simulated concurrent unique constraint conflict",
+                {},
+                Exception("duplicate key"),
+            )
+
+        with self.database.session() as session:
+            yield session
 
 
 def make_snapshot(
@@ -189,6 +217,28 @@ def test_batch_candle_count_matches_inserted_records(repository):
         assert batch is not None
         assert batch.candle_count == 3
         assert len(batch.candles) == 3
+
+
+def test_integrity_error_retries_and_recognizes_concurrent_insert(
+    repository,
+):
+    repo, database = repository
+    snapshot = make_snapshot(count=2)
+
+    simulated_database = ConcurrentInsertDatabase(
+        database,
+        snapshot,
+    )
+    repo._database = simulated_database
+
+    result = repo.save_snapshot(snapshot)
+
+    assert simulated_database.calls == 2
+    assert result.batch_id is None
+    assert result.inserted_candles == 0
+    assert result.duplicate_candles == 2
+
+    assert database_counts(database) == (1, 2)
 
 
 def test_invalid_snapshot_argument_is_rejected(repository):
