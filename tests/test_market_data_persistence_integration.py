@@ -2,8 +2,8 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
 
 import backend.main as main
 from backend.database import Database
@@ -46,7 +46,6 @@ class FakeMarketDataSource:
 def make_recent_batch() -> CandleBatch:
     now = datetime.now(UTC)
 
-    # Align the latest candle to a completed five-minute interval.
     boundary = now.replace(
         minute=(now.minute // 5) * 5,
         second=0,
@@ -208,11 +207,8 @@ def test_repeated_api_request_does_not_duplicate_persisted_candles(
 
     assert first_result["validation"]["analysis_eligible"] is True
     assert second_result["validation"]["analysis_eligible"] is True
-
     assert source.calls == 2
 
-    # The API fetched twice, but persistence stored only one batch
-    # and the original two candles.
     assert read_database_counts(database) == (1, 2)
 
 
@@ -228,7 +224,6 @@ def test_persisted_market_data_survives_session_reopening(
         count=2,
     )
 
-    # Read through a fresh SQLAlchemy session.
     with database.session() as session:
         records = session.scalars(
             select(MarketCandleRecord)
@@ -239,3 +234,83 @@ def test_persisted_market_data_survives_session_reopening(
         assert len(records) == 2
         assert all(record.symbol == "XAUUSD" for record in records)
         assert all(record.timeframe == "M5" for record in records)
+
+
+def test_ineligible_market_data_is_not_persisted(
+    integration_environment,
+):
+    endpoint = integration_environment["endpoint"]
+    database = integration_environment["database"]
+    source = integration_environment["source"]
+
+    old_candles = tuple(
+        candle.model_copy(
+            update={
+                "timestamp": candle.timestamp - timedelta(hours=2),
+            }
+        )
+        for candle in source.batch.candles
+    )
+
+    source.batch = source.batch.model_copy(
+        update={"candles": old_candles}
+    )
+
+    result = endpoint(
+        symbol="XAUUSD",
+        timeframe="M5",
+        count=2,
+    )
+
+    assert result["validation"]["analysis_eligible"] is False
+    assert read_database_counts(database) == (0, 0)
+
+
+def test_conflicting_candle_returns_http_409_and_preserves_original(
+    integration_environment,
+):
+    endpoint = integration_environment["endpoint"]
+    database = integration_environment["database"]
+    source = integration_environment["source"]
+
+    first_result = endpoint(
+        symbol="XAUUSD",
+        timeframe="M5",
+        count=2,
+    )
+
+    assert first_result["validation"]["analysis_eligible"] is True
+    assert read_database_counts(database) == (1, 2)
+
+    original_close = source.batch.candles[-1].close
+
+    conflicting_candles = (
+        source.batch.candles[0],
+        source.batch.candles[1].model_copy(
+            update={"close": original_close + 10.0}
+        ),
+    )
+
+    source.batch = source.batch.model_copy(
+        update={"candles": conflicting_candles}
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        endpoint(
+            symbol="XAUUSD",
+            timeframe="M5",
+            count=2,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert read_database_counts(database) == (1, 2)
+
+    with database.session() as session:
+        records = session.scalars(
+            select(MarketCandleRecord)
+            .where(MarketCandleRecord.symbol == "XAUUSD")
+            .order_by(MarketCandleRecord.timestamp)
+        ).all()
+
+        assert len(records) == 2
+        assert records[-1].close_price == original_close
