@@ -1,4 +1,3 @@
-
 import asyncio
 from types import SimpleNamespace
 
@@ -88,6 +87,30 @@ class FakeMarketDataRepository:
         self.database = database
 
 
+class FakeMarketDataCollector:
+    def __init__(
+        self,
+        service,
+        repository,
+        *,
+        symbol,
+        timeframe,
+        count,
+    ):
+        self.service = service
+        self.repository = repository
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.count = count
+        self.interval_seconds = 300.0
+        self.events = []
+
+    async def run(self, stop_event):
+        self.events.append("collector.start")
+        await stop_event.wait()
+        self.events.append("collector.stop")
+
+
 class FakeChronyStatusService:
     def __init__(self):
         self.snapshot_called = False
@@ -124,6 +147,8 @@ def configure_lifecycle(
 
     settings = SimpleNamespace(
         MT5_ENABLED=mt5_enabled,
+        MT5_SYMBOL="XAUUSD",
+        DEFAULT_TIMEFRAME="M5",
         DATABASE_URL="sqlite:///./data/test.db",
     )
 
@@ -187,6 +212,11 @@ def configure_lifecycle(
         main,
         "MarketDataRepository",
         FakeMarketDataRepository,
+    )
+    monkeypatch.setattr(
+        main,
+        "MarketDataCollector",
+        FakeMarketDataCollector,
     )
     monkeypatch.setattr(
         main,
