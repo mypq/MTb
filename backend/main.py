@@ -1,4 +1,5 @@
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from backend import __version__
 from backend.config import get_settings
 from backend.database import Database
+from backend.database_backup import DatabaseBackupService
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.repository import (
@@ -19,6 +21,37 @@ from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
 
 logger = logging.getLogger(__name__)
+
+BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+async def _database_backup_loop(
+    backup_service: DatabaseBackupService,
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.to_thread(
+                backup_service.create_backup
+            )
+            logger.info(
+                "Automatic database backup completed."
+            )
+        except Exception:
+            logger.exception(
+                "Automatic database backup failed."
+            )
+
+        if stop_event.is_set():
+            break
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=BACKUP_INTERVAL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            continue
 
 
 @asynccontextmanager
@@ -33,25 +66,54 @@ async def lifespan(app: FastAPI):
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
 
+    backup_service = None
+    backup_stop_event = asyncio.Event()
+    backup_task = None
+
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
-    app.state.market_data_service = MarketDataService(source=adapter)
+    app.state.market_data_service = MarketDataService(
+        source=adapter
+    )
     app.state.market_data_repository = market_data_repository
     app.state.chrony_status_service = chrony_service
     app.state.database = database
+    app.state.database_backup_service = None
 
     try:
         database.initialize()
         upgrade_database()
+
+        backup_service = DatabaseBackupService(database)
+        app.state.database_backup_service = backup_service
+
+        backup_task = asyncio.create_task(
+            _database_backup_loop(
+                backup_service,
+                backup_stop_event,
+            ),
+            name="database-backup",
+        )
 
         if settings.MT5_ENABLED:
             adapter.connect()
             monitor.start()
 
         yield
+
     finally:
         try:
+            if backup_task is not None:
+                backup_stop_event.set()
+
+                try:
+                    await backup_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop automatic database backup."
+                    )
+
             monitor_stopped = False
 
             try:
@@ -74,11 +136,14 @@ async def lifespan(app: FastAPI):
                     "MT5 adapter shutdown skipped because the monitor "
                     "worker may still be running. Manual recovery is required."
                 )
+
         finally:
             try:
                 database.dispose()
             except Exception:
-                logger.exception("Failed to dispose database engine.")
+                logger.exception(
+                    "Failed to dispose database engine."
+                )
 
 
 def create_app() -> FastAPI:
@@ -163,7 +228,9 @@ def create_app() -> FastAPI:
                 detail="A market symbol must be configured or supplied.",
             )
 
-        service: MarketDataService = application.state.market_data_service
+        service: MarketDataService = (
+            application.state.market_data_service
+        )
         repository: MarketDataRepository = (
             application.state.market_data_repository
         )
@@ -189,7 +256,10 @@ def create_app() -> FastAPI:
             try:
                 repository.save_snapshot(snapshot)
             except MarketDataPersistenceConflict as exc:
-                logger.error("Market data persistence conflict: %s", exc)
+                logger.error(
+                    "Market data persistence conflict: %s",
+                    exc,
+                )
                 raise HTTPException(
                     status_code=409,
                     detail="Stored market data conflicts with the new data.",
