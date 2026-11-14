@@ -631,3 +631,53 @@ def test_new_database_sessions_wait_during_restore(
     assert errors == []
     assert restore_finished.is_set()
     assert session_entered.is_set()
+def test_restore_recovers_database_when_replace_fails(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    import backend.database_backup as backup_module
+
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_path = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'original-data'")
+        )
+
+    original_replace = backup_module.os.replace
+
+    def fail_restore_replace(source, destination):
+        if Path(destination) == service._database_path:
+            raise OSError("Forced restore replace failure")
+
+        original_replace(source, destination)
+
+    monkeypatch.setattr(
+        backup_module.os,
+        "replace",
+        fail_restore_replace,
+    )
+
+    with pytest.raises(DatabaseBackupError):
+        service.restore_backup(backup_path)
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "original-data"
+
+    temporary_files = list(
+        service._database_path.parent.glob(
+            f".{service._database_path.name}.restore.*.tmp"
+        )
+    )
+
+    assert temporary_files == []
