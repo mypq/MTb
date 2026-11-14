@@ -1,4 +1,3 @@
-
 import asyncio
 from types import SimpleNamespace
 
@@ -166,6 +165,8 @@ def configure_lifecycle(
         MT5_SYMBOL=mt5_symbol,
         DEFAULT_TIMEFRAME="M5",
         DATABASE_URL="sqlite:///./data/test.db",
+        MT5_SESSIONS_FILE=None,
+        MT5_SESSIONS_MAX_AGE_SECONDS=604800,
     )
 
     def create_adapter(settings):
