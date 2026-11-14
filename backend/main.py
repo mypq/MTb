@@ -1,3 +1,4 @@
+
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,6 +9,10 @@ from backend.config import get_settings
 from backend.database import Database
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
+from backend.market_data.repository import (
+    MarketDataPersistenceConflict,
+    MarketDataRepository,
+)
 from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
@@ -26,11 +31,13 @@ async def lifespan(app: FastAPI):
     )
     chrony_service = ChronyStatusService()
     database = Database(settings.DATABASE_URL)
+    market_data_repository = MarketDataRepository(database)
 
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
     app.state.market_data_service = MarketDataService(source=adapter)
+    app.state.market_data_repository = market_data_repository
     app.state.chrony_status_service = chrony_service
     app.state.database = database
 
@@ -155,6 +162,9 @@ def create_app() -> FastAPI:
             )
 
         service: MarketDataService = application.state.market_data_service
+        repository: MarketDataRepository = (
+            application.state.market_data_repository
+        )
 
         try:
             snapshot = service.get_snapshot(
@@ -172,6 +182,16 @@ def create_app() -> FastAPI:
                 status_code=503,
                 detail="Market data is currently unavailable.",
             ) from exc
+
+        if snapshot.analysis_eligible:
+            try:
+                repository.save_snapshot(snapshot)
+            except MarketDataPersistenceConflict as exc:
+                logger.error("Market data persistence conflict: %s", exc)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored market data conflicts with the new data.",
+                ) from exc
 
         return snapshot.model_dump(mode="json")
 
