@@ -578,3 +578,76 @@ def test_monitor_recovers_real_adapter_after_initial_connection_failure():
 
     adapter.shutdown()
     mt5.shutdown.assert_called_once()
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("open", float("nan")),
+        ("open", float("inf")),
+        ("high", float("-inf")),
+        ("low", float("nan")),
+        ("close", float("inf")),
+    ],
+)
+def test_non_finite_candle_prices_are_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    rate = make_rate(timestamp=timestamp)
+    rate[field] = value
+    mt5.copy_rates_from_pos.return_value = [rate]
+
+    with pytest.raises(MT5AdapterError, match="non-finite"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+def test_negative_real_volume_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp, real_volume=-1),
+    ]
+
+    with pytest.raises(MT5AdapterError, match="negative volume"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+@pytest.mark.parametrize("timestamp", [0, -1])
+def test_non_positive_candle_timestamp_is_rejected(timestamp):
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    with pytest.raises(MT5AdapterError, match="invalid candle timestamp"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "tick_volume",
+        "real_volume",
+    ],
+)
+def test_missing_candle_field_is_rejected(missing_field):
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    rate = make_rate(timestamp=timestamp)
+    del rate[missing_field]
+    mt5.copy_rates_from_pos.return_value = [rate]
+
+    with pytest.raises(MT5AdapterError, match="failed validation"):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
