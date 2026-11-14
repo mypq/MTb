@@ -303,3 +303,108 @@ def test_chrony_rejects_duplicate_authdata_sources():
 def test_chrony_rejects_non_positive_timeout():
     with pytest.raises(ValueError):
         ChronyStatusService(command=["chronyc"], timeout_seconds=0)
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        0,
+        -1,
+        True,
+        False,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        "3",
+        None,
+    ],
+)
+def test_chrony_rejects_invalid_timeout_values(timeout):
+    with pytest.raises(ValueError):
+        ChronyStatusService(
+            command=["chronyc"],
+            timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [
+        "nan seconds",
+        "inf seconds",
+        "-inf seconds",
+        "1e999 seconds",
+        "not-a-number",
+        "",
+    ],
+)
+def test_chrony_rejects_invalid_tracking_time_values(invalid_value):
+    tracking = TRACKING_OUTPUT.replace(
+        "-0.000281089 seconds",
+        invalid_value,
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(tracking=tracking),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert status.error is not None
+
+
+def test_chrony_rejects_negative_root_dispersion():
+    tracking = TRACKING_OUTPUT.replace(
+        "0.002205403 seconds",
+        "-0.002205403 seconds",
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(tracking=tracking),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert "negative root dispersion" in status.error
+
+
+def test_chrony_rejects_more_than_three_authenticated_nts_sources():
+    four_sources = AUTHDATA_OUTPUT + (
+        "ntp4.example.net NTS 1 30 128 23m 0 0 8 64\n"
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=four_sources),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.nts_authenticated_sources == 4
+    assert status.quorum_met is False
+
+
+@pytest.mark.parametrize("stratum", ["-1", "17", "999"])
+def test_chrony_rejects_out_of_range_stratum(stratum):
+    tracking = TRACKING_OUTPUT.replace(
+        "Stratum         : 4",
+        f"Stratum         : {stratum}",
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(tracking=tracking),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert "invalid stratum" in status.error
