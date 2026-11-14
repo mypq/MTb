@@ -180,7 +180,13 @@ class MT5Adapter:
     def get_account_info(self) -> MT5AccountInfo:
         with self._lock:
             mt5 = self._require_connection()
-            account = mt5.account_info()
+            try:
+                account = mt5.account_info()
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 account information request raised "
+                    f"{type(exc).__name__}."
+                ) from exc
 
             if account is None:
                 raise MT5AdapterError(
