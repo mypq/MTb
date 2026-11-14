@@ -874,3 +874,46 @@ def test_negative_balance_equity_and_free_margin_are_preserved():
     assert account.balance == -10.0
     assert account.equity == -15.0
     assert account.free_margin == -20.0
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        123.9,
+        123.0,
+        "123",
+        True,
+        False,
+        None,
+    ],
+)
+def test_malformed_candle_timestamps_are_rejected(timestamp):
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="invalid candle timestamp",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+def test_integer_candle_timestamp_is_accepted():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    assert len(batch.candles) == 1
+    assert batch.candles[0].timestamp == datetime.fromtimestamp(
+        timestamp,
+        tz=timezone.utc,
+    )
