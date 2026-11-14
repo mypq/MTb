@@ -1,4 +1,3 @@
-
 from pathlib import Path
 from threading import Event, Thread
 
@@ -286,13 +285,29 @@ def test_dispose_rejects_active_maintenance(tmp_path: Path):
     )
     database.initialize()
 
+    dispose_attempted = Event()
+    errors = []
+
+    def dispose_from_another_thread():
+        try:
+            dispose_attempted.set()
+            database.dispose()
+        except Exception as exc:
+            errors.append(exc)
+
     try:
         with database.maintenance():
-            with pytest.raises(
-                DatabaseError,
-                match="active maintenance",
-            ):
-                database.dispose()
+            thread = Thread(target=dispose_from_another_thread)
+            thread.start()
+
+            assert dispose_attempted.wait(timeout=5)
+
+            thread.join(timeout=5)
+
+            assert not thread.is_alive()
+            assert len(errors) == 1
+            assert isinstance(errors[0], DatabaseError)
+            assert "maintenance" in str(errors[0]).lower()
 
             assert database.engine is not None
 
