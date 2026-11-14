@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Condition, RLock
+from threading import Condition, RLock, get_ident
 from typing import Iterator
 
 from sqlalchemy import create_engine
@@ -29,6 +29,7 @@ class Database:
         self._condition = Condition(RLock())
         self._active_sessions = 0
         self._maintenance_active = False
+        self._maintenance_owner: int | None = None
 
     @property
     def engine(self) -> Engine:
@@ -126,17 +127,21 @@ class Database:
     def maintenance(self) -> Iterator[None]:
         """Block new sessions and wait for active sessions to finish."""
 
+        owner = get_ident()
+
         with self._condition:
             while self._maintenance_active:
                 self._condition.wait()
 
             self._maintenance_active = True
+            self._maintenance_owner = owner
 
             try:
                 while self._active_sessions > 0:
                     self._condition.wait()
             except BaseException:
                 self._maintenance_active = False
+                self._maintenance_owner = None
                 self._condition.notify_all()
                 raise
 
@@ -145,11 +150,15 @@ class Database:
         finally:
             with self._condition:
                 self._maintenance_active = False
+                self._maintenance_owner = None
                 self._condition.notify_all()
 
     def dispose(self) -> None:
         with self._condition:
-            if self._maintenance_active:
+            if (
+                self._maintenance_active
+                and self._maintenance_owner != get_ident()
+            ):
                 raise DatabaseError(
                     "Cannot dispose database during active maintenance."
                 )
