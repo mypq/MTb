@@ -314,3 +314,59 @@ def test_conflicting_candle_returns_http_409_and_preserves_original(
 
         assert len(records) == 2
         assert records[-1].close_price == original_close
+def test_persistence_preserves_complete_candle_and_batch_metadata(
+    integration_environment,
+):
+    endpoint = integration_environment["endpoint"]
+    database = integration_environment["database"]
+    batch = integration_environment["batch"]
+
+    endpoint(
+        symbol="XAUUSD",
+        timeframe="M5",
+        count=2,
+    )
+
+    with database.session() as session:
+        batch_record = session.scalar(
+            select(MarketDataBatchRecord)
+        )
+
+        records = session.scalars(
+            select(MarketCandleRecord)
+            .where(
+                MarketCandleRecord.symbol == "XAUUSD",
+                MarketCandleRecord.timeframe == "M5",
+            )
+            .order_by(MarketCandleRecord.timestamp)
+        ).all()
+
+        assert batch_record is not None
+        assert batch_record.symbol == batch.symbol
+        assert batch_record.timeframe == batch.timeframe
+        assert batch_record.source == batch.source
+        assert batch_record.candle_count == len(batch.candles)
+        assert batch_record.created_at is not None
+
+        assert len(records) == len(batch.candles)
+
+        for record, candle in zip(records, batch.candles):
+            assert record.symbol == candle.symbol
+            assert record.timeframe == candle.timeframe
+
+            assert (
+                record.timestamp.replace(tzinfo=UTC)
+                == candle.timestamp
+            )
+
+            assert record.open_price == candle.open
+            assert record.high_price == candle.high
+            assert record.low_price == candle.low
+            assert record.close_price == candle.close
+
+            assert record.tick_volume == candle.tick_volume
+            assert record.real_volume == candle.real_volume
+            assert record.volume_source == candle.volume_source.value
+
+            assert record.is_closed == candle.is_closed
+            assert record.quality == candle.quality.value
