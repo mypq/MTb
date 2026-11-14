@@ -178,3 +178,33 @@ def test_empty_mt5_credentials_are_safe_by_default() -> None:
 
     assert settings.MT5_ENABLED is False
     assert settings.MT5_PASSWORD.get_secret_value() == ""
+
+def test_mt5_sessions_file_defaults_to_none() -> None:
+    settings = make_settings()
+
+    assert settings.MT5_SESSIONS_FILE is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("sessions.json", "sessions.json"),
+        ("C:/GoldBot/sessions.json", "C:/GoldBot/sessions.json"),
+        ("  sessions.json  ", "sessions.json"),
+        ("", None),
+        ("   ", None),
+        (None, None),
+    ],
+)
+def test_mt5_sessions_file_is_normalized(
+    value: object,
+    expected: str | None,
+) -> None:
+    settings = make_settings(MT5_SESSIONS_FILE=value)
+
+    assert settings.MT5_SESSIONS_FILE == expected
+
+
+def test_mt5_sessions_file_rejects_non_string_values() -> None:
+    with pytest.raises(ValidationError):
+        make_settings(MT5_SESSIONS_FILE=123)
