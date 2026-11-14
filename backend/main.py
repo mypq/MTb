@@ -17,6 +17,11 @@ from backend.market_data.repository import (
     MarketDataRepository,
 )
 from backend.market_data.service import MarketDataService
+from backend.market_data.session_calendar import (
+    MarketSessionCalendar,
+    MarketSessionCalendarError,
+)
+from backend.market_data.validator import MarketDataValidator
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
@@ -58,15 +63,62 @@ async def _database_backup_loop(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+
     adapter = MT5Adapter(settings=settings)
+
     monitor = MT5ConnectionMonitor(
         adapter=adapter,
         interval_seconds=10.0,
     )
+
     chrony_service = ChronyStatusService()
+
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
-    market_data_service = MarketDataService(source=adapter)
+
+    # Load the broker session calendar when a file is configured.
+    # A configured but missing or invalid file must stop startup.
+    sessions_file = getattr(
+        settings,
+        "MT5_SESSIONS_FILE",
+        None,
+    )
+
+    session_calendar = None
+
+    if sessions_file:
+        try:
+            session_calendar = MarketSessionCalendar.load(
+                sessions_file
+            )
+        except MarketSessionCalendarError:
+            logger.exception(
+                "Configured MT5 session calendar is invalid "
+                "or unavailable."
+            )
+            raise RuntimeError(
+                "Cannot start with an invalid MT5 session calendar."
+            ) from None
+
+        logger.info(
+            "Broker session calendar loaded: symbol=%s file=%s",
+            session_calendar.symbol,
+            sessions_file,
+        )
+    else:
+        logger.warning(
+            "No MT5 session calendar configured. "
+            "Unconfirmed market-data gaps will remain blocked."
+        )
+
+    market_data_validator = MarketDataValidator(
+        session_calendar=session_calendar
+    )
+
+    market_data_service = MarketDataService(
+        source=adapter,
+        validator=market_data_validator,
+    )
 
     backup_service = None
     backup_stop_event = asyncio.Event()
@@ -115,6 +167,7 @@ async def lifespan(app: FastAPI):
                     timeframe=settings.DEFAULT_TIMEFRAME,
                     count=300,
                 )
+
                 app.state.market_data_collector = collector
 
                 collector_task = asyncio.create_task(
@@ -276,6 +329,7 @@ def create_app() -> FastAPI:
         service: MarketDataService = (
             application.state.market_data_service
         )
+
         repository: MarketDataRepository = (
             application.state.market_data_repository
         )
@@ -305,6 +359,7 @@ def create_app() -> FastAPI:
                     "Market data persistence conflict: %s",
                     exc,
                 )
+
                 raise HTTPException(
                     status_code=409,
                     detail="Stored market data conflicts with the new data.",
