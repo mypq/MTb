@@ -25,22 +25,28 @@ class MT5ConnectionStatus(BaseModel):
 
 
 class MT5AccountInfo(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        allow_inf_nan=False,
+    )
 
     login: int
     server: str
     currency: str
     balance: float
     equity: float
-    margin: float
+    margin: float = Field(ge=0)
     free_margin: float
-    leverage: int
+    leverage: int = Field(ge=1)
     trade_allowed: bool
     trade_expert: bool
 
 
 class MT5SymbolInfo(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(
+        frozen=True,
+        allow_inf_nan=False,
+    )
 
     name: str
     description: str = ""
