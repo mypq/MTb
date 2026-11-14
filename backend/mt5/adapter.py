@@ -1,8 +1,8 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from math import isfinite
+from operator import index
 from threading import RLock
 from typing import Any
 
@@ -421,7 +421,19 @@ class MT5Adapter:
 
             try:
                 for rate in rates:
-                    timestamp_value = int(rate["time"])
+                    raw_timestamp = rate["time"]
+
+                    if isinstance(raw_timestamp, bool):
+                        raise ValueError(
+                            "MT5 returned an invalid candle timestamp."
+                        )
+
+                    try:
+                        timestamp_value = index(raw_timestamp)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError(
+                            "MT5 returned an invalid candle timestamp."
+                        ) from exc
 
                     if timestamp_value <= 0:
                         raise ValueError(
