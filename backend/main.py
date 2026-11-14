@@ -11,6 +11,7 @@ from backend.database import Database
 from backend.database_backup import DatabaseBackupService
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
+from backend.market_data.collector import MarketDataCollector
 from backend.market_data.repository import (
     MarketDataPersistenceConflict,
     MarketDataRepository,
@@ -65,18 +66,22 @@ async def lifespan(app: FastAPI):
     chrony_service = ChronyStatusService()
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
+    market_data_service = MarketDataService(source=adapter)
 
     backup_service = None
     backup_stop_event = asyncio.Event()
     backup_task = None
 
+    collector = None
+    collector_stop_event = asyncio.Event()
+    collector_task = None
+
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
-    app.state.market_data_service = MarketDataService(
-        source=adapter
-    )
+    app.state.market_data_service = market_data_service
     app.state.market_data_repository = market_data_repository
+    app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
     app.state.database = database
     app.state.database_backup_service = None
@@ -100,10 +105,50 @@ async def lifespan(app: FastAPI):
             adapter.connect()
             monitor.start()
 
+            selected_symbol = settings.MT5_SYMBOL.strip()
+
+            if selected_symbol:
+                collector = MarketDataCollector(
+                    service=market_data_service,
+                    repository=market_data_repository,
+                    symbol=selected_symbol,
+                    timeframe=settings.DEFAULT_TIMEFRAME,
+                    count=300,
+                )
+                app.state.market_data_collector = collector
+
+                collector_task = asyncio.create_task(
+                    collector.run(collector_stop_event),
+                    name="market-data-collector",
+                )
+
+                logger.info(
+                    "Automatic market data collection enabled: "
+                    "symbol=%s timeframe=%s interval=%.1f seconds",
+                    selected_symbol,
+                    settings.DEFAULT_TIMEFRAME,
+                    collector.interval_seconds,
+                )
+            else:
+                logger.warning(
+                    "Automatic market data collection skipped: "
+                    "MT5_SYMBOL is empty."
+                )
+
         yield
 
     finally:
         try:
+            if collector_task is not None:
+                collector_stop_event.set()
+
+                try:
+                    await collector_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop market data collector."
+                    )
+
             if backup_task is not None:
                 backup_stop_event.set()
 
