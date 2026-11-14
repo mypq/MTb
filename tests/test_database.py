@@ -279,3 +279,22 @@ def test_dispose_rejects_active_sessions(tmp_path: Path):
         release_session.set()
         thread.join(timeout=5)
         database.dispose()
+def test_dispose_rejects_active_maintenance(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'active-maintenance.db').as_posix()}"
+    )
+    database.initialize()
+
+    try:
+        with database.maintenance():
+            with pytest.raises(DatabaseError):
+                database.dispose()
+
+            assert database.engine is not None
+
+        with database.session() as session:
+            result = session.execute(text("SELECT 1")).scalar_one()
+
+        assert result == 1
+    finally:
+        database.dispose()
