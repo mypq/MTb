@@ -920,3 +920,50 @@ def test_integer_candle_timestamp_is_accepted():
         timestamp,
         tz=timezone.utc,
     )
+def test_monitor_recovers_after_active_mt5_connection_is_lost():
+    from backend.mt5.monitor import MT5ConnectionMonitor
+
+    mt5 = make_mt5_module()
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=mt5,
+    )
+
+    initial_status = adapter.connect()
+
+    assert initial_status.state == MT5ConnectionState.CONNECTED
+    assert mt5.initialize.call_count == 1
+
+    # Simulate losing the broker connection while the terminal
+    # was previously connected.
+    mt5.terminal_info.return_value.connected = False
+
+    def restore_terminal_connection(**kwargs):
+        mt5.terminal_info.return_value.connected = True
+        return True
+
+    mt5.initialize.side_effect = restore_terminal_connection
+
+    monitor = MT5ConnectionMonitor(adapter)
+
+    recovered_status = monitor.check_once()
+
+    assert recovered_status.state == MT5ConnectionState.CONNECTED
+    assert mt5.shutdown.call_count == 1
+    assert mt5.initialize.call_count == 2
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    assert len(batch.candles) == 1
+    assert adapter.connection_status().state == MT5ConnectionState.CONNECTED
+
+    adapter.shutdown()
+    assert mt5.shutdown.call_count == 2
