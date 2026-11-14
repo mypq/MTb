@@ -1,3 +1,4 @@
+
 from types import SimpleNamespace
 
 import pytest
@@ -77,9 +78,7 @@ def test_market_data_endpoint_rejects_invalid_token(api_client):
     response = api_client.get(
         "/api/v1/market-data/candles",
         params={"symbol": "XAUUSD"},
-        headers={
-            "Authorization": "Bearer wrong-token",
-        },
+        headers={"Authorization": "Bearer wrong-token"},
     )
 
     assert response.status_code == 401
@@ -108,7 +107,6 @@ def test_market_data_endpoint_rejects_unconfigured_token(
         "get_settings",
         lambda: application_settings,
     )
-
     monkeypatch.setattr(
         security,
         "get_settings",
@@ -121,15 +119,12 @@ def test_market_data_endpoint_rejects_unconfigured_token(
     response = client.get(
         "/api/v1/market-data/candles",
         params={"symbol": "XAUUSD"},
-        headers={
-            "Authorization": "Bearer any-token",
-        },
+        headers={"Authorization": "Bearer any-token"},
     )
 
     assert response.status_code == 503
-    assert (
-        response.json()["detail"]
-        == "API access token is not configured."
+    assert response.json()["detail"] == (
+        "API access token is not configured."
     )
 
 
@@ -140,12 +135,16 @@ def test_health_endpoint_is_public_and_exposes_only_status(
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
 def test_system_status_endpoint_rejects_missing_token(api_client):
     response = api_client.get("/api/v1/system/status")
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing bearer token."
     assert response.headers["www-authenticate"] == "Bearer"
+
+
 def test_system_status_endpoint_rejects_invalid_token(api_client):
     response = api_client.get(
         "/api/v1/system/status",
@@ -155,3 +154,44 @@ def test_system_status_endpoint_rejects_invalid_token(api_client):
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid API access token."
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_system_status_endpoint_rejects_unconfigured_token(
+    monkeypatch,
+):
+    application_settings = SimpleNamespace(
+        APP_NAME="GOLD_BOT_TEST",
+        DEFAULT_TIMEFRAME="M5",
+        MT5_SYMBOL="XAUUSD",
+    )
+
+    security_settings = Settings(
+        _env_file=None,
+        APP_ENV="testing",
+        API_AUTH_ENABLED=True,
+        API_ACCESS_TOKEN=SecretStr(""),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: application_settings,
+    )
+    monkeypatch.setattr(
+        security,
+        "get_settings",
+        lambda: security_settings,
+    )
+
+    application = main.create_app()
+    client = TestClient(application)
+
+    response = client.get(
+        "/api/v1/system/status",
+        headers={"Authorization": "Bearer any-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "API access token is not configured."
+    )
