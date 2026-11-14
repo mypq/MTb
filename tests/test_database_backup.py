@@ -631,6 +631,8 @@ def test_new_database_sessions_wait_during_restore(
     assert errors == []
     assert restore_finished.is_set()
     assert session_entered.is_set()
+
+
 def test_restore_recovers_database_when_replace_fails(
     database,
     tmp_path,
@@ -681,6 +683,8 @@ def test_restore_recovers_database_when_replace_fails(
     )
 
     assert temporary_files == []
+
+
 def test_restore_recovers_when_database_reinitialization_fails_once(
     database,
     tmp_path,
@@ -726,6 +730,8 @@ def test_restore_recovers_when_database_reinitialization_fails_once(
 
     assert value == "backup-test"
     assert failed_once is True
+
+
 def test_restore_reports_error_when_database_recovery_fails(
     database,
     tmp_path,
@@ -771,3 +777,11 @@ def test_restore_reports_error_when_database_recovery_fails(
         "initialize",
         original_initialize,
     )
+    database.initialize()
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
