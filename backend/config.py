@@ -1,4 +1,3 @@
-
 from functools import lru_cache
 from typing import Literal
 
@@ -61,6 +60,7 @@ class Settings(BaseSettings):
     MT5_PASSWORD: SecretStr = SecretStr("")
     MT5_SERVER: str | None = None
     MT5_TIMEOUT_MS: int = 10_000
+    MT5_SESSIONS_FILE: str | None = None
 
     # Market
     MT5_SYMBOL: str = ""
@@ -87,6 +87,19 @@ class Settings(BaseSettings):
         if not value.strip():
             raise ValueError("This setting cannot be empty.")
         return value.strip()
+
+    @field_validator("MT5_SESSIONS_FILE", mode="before")
+    @classmethod
+    def normalize_mt5_sessions_file(
+        cls,
+        value: object,
+    ) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("MT5_SESSIONS_FILE must be a string.")
+        value = value.strip()
+        return value or None
 
     @field_validator("APP_PORT")
     @classmethod
