@@ -310,3 +310,14 @@ def test_next_candle_must_be_later():
             timestamp,
             300,
       )
+def test_misaligned_previous_candle_is_not_confirmed_closed():
+    calendar = make_calendar()
+
+    previous = datetime(2026, 1, 5, 8, 1, tzinfo=UTC)
+    next_candle = datetime(2026, 1, 5, 8, 11, tzinfo=UTC)
+
+    assert calendar.gap_is_confirmed_closed(
+        previous,
+        next_candle,
+        300,
+    ) is False
