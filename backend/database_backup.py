@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -69,6 +68,8 @@ class DatabaseBackupService:
                 "The source database file does not exist."
             )
 
+        temporary_path: Path | None = None
+
         try:
             self._backup_directory.mkdir(
                 parents=True,
@@ -102,6 +103,12 @@ class DatabaseBackupService:
             raise DatabaseBackupError(
                 "Failed to create a verified database backup."
             ) from exc
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _write_backup(self, destination_path: Path) -> None:
         source_connection = None
