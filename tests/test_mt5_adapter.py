@@ -819,3 +819,58 @@ def test_invalid_symbol_spread_is_rejected(field, value):
 
     with pytest.raises(Exception):
         adapter.get_symbol_info("XAUUSD")
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("balance", float("nan")),
+        ("balance", float("inf")),
+        ("equity", float("-inf")),
+        ("margin", float("nan")),
+        ("margin_free", float("inf")),
+    ],
+)
+def test_non_finite_account_financial_values_are_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+    setattr(mt5.account_info.return_value, field, value)
+
+    with pytest.raises(MT5AdapterError, match="non-finite"):
+        adapter.get_account_info()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("balance", True),
+        ("equity", "invalid"),
+        ("margin", None),
+        ("margin_free", False),
+    ],
+)
+def test_malformed_account_financial_values_are_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+    setattr(mt5.account_info.return_value, field, value)
+
+    with pytest.raises(MT5AdapterError, match="invalid account field"):
+        adapter.get_account_info()
+
+
+def test_negative_account_margin_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+    mt5.account_info.return_value.margin = -0.01
+
+    with pytest.raises(MT5AdapterError, match="negative account margin"):
+        adapter.get_account_info()
+
+
+def test_negative_balance_equity_and_free_margin_are_preserved():
+    adapter, mt5 = make_connected_adapter()
+    mt5.account_info.return_value.balance = -10.0
+    mt5.account_info.return_value.equity = -15.0
+    mt5.account_info.return_value.margin_free = -20.0
+
+    account = adapter.get_account_info()
+
+    assert account.balance == -10.0
+    assert account.equity == -15.0
+    assert account.free_margin == -20.0
