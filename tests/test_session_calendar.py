@@ -87,6 +87,71 @@ def test_load_reads_export_file(tmp_path):
     assert calendar.symbol == "GOLD"
 
 
+def test_stale_session_file_is_rejected(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(make_export(), encoding="utf-8")
+
+    with pytest.raises(
+        MarketSessionCalendarError,
+        match="stale",
+    ):
+        MarketSessionCalendar.load(
+            path,
+            max_age_seconds=3600,
+            now_utc=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+
+def test_future_session_file_is_rejected(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(make_export(), encoding="utf-8")
+
+    with pytest.raises(
+        MarketSessionCalendarError,
+        match="future",
+    ):
+        MarketSessionCalendar.load(
+            path,
+            now_utc=datetime(2026, 1, 1, 0, 6, tzinfo=UTC),
+        )
+
+
+def test_session_file_with_small_future_clock_skew_is_accepted(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(make_export(), encoding="utf-8")
+
+    calendar = MarketSessionCalendar.load(
+        path,
+        now_utc=datetime(2025, 12, 31, 23, 58, tzinfo=UTC),
+    )
+
+    assert calendar.symbol == "GOLD"
+
+
+@pytest.mark.parametrize("max_age", [0, -1, True, 1.5, "3600"])
+def test_invalid_max_age_is_rejected(tmp_path, max_age):
+    path = tmp_path / "sessions.json"
+    path.write_text(make_export(), encoding="utf-8")
+
+    with pytest.raises(MarketSessionCalendarError):
+        MarketSessionCalendar.load(
+            path,
+            max_age_seconds=max_age,
+            now_utc=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+def test_naive_now_utc_is_rejected(tmp_path):
+    path = tmp_path / "sessions.json"
+    path.write_text(make_export(), encoding="utf-8")
+
+    with pytest.raises(MarketSessionCalendarError):
+        MarketSessionCalendar.load(
+            path,
+            now_utc=datetime(2026, 1, 1),
+        )
+
+
 @pytest.mark.parametrize(
     "content",
     [
