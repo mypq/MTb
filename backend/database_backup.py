@@ -1,6 +1,8 @@
+
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,11 +14,11 @@ from backend.database import Database
 
 
 class DatabaseBackupError(RuntimeError):
-    """Raised when a database backup cannot be created safely."""
+    """Raised when a database backup or restore operation fails."""
 
 
 class DatabaseBackupService:
-    """Creates verified online backups of a SQLite database."""
+    """Creates verified backups and safely restores the primary SQLite database."""
 
     def __init__(
         self,
@@ -29,12 +31,12 @@ class DatabaseBackupService:
             url = make_url(str(database.engine.url))
         except Exception as exc:
             raise DatabaseBackupError(
-                "Database must be initialized before backup."
+                "Database must be initialized before backup or restore."
             ) from exc
 
         if url.get_backend_name() != "sqlite":
             raise DatabaseBackupError(
-                "Online backup currently supports SQLite only."
+                "Backup and restore currently support SQLite only."
             )
 
         if not url.database or url.database == ":memory:":
@@ -44,7 +46,7 @@ class DatabaseBackupService:
 
         if url.query.get("mode") == "memory":
             raise DatabaseBackupError(
-                "In-memory SQLite databases cannot be backed up."
+                "In-memory SQLite databases are not supported."
             )
 
         self._database_path = Path(
@@ -109,6 +111,91 @@ class DatabaseBackupService:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def restore_backup(self, backup_path: str | Path) -> None:
+        """Safely replace the primary database with a verified backup."""
+
+        try:
+            selected_backup = Path(
+                backup_path
+            ).expanduser().resolve()
+        except Exception as exc:
+            raise DatabaseBackupError(
+                "Invalid backup path."
+            ) from exc
+
+        if selected_backup == self._database_path:
+            raise DatabaseBackupError(
+                "The primary database cannot be restored from itself."
+            )
+
+        if not selected_backup.is_file():
+            raise DatabaseBackupError(
+                "The selected backup file does not exist."
+            )
+
+        # Validate the original backup before touching the primary database.
+        self._verify_backup(selected_backup)
+
+        temporary_path = (
+            self._database_path.parent
+            / f".{self._database_path.name}.restore.{uuid4().hex}.tmp"
+        )
+
+        database_disposed = False
+
+        try:
+            self._database_path.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            # Stage the verified backup beside the primary database.
+            with selected_backup.open("rb") as source:
+                with temporary_path.open("xb") as destination:
+                    shutil.copyfileobj(source, destination)
+                    destination.flush()
+                    os.fsync(destination.fileno())
+
+            # Verify the staged file again before replacing the primary DB.
+            self._verify_backup(temporary_path)
+
+            # The application must not use database sessions during restore.
+            self._database.dispose()
+            database_disposed = True
+
+            # Atomic replacement on the same filesystem.
+            os.replace(
+                temporary_path,
+                self._database_path,
+            )
+
+            # Reconnect the application to the primary database.
+            self._database.initialize()
+            database_disposed = False
+
+        except DatabaseBackupError:
+            raise
+        except Exception as exc:
+            raise DatabaseBackupError(
+                "Failed to restore the primary database."
+            ) from exc
+        finally:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            # If replacement failed after disposal, reconnect to the
+            # database that remains at the primary path.
+            if database_disposed:
+                try:
+                    self._database.initialize()
+                except Exception as exc:
+                    raise DatabaseBackupError(
+                        "Restore failed and the primary database "
+                        "could not be reinitialized."
+                    ) from exc
 
     def _write_backup(self, destination_path: Path) -> None:
         source_connection = None
