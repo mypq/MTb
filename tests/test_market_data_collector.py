@@ -1,10 +1,14 @@
 
 import asyncio
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from backend.market_data.collector import MarketDataCollector
+from backend.market_data.collector import (
+    MarketDataCollector,
+    next_collection_time,
+)
 from backend.market_data.repository import MarketDataSaveResult
 
 
@@ -93,7 +97,6 @@ def test_collector_normalizes_symbol_and_timeframe():
 
     assert collector._symbol == "XAUUSD"
     assert collector._timeframe == "M5"
-
     assert collector.interval_seconds == 300.0
 
 
@@ -287,3 +290,90 @@ def test_collector_run_does_not_collect_when_already_stopped():
 
     assert service.requests == []
     assert repository.saved_snapshots == []
+
+
+def test_next_collection_time_aligns_with_next_m5_close():
+    now = datetime(
+        2026, 11, 15, 10, 2, 30,
+        tzinfo=timezone.utc,
+    )
+
+    result = next_collection_time(
+        timeframe_seconds=300,
+        now=now,
+    )
+
+    assert result == datetime(
+        2026, 11, 15, 10, 5, 2,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_next_collection_time_moves_to_following_close_at_boundary():
+    now = datetime(
+        2026, 11, 15, 10, 5, 0,
+        tzinfo=timezone.utc,
+    )
+
+    result = next_collection_time(
+        timeframe_seconds=300,
+        now=now,
+    )
+
+    assert result == datetime(
+        2026, 11, 15, 10, 10, 2,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_next_collection_time_supports_zero_delay():
+    now = datetime(
+        2026, 11, 15, 10, 2, 30,
+        tzinfo=timezone.utc,
+    )
+
+    result = next_collection_time(
+        timeframe_seconds=300,
+        now=now,
+        delay_seconds=0,
+    )
+
+    assert result == datetime(
+        2026, 11, 15, 10, 5, 0,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_next_collection_time_rejects_naive_datetime():
+    now = datetime(2026, 11, 15, 10, 2, 30)
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        next_collection_time(
+            timeframe_seconds=300,
+            now=now,
+        )
+
+
+@pytest.mark.parametrize(
+    "timeframe_seconds",
+    [0, -1, True, False, 300.5],
+)
+def test_next_collection_time_rejects_invalid_timeframe(
+    timeframe_seconds,
+):
+    with pytest.raises(ValueError, match="positive integer"):
+        next_collection_time(
+            timeframe_seconds=timeframe_seconds,
+        )
+
+
+@pytest.mark.parametrize(
+    "delay_seconds",
+    [-1, True, False, float("inf"), float("nan"), "2"],
+)
+def test_next_collection_time_rejects_invalid_delay(delay_seconds):
+    with pytest.raises(ValueError, match="delay_seconds"):
+        next_collection_time(
+            timeframe_seconds=300,
+            delay_seconds=delay_seconds,
+        )
