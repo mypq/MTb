@@ -276,6 +276,8 @@ def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
         "adapter.connect",
         "monitor.start",
         "backup.start",
+        "collector.start",
+        "collector.stop",
         "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
