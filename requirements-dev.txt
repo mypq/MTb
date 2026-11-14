@@ -8,5 +8,5 @@
 pytest>=8.3,<10
 pytest-cov>=6,<8
 
-# HTTP client for FastAPI integration tests
-httpx>=0.27,<1.0
+# HTTP client for FastAPI / Starlette integration tests
+httpx2>=2.0,<3.0
