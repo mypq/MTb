@@ -724,3 +724,72 @@ def test_empty_symbol_information_name_is_rejected():
 
     with pytest.raises(Exception):
         adapter.get_symbol_info("XAUUSD")
+@pytest.mark.parametrize(
+    ("digits", "point", "expected"),
+    [
+        (2, 0.01, 2),
+        (3, 0.001, 3),
+        (4, 0.0001, 4),
+        (5, 0.00001, 5),
+        (0, 1.0, 0),
+    ],
+)
+def test_symbol_price_precision_matches_digits(
+    digits,
+    point,
+    expected,
+):
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.symbol_info.return_value.digits = digits
+    mt5.symbol_info.return_value.point = point
+
+    symbol = adapter.get_symbol_info("XAUUSD")
+
+    assert symbol.digits == expected
+    assert symbol.point == point
+    assert round(symbol.point, symbol.digits) == symbol.point
+
+
+@pytest.mark.parametrize(
+    ("digits", "point"),
+    [
+        (2, 0.001),
+        (3, 0.01),
+        (4, 0.1),
+        (5, 0.0001),
+    ],
+)
+def test_inconsistent_digits_and_point_are_rejected(
+    digits,
+    point,
+):
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.symbol_info.return_value.digits = digits
+    mt5.symbol_info.return_value.point = point
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    "digits",
+    [-1, 13, True, 2.5],
+)
+def test_invalid_symbol_digits_are_rejected(digits):
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info.return_value.digits = digits
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
+
+
+def test_tick_size_must_be_compatible_with_point():
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.symbol_info.return_value.point = 0.01
+    mt5.symbol_info.return_value.trade_tick_size = 0.015
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
