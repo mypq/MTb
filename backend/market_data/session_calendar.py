@@ -239,7 +239,34 @@ class MarketSessionCalendar:
         )
 
     @classmethod
-    def load(cls, path: str | Path) -> "MarketSessionCalendar":
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        max_age_seconds: int = 604800,
+        now_utc: datetime | None = None,
+    ) -> "MarketSessionCalendar":
+        if (
+            isinstance(max_age_seconds, bool)
+            or not isinstance(max_age_seconds, int)
+            or max_age_seconds <= 0
+        ):
+            raise MarketSessionCalendarError(
+                "max_age_seconds must be a positive integer."
+            )
+
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+
+        if (
+            not isinstance(now_utc, datetime)
+            or now_utc.tzinfo is None
+            or now_utc.utcoffset() != timedelta(0)
+        ):
+            raise MarketSessionCalendarError(
+                "now_utc must be UTC-aware."
+            )
+
         try:
             content = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -247,7 +274,23 @@ class MarketSessionCalendar:
                 "Unable to read the broker session file."
             ) from exc
 
-        return cls.from_json(content)
+        calendar = cls.from_json(content)
+
+        age_seconds = (
+            now_utc - calendar.generated_at_utc
+        ).total_seconds()
+
+        if age_seconds < -300:
+            raise MarketSessionCalendarError(
+                "Broker session file has a future generation timestamp."
+            )
+
+        if age_seconds > max_age_seconds:
+            raise MarketSessionCalendarError(
+                "Broker session file is stale."
+            )
+
+        return calendar
 
     @staticmethod
     def _mql5_weekday(value: datetime) -> int:
