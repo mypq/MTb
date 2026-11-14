@@ -734,62 +734,58 @@ def test_empty_symbol_information_name_is_rejected():
         (0, 1.0, 0),
     ],
 )
-def test_symbol_price_precision_matches_digits(
+@pytest.mark.parametrize(
+    ("digits", "point", "tick_size"),
+    [
+        (0, 1.0, 1.0),
+        (2, 0.01, 0.01),
+        (3, 0.001, 0.001),
+        (4, 0.0001, 0.0005),
+        (5, 0.00001, 0.0001),
+        (2, 0.01, 0.005),
+        (12, 0.000000000001, 0.000000000001),
+    ],
+)
+def test_symbol_price_properties_are_preserved(
     digits,
     point,
-    expected,
+    tick_size,
 ):
     adapter, mt5 = make_connected_adapter()
 
-    mt5.symbol_info.return_value.digits = digits
-    mt5.symbol_info.return_value.point = point
+    info = mt5.symbol_info.return_value
+    info.digits = digits
+    info.point = point
+    info.trade_tick_size = tick_size
 
     symbol = adapter.get_symbol_info("XAUUSD")
 
-    assert symbol.digits == expected
+    assert symbol.digits == digits
     assert symbol.point == point
-    assert round(symbol.point, symbol.digits) == symbol.point
-
-
-@pytest.mark.parametrize(
-    ("digits", "point"),
-    [
-        (2, 0.001),
-        (3, 0.01),
-        (4, 0.1),
-        (5, 0.0001),
-    ],
-)
-def test_inconsistent_digits_and_point_are_rejected(
-    digits,
-    point,
-):
-    adapter, mt5 = make_connected_adapter()
-
-    mt5.symbol_info.return_value.digits = digits
-    mt5.symbol_info.return_value.point = point
-
-    with pytest.raises(Exception):
-        adapter.get_symbol_info("XAUUSD")
+    assert symbol.trade_tick_size == tick_size
 
 
 @pytest.mark.parametrize(
     "digits",
-    [-1, 13, True, 2.5],
+    [-1, 13, True, 2.5, "2", None],
 )
 def test_invalid_symbol_digits_are_rejected(digits):
     adapter, mt5 = make_connected_adapter()
     mt5.symbol_info.return_value.digits = digits
 
-    with pytest.raises(Exception):
+    with pytest.raises(MT5AdapterError, match="invalid symbol digits"):
         adapter.get_symbol_info("XAUUSD")
 
 
-def test_tick_size_must_be_compatible_with_point():
+def test_point_and_tick_size_can_have_different_values():
     adapter, mt5 = make_connected_adapter()
 
-    mt5.symbol_info.return_value.point = 0.01
-    mt5.symbol_info.return_value.trade_tick_size = 0.015
+    info = mt5.symbol_info.return_value
+    info.digits = 3
+    info.point = 0.001
+    info.trade_tick_size = 0.005
 
-    with pytest.raises(Exception):
-        adapter.get_symbol_info("XAUUSD")
+    symbol = adapter.get_symbol_info("XAUUSD")
+
+    assert symbol.point == 0.001
+    assert symbol.trade_tick_size == 0.005
