@@ -1,6 +1,7 @@
 
 from pathlib import Path
 import sqlite3
+from threading import Event, Thread
 
 import pytest
 from sqlalchemy import text
@@ -211,9 +212,7 @@ def test_restore_rejects_missing_backup(database, tmp_path):
         service.restore_backup(missing_backup)
 
 
-def test_restore_rejects_primary_database_as_backup(
-    database,
-):
+def test_restore_rejects_primary_database_as_backup(database):
     service = DatabaseBackupService(database)
 
     with pytest.raises(DatabaseBackupError):
@@ -245,6 +244,8 @@ def test_restore_does_not_leave_temporary_files(
     )
 
     assert temporary_files == []
+
+
 def test_backup_retention_keeps_only_latest_30_valid_backups(
     database,
     tmp_path,
@@ -278,7 +279,10 @@ def test_backup_retention_removes_corrupt_backups(
         backup_directory,
     )
 
-    corrupt_backup = backup_directory / "gold_bot_00000000T000000000000Z.sqlite3"
+    corrupt_backup = (
+        backup_directory
+        / "gold_bot_00000000T000000000000Z.sqlite3"
+    )
     backup_directory.mkdir(parents=True, exist_ok=True)
     corrupt_backup.write_bytes(b"invalid-sqlite-database")
 
@@ -286,3 +290,219 @@ def test_backup_retention_removes_corrupt_backups(
 
     assert not corrupt_backup.exists()
     assert len(list(backup_directory.glob("gold_bot_*.sqlite3"))) == 1
+
+
+def test_restore_waits_until_backup_finishes(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    restore_source = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'changed-data'")
+        )
+
+    backup_started = Event()
+    release_backup = Event()
+    restore_started = Event()
+    restore_finished = Event()
+    errors = []
+
+    original_write_backup = service._write_backup
+
+    def blocking_write_backup(destination_path):
+        backup_started.set()
+        if not release_backup.wait(timeout=10):
+            raise RuntimeError("Timed out waiting to release backup")
+        original_write_backup(destination_path)
+
+    monkeypatch.setattr(
+        service,
+        "_write_backup",
+        blocking_write_backup,
+    )
+
+    def run_backup():
+        try:
+            service.create_backup()
+        except Exception as exc:
+            errors.append(exc)
+
+    def run_restore():
+        restore_started.set()
+        try:
+            service.restore_backup(restore_source)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            restore_finished.set()
+
+    backup_thread = Thread(target=run_backup)
+    restore_thread = Thread(target=run_restore)
+
+    backup_thread.start()
+
+    try:
+        assert backup_started.wait(timeout=5)
+
+        restore_thread.start()
+        assert restore_started.wait(timeout=5)
+
+        assert not restore_finished.wait(timeout=0.2)
+    finally:
+        release_backup.set()
+
+    backup_thread.join(timeout=10)
+    restore_thread.join(timeout=10)
+
+    assert not backup_thread.is_alive()
+    assert not restore_thread.is_alive()
+    assert errors == []
+    assert restore_finished.is_set()
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
+
+
+def test_backup_waits_until_restore_finishes(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    restore_source = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'changed-data'")
+        )
+
+    restore_started = Event()
+    release_restore = Event()
+    backup_started = Event()
+    backup_finished = Event()
+    errors = []
+
+    original_verify = service._verify_backup
+    blocked_once = False
+
+    def blocking_verify(path):
+        nonlocal blocked_once
+
+        if path == restore_source and not blocked_once:
+            blocked_once = True
+            restore_started.set()
+
+            if not release_restore.wait(timeout=10):
+                raise RuntimeError("Timed out waiting to release restore")
+
+        return original_verify(path)
+
+    monkeypatch.setattr(
+        service,
+        "_verify_backup",
+        blocking_verify,
+    )
+
+    def run_restore():
+        try:
+            service.restore_backup(restore_source)
+        except Exception as exc:
+            errors.append(exc)
+
+    def run_backup():
+        backup_started.set()
+        try:
+            service.create_backup()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            backup_finished.set()
+
+    restore_thread = Thread(target=run_restore)
+    backup_thread = Thread(target=run_backup)
+
+    restore_thread.start()
+
+    try:
+        assert restore_started.wait(timeout=5)
+
+        backup_thread.start()
+        assert backup_started.wait(timeout=5)
+
+        assert not backup_finished.wait(timeout=0.2)
+    finally:
+        release_restore.set()
+
+    restore_thread.join(timeout=10)
+    backup_thread.join(timeout=10)
+
+    assert not restore_thread.is_alive()
+    assert not backup_thread.is_alive()
+    assert errors == []
+    assert backup_finished.is_set()
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
+
+
+def test_operation_lock_is_released_after_backup_failure(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    restore_source = service.create_backup()
+
+    original_write_backup = service._write_backup
+    failed_once = False
+
+    def fail_once(destination_path):
+        nonlocal failed_once
+
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("forced backup failure")
+
+        original_write_backup(destination_path)
+
+    monkeypatch.setattr(
+        service,
+        "_write_backup",
+        fail_once,
+    )
+
+    with pytest.raises(DatabaseBackupError):
+        service.create_backup()
+
+    service.restore_backup(restore_source)
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
