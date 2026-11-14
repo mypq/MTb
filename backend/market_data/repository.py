@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
@@ -12,7 +12,11 @@ from backend.database_models import (
     MarketCandleRecord,
     MarketDataBatchRecord,
 )
-from backend.market_data.models import MarketCandle
+from backend.market_data.models import (
+    CandleQuality,
+    MarketCandle,
+    VolumeSource,
+)
 from backend.market_data.service import MarketDataSnapshot
 
 
@@ -32,7 +36,7 @@ class MarketDataSaveResult:
 
 
 class MarketDataRepository:
-    """Persists validated market-data snapshots without overwriting history."""
+    """Persists and retrieves validated market data."""
 
     def __init__(self, database: Database) -> None:
         self._database = database
@@ -53,6 +57,67 @@ class MarketDataRepository:
             snapshot,
             retry_on_integrity_error=True,
         )
+
+    def get_history(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+    ) -> tuple[MarketCandle, ...]:
+        """Return the newest requested candles in chronological order."""
+
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("Symbol must be a non-empty string.")
+
+        if not isinstance(timeframe, str) or not timeframe.strip():
+            raise ValueError("Timeframe must be a non-empty string.")
+
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("Count must be an integer.")
+
+        if not 1 <= count <= 10000:
+            raise ValueError("Count must be between 1 and 10000.")
+
+        normalized_symbol = symbol.strip()
+        normalized_timeframe = timeframe.strip().upper()
+
+        with self._database.session() as session:
+            records = session.scalars(
+                select(MarketCandleRecord)
+                .where(
+                    MarketCandleRecord.symbol == normalized_symbol,
+                    MarketCandleRecord.timeframe == normalized_timeframe,
+                )
+                .order_by(desc(MarketCandleRecord.timestamp))
+                .limit(count)
+            ).all()
+
+        candles: list[MarketCandle] = []
+
+        try:
+            for record in reversed(records):
+                candles.append(
+                    MarketCandle(
+                        symbol=record.symbol,
+                        timeframe=record.timeframe,
+                        timestamp=self._as_utc(record.timestamp),
+                        open=record.open_price,
+                        high=record.high_price,
+                        low=record.low_price,
+                        close=record.close_price,
+                        tick_volume=record.tick_volume,
+                        real_volume=record.real_volume,
+                        volume_source=VolumeSource(record.volume_source),
+                        is_closed=record.is_closed,
+                        quality=CandleQuality(record.quality),
+                    )
+                )
+        except Exception as exc:
+            raise MarketDataPersistenceError(
+                "Stored market data failed validation."
+            ) from exc
+
+        return tuple(candles)
 
     def _save_snapshot(
         self,
