@@ -266,3 +266,41 @@ def test_batch_rejects_non_utc_received_at():
 
     with pytest.raises(ValidationError):
         make_batch(received_at=non_utc)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("open", True),
+        ("open", False),
+        ("high", True),
+        ("low", False),
+        ("close", True),
+        ("tick_volume", True),
+    ],
+)
+def test_boolean_numeric_candle_fields_are_rejected(field, value):
+    values = {
+        "symbol": "XAUUSD",
+        "timeframe": "M5",
+        "timestamp": NOW - timedelta(minutes=5),
+        "open": 2000.0,
+        "high": 2005.0,
+        "low": 1995.0,
+        "close": 2002.0,
+        "tick_volume": 100,
+        "real_volume": None,
+        "volume_source": VolumeSource.TICK,
+        "quality": CandleQuality.VERIFIED,
+        "is_closed": True,
+    }
+    values[field] = value
+
+    with pytest.raises(ValidationError):
+        MarketCandle(**values)
+
+
+def test_boolean_real_volume_is_rejected():
+    with pytest.raises(ValidationError):
+        make_candle(
+            volume_source=VolumeSource.REAL,
+            real_volume=True,
+        )
