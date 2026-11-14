@@ -140,3 +140,9 @@ def test_health_endpoint_is_public_and_exposes_only_status(
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+def test_system_status_endpoint_rejects_missing_token(api_client):
+    response = api_client.get("/api/v1/system/status")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing bearer token."
+    assert response.headers["www-authenticate"] == "Bearer"
