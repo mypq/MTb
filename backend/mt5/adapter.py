@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -222,6 +223,17 @@ class MT5Adapter:
                     "MT5 returned an empty symbol name."
                 )
 
+            digits = info.digits
+
+            if (
+                isinstance(digits, bool)
+                or not isinstance(digits, int)
+                or not 0 <= digits <= 12
+            ):
+                raise MT5AdapterError(
+                    "MT5 returned invalid symbol digits."
+                )
+
             numeric_fields = {
                 "point": float(info.point),
                 "trade_contract_size": float(
@@ -248,7 +260,7 @@ class MT5Adapter:
             return MT5SymbolInfo(
                 name=name,
                 description=str(info.description or ""),
-                digits=int(info.digits),
+                digits=digits,
                 point=numeric_fields["point"],
                 trade_contract_size=numeric_fields[
                     "trade_contract_size"
