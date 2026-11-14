@@ -190,3 +190,85 @@ def test_stop_is_idempotent():
     assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.is_running is False
+def test_monitor_continues_after_monitoring_cycle_exception():
+    adapter = Mock()
+    adapter.connection_status.side_effect = [
+        RuntimeError("Temporary failure"),
+        make_status(MT5ConnectionState.CONNECTED),
+    ]
+
+    monitor = MT5ConnectionMonitor(
+        adapter,
+        interval_seconds=0.01,
+    )
+
+    monitor.start()
+
+    try:
+        for _ in range(100):
+            if adapter.connection_status.call_count >= 2:
+                break
+            Event().wait(0.02)
+
+        assert adapter.connection_status.call_count >= 2
+    finally:
+        assert monitor.stop(timeout_seconds=2.0) is True
+
+
+def test_check_once_records_state_transitions():
+    adapter = Mock()
+    adapter.connection_status.return_value = make_status(
+        MT5ConnectionState.DISCONNECTED
+    )
+    adapter.connect.return_value = make_status(
+        MT5ConnectionState.CONNECTED
+    )
+
+    monitor = MT5ConnectionMonitor(adapter)
+
+    status = monitor.check_once()
+
+    assert status.state == MT5ConnectionState.CONNECTED
+    assert monitor._last_state == MT5ConnectionState.CONNECTED
+
+
+def test_stop_with_zero_timeout_is_valid():
+    monitor = MT5ConnectionMonitor(adapter=Mock())
+
+    assert monitor.stop(timeout_seconds=0) is True
+
+
+def test_start_after_stop_restarts_monitor():
+    adapter = Mock()
+    adapter.connection_status.return_value = make_status(
+        MT5ConnectionState.CONNECTED
+    )
+
+    monitor = MT5ConnectionMonitor(
+        adapter,
+        interval_seconds=60.0,
+    )
+
+    monitor.start()
+
+    for _ in range(100):
+        if adapter.connection_status.call_count >= 1:
+            break
+        Event().wait(0.02)
+
+    assert adapter.connection_status.call_count >= 1
+    assert monitor.stop(timeout_seconds=2.0) is True
+
+    previous_calls = adapter.connection_status.call_count
+
+    monitor.start()
+
+    try:
+        for _ in range(100):
+            if adapter.connection_status.call_count > previous_calls:
+                break
+            Event().wait(0.02)
+
+        assert adapter.connection_status.call_count > previous_calls
+    finally:
+        assert monitor.stop(timeout_seconds=2.0) is True
