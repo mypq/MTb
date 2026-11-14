@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 import json
 
@@ -80,7 +79,10 @@ def test_load_reads_export_file(tmp_path):
     path = tmp_path / "sessions.json"
     path.write_text(make_export(), encoding="utf-8")
 
-    calendar = MarketSessionCalendar.load(path)
+    calendar = MarketSessionCalendar.load(
+        path,
+        now_utc=datetime(2026, 1, 1, tzinfo=UTC),
+    )
 
     assert calendar.symbol == "GOLD"
 
