@@ -726,3 +726,48 @@ def test_restore_recovers_when_database_reinitialization_fails_once(
 
     assert value == "backup-test"
     assert failed_once is True
+def test_restore_reports_error_when_database_recovery_fails(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_path = service.create_backup()
+
+    original_initialize = database.initialize
+
+    def fail_initialize():
+        raise RuntimeError("Forced recovery failure")
+
+    monkeypatch.setattr(
+        database,
+        "initialize",
+        fail_initialize,
+    )
+
+    with pytest.raises(
+        DatabaseBackupError,
+        match="could not be reinitialized",
+    ):
+        service.restore_backup(backup_path)
+
+    assert database._maintenance_active is False
+    assert database._engine is None
+
+    temporary_files = list(
+        service._database_path.parent.glob(
+            f".{service._database_path.name}.restore.*.tmp"
+        )
+    )
+
+    assert temporary_files == []
+
+    monkeypatch.setattr(
+        database,
+        "initialize",
+        original_initialize,
+    )
