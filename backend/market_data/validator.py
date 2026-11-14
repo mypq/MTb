@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from backend.market_data.models import (
     CandleQuality,
     VolumeSource,
 )
+from backend.market_data.session_calendar import MarketSessionCalendar
 
 
 class MarketDataIssueCode(str, Enum):
@@ -19,6 +21,8 @@ class MarketDataIssueCode(str, Enum):
     UNVERIFIED_CANDLE = "UNVERIFIED_CANDLE"
     UNKNOWN_VOLUME_SOURCE = "UNKNOWN_VOLUME_SOURCE"
     TIME_GAP = "TIME_GAP"
+    SESSION_CLOSED_GAP = "SESSION_CLOSED_GAP"
+    SESSION_CALENDAR_SYMBOL_MISMATCH = "SESSION_CALENDAR_SYMBOL_MISMATCH"
     STALE_DATA = "STALE_DATA"
     FUTURE_EXPECTED_CLOSE = "FUTURE_EXPECTED_CLOSE"
 
@@ -40,6 +44,7 @@ class MarketDataGap(BaseModel):
     expected_interval_seconds: int = Field(gt=0)
     actual_interval_seconds: int = Field(gt=0)
     missing_intervals: int = Field(ge=1)
+    confirmed_closed: bool = False
 
 
 class MarketDataValidationReport(BaseModel):
@@ -71,23 +76,26 @@ class MarketDataValidator:
     """
     Conservative market-data validation.
 
-    Freshness is evaluated using the expected close time of the
-    latest candle, not only the time at which the batch was received.
-
-    The maximum permitted delay is twice the timeframe duration.
-
-    A future expected close time is rejected because it conflicts
-    with the claim that the latest candle is already closed.
-
-    This validator does not assume that every time gap is a missing
-    market candle. Gaps can be caused by broker trading sessions,
-    weekends, holidays, or unavailable historical data.
-
-    Until a trusted trading-session calendar classifies a gap,
-    the batch is not eligible for analysis.
+    A configured broker session calendar may classify missing candle
+    intervals as confirmed market closures. Unclassified gaps remain
+    blocking. The calendar never repairs or fabricates candle data.
     """
 
     MAX_STALENESS_TIMEFRAME_MULTIPLIER = 2
+
+    def __init__(
+        self,
+        session_calendar: MarketSessionCalendar | None = None,
+    ) -> None:
+        if (
+            session_calendar is not None
+            and not isinstance(session_calendar, MarketSessionCalendar)
+        ):
+            raise TypeError(
+                "session_calendar must be a MarketSessionCalendar or None."
+            )
+
+        self._session_calendar = session_calendar
 
     def validate(
         self,
@@ -119,6 +127,29 @@ class MarketDataValidator:
 
         structurally_valid = True
         volume_data_available = True
+        calendar_matches_symbol = False
+
+        if self._session_calendar is not None:
+            calendar_matches_symbol = (
+                self._session_calendar.symbol.strip().casefold()
+                == batch.symbol.strip().casefold()
+            )
+
+            if not calendar_matches_symbol:
+                structurally_valid = False
+                issues.append(
+                    MarketDataIssue(
+                        code=MarketDataIssueCode.SESSION_CALENDAR_SYMBOL_MISMATCH,
+                        message=(
+                            "The configured broker session calendar symbol "
+                            "does not match the market-data batch symbol."
+                        ),
+                        details={
+                            "calendar_symbol": self._session_calendar.symbol,
+                            "batch_symbol": batch.symbol,
+                        },
+                    )
+                )
 
         if batch.received_at > validation_time:
             structurally_valid = False
@@ -252,35 +283,72 @@ class MarketDataValidator:
                     (actual_seconds // timeframe_seconds) - 1,
                 )
 
+                confirmed_closed = False
+
+                if (
+                    self._session_calendar is not None
+                    and calendar_matches_symbol
+                ):
+                    confirmed_closed = (
+                        self._session_calendar.gap_is_confirmed_closed(
+                            previous_candle_utc=previous.timestamp,
+                            next_candle_utc=current.timestamp,
+                            timeframe_seconds=timeframe_seconds,
+                        )
+                    )
+
                 gap = MarketDataGap(
                     previous_candle=previous.timestamp,
                     next_candle=current.timestamp,
                     expected_interval_seconds=timeframe_seconds,
                     actual_interval_seconds=actual_seconds,
                     missing_intervals=missing_intervals,
+                    confirmed_closed=confirmed_closed,
                 )
                 gaps.append(gap)
 
-                issues.append(
-                    MarketDataIssue(
-                        code=MarketDataIssueCode.TIME_GAP,
-                        message=(
-                            "A time gap was detected. Its cause has not "
-                            "been classified by a trading-session calendar."
-                        ),
-                        candle_timestamp=current.timestamp,
-                        details={
-                            "expected_interval_seconds": timeframe_seconds,
-                            "actual_interval_seconds": actual_seconds,
-                            "missing_intervals": missing_intervals,
-                        },
+                if confirmed_closed:
+                    issues.append(
+                        MarketDataIssue(
+                            code=MarketDataIssueCode.SESSION_CLOSED_GAP,
+                            message=(
+                                "The missing candle intervals are outside "
+                                "the configured broker trading sessions."
+                            ),
+                            candle_timestamp=current.timestamp,
+                            details={
+                                "expected_interval_seconds": timeframe_seconds,
+                                "actual_interval_seconds": actual_seconds,
+                                "missing_intervals": missing_intervals,
+                                "calendar_symbol": self._session_calendar.symbol,
+                            },
+                        )
                     )
-                )
+                else:
+                    issues.append(
+                        MarketDataIssue(
+                            code=MarketDataIssueCode.TIME_GAP,
+                            message=(
+                                "A time gap was detected and was not "
+                                "confirmed as a broker market closure."
+                            ),
+                            candle_timestamp=current.timestamp,
+                            details={
+                                "expected_interval_seconds": timeframe_seconds,
+                                "actual_interval_seconds": actual_seconds,
+                                "missing_intervals": missing_intervals,
+                            },
+                        )
+                    )
+
+        has_unclassified_gaps = any(
+            not gap.confirmed_closed for gap in gaps
+        )
 
         analysis_eligible = (
             structurally_valid
             and freshness_eligible
-            and not gaps
+            and not has_unclassified_gaps
         )
 
         return MarketDataValidationReport(
