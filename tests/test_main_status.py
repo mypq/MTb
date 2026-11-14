@@ -142,3 +142,78 @@ def test_system_status_reports_unavailable_chrony(
     assert result["time_sync"]["quorum_met"] is False
     assert result["time_sync"]["error"] == "Chrony command timed out."
     assert result["time_sync"]["broker_time_verified"] is False
+def test_system_status_preserves_all_trading_safety_flags(monkeypatch):
+    chrony_status = SimpleNamespace(
+        available=True,
+        synchronized=True,
+        reference_id="A29FC87B",
+        stratum=4,
+        leap_status="Normal",
+        last_offset_seconds=0.0001,
+        root_dispersion_seconds=0.002,
+        selected_source="time.cloudflare.com",
+        healthy_sources=3,
+        nts_authenticated_sources=3,
+        quorum_met=True,
+        error=None,
+    )
+
+    endpoint = create_status_endpoint(monkeypatch, chrony_status)
+    result = asyncio.run(endpoint())
+
+    assert result["mode"] == "ANALYSIS_ONLY"
+    assert result["trading_enabled"] is False
+    assert result["live_trading_authorized"] is False
+    assert result["emergency_stop"] is True
+    assert result["trading_blocked"] is True
+    assert result["live_trading_blocked"] is True
+    assert result["mt5_enabled"] is False
+
+
+def test_system_status_never_claims_broker_time_verified(
+    monkeypatch,
+):
+    chrony_status = SimpleNamespace(
+        available=True,
+        synchronized=True,
+        reference_id="A29FC87B",
+        stratum=4,
+        leap_status="Normal",
+        last_offset_seconds=0.0001,
+        root_dispersion_seconds=0.002,
+        selected_source="time.cloudflare.com",
+        healthy_sources=3,
+        nts_authenticated_sources=3,
+        quorum_met=True,
+        error=None,
+    )
+
+    endpoint = create_status_endpoint(monkeypatch, chrony_status)
+    result = asyncio.run(endpoint())
+
+    assert result["time_sync"]["synchronized"] is True
+    assert result["time_sync"]["broker_time_verified"] is False
+
+
+def test_system_status_reports_monitor_state(monkeypatch):
+    chrony_status = SimpleNamespace(
+        available=False,
+        synchronized=False,
+        reference_id=None,
+        stratum=None,
+        leap_status=None,
+        last_offset_seconds=None,
+        root_dispersion_seconds=None,
+        selected_source=None,
+        healthy_sources=0,
+        nts_authenticated_sources=0,
+        quorum_met=False,
+        error="Unavailable",
+    )
+
+    endpoint = create_status_endpoint(monkeypatch, chrony_status)
+    result = asyncio.run(endpoint())
+
+    assert result["mt5_monitor_running"] is False
+    assert result["mt5_connection"]["connected"] is False
+    assert result["mt5_enabled"] is False
