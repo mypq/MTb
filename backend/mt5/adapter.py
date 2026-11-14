@@ -258,7 +258,13 @@ class MT5Adapter:
 
         with self._lock:
             mt5 = self._require_connection()
-            info = mt5.symbol_info(normalized_symbol)
+            try:
+                info = mt5.symbol_info(normalized_symbol)
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 symbol information request raised "
+                    f"{type(exc).__name__}."
+                ) from exc
 
             if info is None:
                 raise MT5AdapterError(
