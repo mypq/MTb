@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -5,6 +6,7 @@ import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from uuid import uuid4
 
 from sqlalchemy.engine import make_url
@@ -27,6 +29,7 @@ class DatabaseBackupService:
         backup_directory: str | Path | None = None,
     ) -> None:
         self._database = database
+        self._operation_lock = RLock()
 
         try:
             url = make_url(str(database.engine.url))
@@ -64,6 +67,11 @@ class DatabaseBackupService:
             ).expanduser().resolve()
 
     def create_backup(self) -> Path:
+        """Create a backup while excluding concurrent restore operations."""
+        with self._operation_lock:
+            return self._create_backup()
+
+    def _create_backup(self) -> Path:
         """Create and verify one atomic SQLite backup file."""
 
         if not self._database_path.is_file():
@@ -98,6 +106,7 @@ class DatabaseBackupService:
 
             os.replace(temporary_path, backup_path)
             self._prune_backups()
+
             return backup_path
 
         except DatabaseBackupError:
@@ -114,6 +123,11 @@ class DatabaseBackupService:
                     pass
 
     def restore_backup(self, backup_path: str | Path) -> None:
+        """Restore a verified backup while excluding concurrent backups."""
+        with self._operation_lock:
+            self._restore_backup(backup_path)
+
+    def _restore_backup(self, backup_path: str | Path) -> None:
         """Safely replace the primary database with a verified backup."""
 
         try:
@@ -135,7 +149,6 @@ class DatabaseBackupService:
                 "The selected backup file does not exist."
             )
 
-        # Validate the original backup before touching the primary database.
         self._verify_backup(selected_backup)
 
         temporary_path = (
@@ -151,27 +164,22 @@ class DatabaseBackupService:
                 exist_ok=True,
             )
 
-            # Stage the verified backup beside the primary database.
             with selected_backup.open("rb") as source:
                 with temporary_path.open("xb") as destination:
                     shutil.copyfileobj(source, destination)
                     destination.flush()
                     os.fsync(destination.fileno())
 
-            # Verify the staged file again before replacing the primary DB.
             self._verify_backup(temporary_path)
 
-            # The application must not use database sessions during restore.
             self._database.dispose()
             database_disposed = True
 
-            # Atomic replacement on the same filesystem.
             os.replace(
                 temporary_path,
                 self._database_path,
             )
 
-            # Reconnect the application to the primary database.
             self._database.initialize()
             database_disposed = False
 
@@ -187,8 +195,6 @@ class DatabaseBackupService:
             except OSError:
                 pass
 
-            # If replacement failed after disposal, reconnect to the
-            # database that remains at the primary path.
             if database_disposed:
                 try:
                     self._database.initialize()
