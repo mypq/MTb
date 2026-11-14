@@ -74,3 +74,23 @@ def test_authentication_cannot_be_disabled_in_production(
         verify_api_token(None)
 
     assert exc.value.status_code == 503
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        "bearer test-secret-token",
+        "BEARER test-secret-token",
+        "BeArEr test-secret-token",
+    ],
+)
+def test_bearer_scheme_is_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+    authorization: str,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        API_AUTH_ENABLED=True,
+        API_ACCESS_TOKEN="test-secret-token",
+    )
+    monkeypatch.setattr("backend.security.get_settings", lambda: settings)
+
+    assert verify_api_token(authorization) is None
