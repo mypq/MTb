@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 import json
 
@@ -15,7 +16,9 @@ UTC = timezone.utc
 def make_calendar(
     *,
     offset: int = 0,
-    monday_sessions: tuple[TradingSession, ...] = (),
+    monday_sessions: tuple[TradingSession, ...] = (
+        TradingSession(3600, 82800),
+    ),
     tuesday_sessions: tuple[TradingSession, ...] = (),
     friday_sessions: tuple[TradingSession, ...] = (),
 ) -> MarketSessionCalendar:
@@ -161,7 +164,12 @@ def test_missing_session_file_is_rejected(tmp_path):
 
 def test_empty_weekly_trading_schedule_is_rejected():
     with pytest.raises(MarketSessionCalendarError):
-        make_calendar()
+        MarketSessionCalendar(
+            symbol="GOLD",
+            generated_at_utc=datetime(2026, 1, 1, tzinfo=UTC),
+            server_utc_offset_seconds=0,
+            trade_sessions=((), (), (), (), (), (), ()),
+        )
 
 
 def test_is_trading_time_uses_broker_utc_offset():
@@ -170,7 +178,6 @@ def test_is_trading_time_uses_broker_utc_offset():
         monday_sessions=(TradingSession(9 * 3600, 17 * 3600),),
     )
 
-    # Monday 07:00 UTC is Monday 09:00 at the broker.
     timestamp = datetime(2026, 1, 5, 7, 0, tzinfo=UTC)
 
     assert calendar.is_trading_time(timestamp) is True
@@ -191,7 +198,6 @@ def test_is_trading_time_handles_overnight_session():
         monday_sessions=(TradingSession(22 * 3600, 2 * 3600),),
     )
 
-    # Tuesday 01:00 belongs to Monday's overnight session.
     timestamp = datetime(2026, 1, 6, 1, 0, tzinfo=UTC)
 
     assert calendar.is_trading_time(timestamp) is True
@@ -199,8 +205,7 @@ def test_is_trading_time_handles_overnight_session():
 
 def test_weekend_gap_is_confirmed_closed():
     calendar = make_calendar(
-        friday_sessions=(TradingSession(1 * 3600, 23 * 3600),),
-        monday_sessions=(TradingSession(1 * 3600, 23 * 3600),),
+        friday_sessions=(TradingSession(3600, 82800),),
     )
 
     previous = datetime(2026, 1, 2, 23, 0, tzinfo=UTC)
@@ -215,7 +220,7 @@ def test_weekend_gap_is_confirmed_closed():
 
 def test_gap_overlapping_trading_session_is_not_confirmed_closed():
     calendar = make_calendar(
-        friday_sessions=(TradingSession(1 * 3600, 23 * 30 * 60),),
+        friday_sessions=(TradingSession(3600, 84600),),
     )
 
     previous = datetime(2026, 1, 2, 23, 0, tzinfo=UTC)
@@ -309,7 +314,9 @@ def test_next_candle_must_be_later():
             timestamp,
             timestamp,
             300,
-      )
+        )
+
+
 def test_misaligned_previous_candle_is_not_confirmed_closed():
     calendar = make_calendar()
 
