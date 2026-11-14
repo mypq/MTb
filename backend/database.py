@@ -149,6 +149,11 @@ class Database:
 
     def dispose(self) -> None:
         with self._condition:
+            if self._maintenance_active:
+                raise DatabaseError(
+                    "Cannot dispose database during active maintenance."
+                )
+
             if self._engine is None:
                 return
 
