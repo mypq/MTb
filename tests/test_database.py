@@ -115,3 +115,167 @@ def test_dispose_is_safe_when_not_initialized():
 
     database.dispose()
     database.dispose()
+
+from threading import Event, Thread
+
+
+def test_maintenance_waits_for_active_sessions(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'maintenance.db').as_posix()}"
+    )
+    database.initialize()
+
+    session_entered = Event()
+    release_session = Event()
+    maintenance_attempted = Event()
+    maintenance_entered = Event()
+    errors = []
+
+    def hold_session():
+        try:
+            with database.session():
+                session_entered.set()
+                if not release_session.wait(timeout=10):
+                    raise RuntimeError("Session release timed out")
+        except Exception as exc:
+            errors.append(exc)
+
+    def enter_maintenance():
+        maintenance_attempted.set()
+        try:
+            with database.maintenance():
+                maintenance_entered.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    session_thread = Thread(target=hold_session)
+    maintenance_thread = Thread(target=enter_maintenance)
+
+    try:
+        session_thread.start()
+        assert session_entered.wait(timeout=5)
+
+        maintenance_thread.start()
+        assert maintenance_attempted.wait(timeout=5)
+
+        assert not maintenance_entered.wait(timeout=0.2)
+
+        release_session.set()
+
+        assert maintenance_entered.wait(timeout=5)
+
+        session_thread.join(timeout=5)
+        maintenance_thread.join(timeout=5)
+
+        assert not session_thread.is_alive()
+        assert not maintenance_thread.is_alive()
+        assert errors == []
+    finally:
+        release_session.set()
+        session_thread.join(timeout=5)
+        if maintenance_thread.ident is not None:
+            maintenance_thread.join(timeout=5)
+        database.dispose()
+
+
+def test_new_sessions_wait_during_maintenance(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'blocked-sessions.db').as_posix()}"
+    )
+    database.initialize()
+
+    session_attempted = Event()
+    session_entered = Event()
+    errors = []
+
+    def open_session():
+        session_attempted.set()
+        try:
+            with database.session():
+                session_entered.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    session_thread = None
+
+    try:
+        with database.maintenance():
+            session_thread = Thread(target=open_session)
+            session_thread.start()
+
+            assert session_attempted.wait(timeout=5)
+            assert not session_entered.wait(timeout=0.2)
+
+        assert session_entered.wait(timeout=5)
+
+        session_thread.join(timeout=5)
+
+        assert not session_thread.is_alive()
+        assert errors == []
+    finally:
+        if session_thread is not None:
+            session_thread.join(timeout=5)
+        database.dispose()
+
+
+def test_maintenance_releases_after_exception(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'maintenance-error.db').as_posix()}"
+    )
+    database.initialize()
+
+    try:
+        with pytest.raises(RuntimeError, match="forced maintenance failure"):
+            with database.maintenance():
+                raise RuntimeError("forced maintenance failure")
+
+        with database.session() as session:
+            result = session.execute(text("SELECT 1")).scalar_one()
+
+        assert result == 1
+    finally:
+        database.dispose()
+
+
+def test_dispose_rejects_active_sessions(tmp_path: Path):
+    database = Database(
+        f"sqlite:///{(tmp_path / 'active-session.db').as_posix()}"
+    )
+    database.initialize()
+
+    session_entered = Event()
+    release_session = Event()
+    errors = []
+
+    def hold_session():
+        try:
+            with database.session():
+                session_entered.set()
+                if not release_session.wait(timeout=10):
+                    raise RuntimeError("Session release timed out")
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = Thread(target=hold_session)
+
+    try:
+        thread.start()
+        assert session_entered.wait(timeout=5)
+
+        with pytest.raises(DatabaseError, match="sessions are active"):
+            database.dispose()
+
+        release_session.set()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert errors == []
+
+        database.dispose()
+
+        with pytest.raises(DatabaseError):
+            _ = database.engine
+    finally:
+        release_session.set()
+        thread.join(timeout=5)
+        database.dispose()
