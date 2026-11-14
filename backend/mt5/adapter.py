@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -186,18 +187,59 @@ class MT5Adapter:
                     self._last_error_message(mt5)
                 )
 
-            return MT5AccountInfo(
-                login=int(account.login),
-                server=str(account.server),
-                currency=str(account.currency),
-                balance=float(account.balance),
-                equity=float(account.equity),
-                margin=float(account.margin),
-                free_margin=float(account.margin_free),
-                leverage=int(account.leverage),
-                trade_allowed=bool(account.trade_allowed),
-                trade_expert=bool(account.trade_expert),
-            )
+            try:
+                raw_financial_values = {
+                    "balance": account.balance,
+                    "equity": account.equity,
+                    "margin": account.margin,
+                    "free_margin": account.margin_free,
+                }
+                financial_values: dict[str, float] = {}
+
+                for field, raw_value in raw_financial_values.items():
+                    if isinstance(raw_value, bool):
+                        raise MT5AdapterError(
+                            f"MT5 returned invalid account field: {field}."
+                        )
+
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise MT5AdapterError(
+                            f"MT5 returned invalid account field: {field}."
+                        ) from exc
+
+                    if not isfinite(value):
+                        raise MT5AdapterError(
+                            f"MT5 returned non-finite account field: {field}."
+                        )
+
+                    financial_values[field] = value
+
+                if financial_values["margin"] < 0:
+                    raise MT5AdapterError(
+                        "MT5 returned a negative account margin."
+                    )
+
+                return MT5AccountInfo(
+                    login=int(account.login),
+                    server=str(account.server),
+                    currency=str(account.currency),
+                    balance=financial_values["balance"],
+                    equity=financial_values["equity"],
+                    margin=financial_values["margin"],
+                    free_margin=financial_values["free_margin"],
+                    leverage=int(account.leverage),
+                    trade_allowed=bool(account.trade_allowed),
+                    trade_expert=bool(account.trade_expert),
+                )
+
+            except MT5AdapterError:
+                raise
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 returned malformed account information."
+                ) from exc
 
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
         if not isinstance(symbol, str):
