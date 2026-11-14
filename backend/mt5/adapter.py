@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -201,6 +200,9 @@ class MT5Adapter:
             )
 
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
+        if not isinstance(symbol, str):
+            raise ValueError("Symbol name must be a string.")
+
         normalized_symbol = symbol.strip()
 
         if not normalized_symbol:
@@ -216,67 +218,100 @@ class MT5Adapter:
                     f"{self._last_error_message(mt5)}"
                 )
 
-            name = str(info.name).strip()
+            try:
+                name = str(info.name).strip()
 
-            if not name:
-                raise MT5AdapterError(
-                    "MT5 returned an empty symbol name."
-                )
-
-            digits = info.digits
-
-            if (
-                isinstance(digits, bool)
-                or not isinstance(digits, int)
-                or not 0 <= digits <= 12
-            ):
-                raise MT5AdapterError(
-                    "MT5 returned invalid symbol digits."
-                )
-
-            numeric_fields = {
-                "point": float(info.point),
-                "trade_contract_size": float(
-                    info.trade_contract_size
-                ),
-                "trade_tick_size": float(info.trade_tick_size),
-                "trade_tick_value": float(info.trade_tick_value),
-                "volume_min": float(info.volume_min),
-                "volume_max": float(info.volume_max),
-                "volume_step": float(info.volume_step),
-            }
-
-            for field, value in numeric_fields.items():
-                if not isfinite(value):
+                if not name:
                     raise MT5AdapterError(
-                        f"MT5 returned non-finite symbol field: {field}."
+                        "MT5 returned an empty symbol name."
                     )
 
-            if numeric_fields["volume_min"] > numeric_fields["volume_max"]:
-                raise MT5AdapterError(
-                    "MT5 returned invalid volume limits."
+                digits = info.digits
+
+                if (
+                    isinstance(digits, bool)
+                    or not isinstance(digits, int)
+                    or not 0 <= digits <= 12
+                ):
+                    raise MT5AdapterError(
+                        "MT5 returned invalid symbol digits."
+                    )
+
+                raw_numeric_fields = {
+                    "point": info.point,
+                    "trade_contract_size": info.trade_contract_size,
+                    "trade_tick_size": info.trade_tick_size,
+                    "trade_tick_value": info.trade_tick_value,
+                    "volume_min": info.volume_min,
+                    "volume_max": info.volume_max,
+                    "volume_step": info.volume_step,
+                }
+
+                numeric_fields = {}
+
+                for field, raw_value in raw_numeric_fields.items():
+                    if isinstance(raw_value, bool):
+                        raise MT5AdapterError(
+                            f"MT5 returned invalid symbol field: {field}."
+                        )
+
+                    try:
+                        value = float(raw_value)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise MT5AdapterError(
+                            f"MT5 returned invalid symbol field: {field}."
+                        ) from exc
+
+                    if not isfinite(value):
+                        raise MT5AdapterError(
+                            f"MT5 returned non-finite symbol field: {field}."
+                        )
+
+                    numeric_fields[field] = value
+
+                if numeric_fields["volume_min"] > numeric_fields["volume_max"]:
+                    raise MT5AdapterError(
+                        "MT5 returned invalid volume limits."
+                    )
+
+                spread = info.spread
+
+                if (
+                    isinstance(spread, bool)
+                    or not isinstance(spread, int)
+                    or spread < 0
+                ):
+                    raise MT5AdapterError(
+                        "MT5 returned invalid symbol spread."
+                    )
+
+                return MT5SymbolInfo(
+                    name=name,
+                    description=str(info.description or ""),
+                    digits=digits,
+                    point=numeric_fields["point"],
+                    trade_contract_size=numeric_fields[
+                        "trade_contract_size"
+                    ],
+                    trade_tick_size=numeric_fields[
+                        "trade_tick_size"
+                    ],
+                    trade_tick_value=numeric_fields[
+                        "trade_tick_value"
+                    ],
+                    volume_min=numeric_fields["volume_min"],
+                    volume_max=numeric_fields["volume_max"],
+                    volume_step=numeric_fields["volume_step"],
+                    spread=spread,
+                    visible=bool(info.visible),
                 )
 
-            return MT5SymbolInfo(
-                name=name,
-                description=str(info.description or ""),
-                digits=digits,
-                point=numeric_fields["point"],
-                trade_contract_size=numeric_fields[
-                    "trade_contract_size"
-                ],
-                trade_tick_size=numeric_fields[
-                    "trade_tick_size"
-                ],
-                trade_tick_value=numeric_fields[
-                    "trade_tick_value"
-                ],
-                volume_min=numeric_fields["volume_min"],
-                volume_max=numeric_fields["volume_max"],
-                volume_step=numeric_fields["volume_step"],
-                spread=int(info.spread),
-                visible=bool(info.visible),
-            )
+            except MT5AdapterError:
+                raise
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 returned malformed symbol information."
+                ) from exc
 
     def get_closed_candles(
         self,
