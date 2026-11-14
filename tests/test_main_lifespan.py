@@ -266,6 +266,10 @@ def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
                 app.state.market_data_repository.database
                 is app.state.database
             )
+            assert app.state.market_data_collector is not None
+            assert app.state.market_data_collector.symbol == "XAUUSD"
+            assert app.state.market_data_collector.timeframe == "M5"
+            assert app.state.market_data_collector.count == 300
 
     asyncio.run(run())
 
@@ -369,6 +373,8 @@ def test_lifespan_skips_adapter_shutdown_when_monitor_does_not_stop(
         "adapter.connect",
         "monitor.start",
         "backup.start",
+        "collector.start",
+        "collector.stop",
         "backup.stop",
         "monitor.stop",
         "database.dispose",
@@ -397,6 +403,8 @@ def test_lifespan_skips_adapter_shutdown_when_monitor_stop_raises(
         "adapter.connect",
         "monitor.start",
         "backup.start",
+        "collector.start",
+        "collector.stop",
         "backup.stop",
         "monitor.stop",
         "database.dispose",
