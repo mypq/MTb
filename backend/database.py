@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+from threading import Condition, RLock
 from typing import Iterator
 
 from sqlalchemy import create_engine
@@ -15,7 +16,7 @@ class DatabaseError(RuntimeError):
 
 
 class Database:
-    """Owns the SQLAlchemy engine and session lifecycle."""
+    """Owns the SQLAlchemy engine, sessions, and exclusive maintenance."""
 
     def __init__(self, database_url: str) -> None:
         if not isinstance(database_url, str) or not database_url.strip():
@@ -25,44 +26,50 @@ class Database:
         self._engine: Engine | None = None
         self._session_factory: sessionmaker[Session] | None = None
 
+        self._condition = Condition(RLock())
+        self._active_sessions = 0
+        self._maintenance_active = False
+
     @property
     def engine(self) -> Engine:
-        if self._engine is None:
-            raise DatabaseError("Database has not been initialized.")
-        return self._engine
+        with self._condition:
+            if self._engine is None:
+                raise DatabaseError("Database has not been initialized.")
+            return self._engine
 
     def initialize(self) -> None:
-        if self._engine is not None:
-            return
+        with self._condition:
+            if self._engine is not None:
+                return
 
-        try:
-            url = make_url(self._database_url)
-            self._prepare_sqlite_directory(url)
+            try:
+                url = make_url(self._database_url)
+                self._prepare_sqlite_directory(url)
 
-            connect_args: dict[str, object] = {}
+                connect_args: dict[str, object] = {}
 
-            if url.get_backend_name() == "sqlite":
-                connect_args["check_same_thread"] = False
+                if url.get_backend_name() == "sqlite":
+                    connect_args["check_same_thread"] = False
 
-            engine = create_engine(
-                url,
-                connect_args=connect_args,
-                pool_pre_ping=True,
-            )
+                engine = create_engine(
+                    url,
+                    connect_args=connect_args,
+                    pool_pre_ping=True,
+                )
 
-            factory = sessionmaker(
-                bind=engine,
-                autoflush=False,
-                expire_on_commit=False,
-            )
+                factory = sessionmaker(
+                    bind=engine,
+                    autoflush=False,
+                    expire_on_commit=False,
+                )
 
-            self._engine = engine
-            self._session_factory = factory
+                self._engine = engine
+                self._session_factory = factory
 
-        except Exception as exc:
-            raise DatabaseError(
-                "Failed to initialize the database."
-            ) from exc
+            except Exception as exc:
+                raise DatabaseError(
+                    "Failed to initialize the database."
+                ) from exc
 
     @staticmethod
     def _prepare_sqlite_directory(url) -> None:
@@ -82,24 +89,76 @@ class Database:
 
     @contextmanager
     def session(self) -> Iterator[Session]:
-        if self._session_factory is None:
-            raise DatabaseError("Database has not been initialized.")
+        with self._condition:
+            while self._maintenance_active:
+                self._condition.wait()
 
-        db_session = self._session_factory()
+            if self._session_factory is None:
+                raise DatabaseError(
+                    "Database has not been initialized."
+                )
+
+            factory = self._session_factory
+            self._active_sessions += 1
+
+        db_session = None
 
         try:
-            yield db_session
-            db_session.commit()
-        except Exception:
-            db_session.rollback()
-            raise
+            db_session = factory()
+
+            try:
+                yield db_session
+                db_session.commit()
+            except Exception:
+                db_session.rollback()
+                raise
+
         finally:
-            db_session.close()
+            try:
+                if db_session is not None:
+                    db_session.close()
+            finally:
+                with self._condition:
+                    self._active_sessions -= 1
+                    self._condition.notify_all()
+
+    @contextmanager
+    def maintenance(self) -> Iterator[None]:
+        """Block new sessions and wait for active sessions to finish."""
+
+        with self._condition:
+            while self._maintenance_active:
+                self._condition.wait()
+
+            self._maintenance_active = True
+
+            try:
+                while self._active_sessions > 0:
+                    self._condition.wait()
+            except BaseException:
+                self._maintenance_active = False
+                self._condition.notify_all()
+                raise
+
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._maintenance_active = False
+                self._condition.notify_all()
 
     def dispose(self) -> None:
-        if self._engine is None:
-            return
+        with self._condition:
+            if self._engine is None:
+                return
 
-        self._engine.dispose()
-        self._engine = None
-        self._session_factory = None
+            if self._active_sessions > 0:
+                raise DatabaseError(
+                    "Cannot dispose database while sessions are active."
+                )
+
+            engine = self._engine
+            self._engine = None
+            self._session_factory = None
+
+        engine.dispose()
