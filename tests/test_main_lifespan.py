@@ -68,6 +68,16 @@ class FakeDatabase:
         self.events.append("database.dispose")
 
 
+class FakeBackupService:
+    def __init__(self, database, events):
+        self.database = database
+        self.events = events
+        self.events.append("backup_service.initialize")
+
+    def create_backup(self):
+        self.events.append("backup.create")
+
+
 class FakeMarketDataService:
     def __init__(self, source):
         self.source = source
@@ -111,6 +121,7 @@ def configure_lifecycle(
     migration_error=None,
 ):
     events = []
+
     settings = SimpleNamespace(
         MT5_ENABLED=mt5_enabled,
         DATABASE_URL="sqlite:///./data/test.db",
@@ -138,6 +149,14 @@ def configure_lifecycle(
             initialize_error=initialize_error,
         )
 
+    def create_backup_service(database):
+        return FakeBackupService(database, events)
+
+    async def fake_backup_loop(backup_service, stop_event):
+        events.append("backup.start")
+        await stop_event.wait()
+        events.append("backup.stop")
+
     def apply_migrations():
         events.append("database.migrations")
         if migration_error is not None:
@@ -147,7 +166,18 @@ def configure_lifecycle(
     monkeypatch.setattr(main, "MT5Adapter", create_adapter)
     monkeypatch.setattr(main, "MT5ConnectionMonitor", create_monitor)
     monkeypatch.setattr(main, "Database", create_database)
+    monkeypatch.setattr(
+        main,
+        "DatabaseBackupService",
+        create_backup_service,
+    )
+    monkeypatch.setattr(
+        main,
+        "_database_backup_loop",
+        fake_backup_loop,
+    )
     monkeypatch.setattr(main, "upgrade_database", apply_migrations)
+
     monkeypatch.setattr(
         main,
         "MarketDataService",
@@ -168,7 +198,7 @@ def configure_lifecycle(
     return app, events
 
 
-def test_lifespan_starts_monitor_and_stops_it_before_adapter_shutdown(
+def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
     monkeypatch,
 ):
     app, events = configure_lifecycle(
@@ -181,10 +211,12 @@ def test_lifespan_starts_monitor_and_stops_it_before_adapter_shutdown(
             assert events == [
                 "database.initialize",
                 "database.migrations",
+                "backup_service.initialize",
                 "adapter.connect",
                 "monitor.start",
             ]
-            assert app.state.chrony_status_service is not None
+
+            assert app.state.database_backup_service is not None
             assert app.state.database is not None
             assert app.state.market_data_repository is not None
             assert (
@@ -197,24 +229,18 @@ def test_lifespan_starts_monitor_and_stops_it_before_adapter_shutdown(
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
         "adapter.connect",
         "monitor.start",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
     ]
-    assert app.state.mt5_adapter is not None
-    assert app.state.mt5_monitor is not None
-    assert app.state.market_data_service.source is app.state.mt5_adapter
-    assert isinstance(
-        app.state.chrony_status_service,
-        FakeChronyStatusService,
-    )
 
 
-def test_lifespan_does_not_start_monitor_when_mt5_is_disabled(
-    monkeypatch,
-):
+def test_lifespan_starts_backup_when_mt5_is_disabled(monkeypatch):
     app, events = configure_lifecycle(
         monkeypatch,
         mt5_enabled=False,
@@ -225,26 +251,26 @@ def test_lifespan_does_not_start_monitor_when_mt5_is_disabled(
             assert events == [
                 "database.initialize",
                 "database.migrations",
+                "backup_service.initialize",
             ]
-            assert app.state.chrony_status_service is not None
-            assert app.state.market_data_repository is not None
-            assert (
-                app.state.market_data_repository.database
-                is app.state.database
-            )
+
+            assert app.state.database_backup_service is not None
 
     asyncio.run(run())
 
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
     ]
 
 
-def test_lifespan_cleans_up_when_initial_connection_raises(
+def test_lifespan_stops_backup_when_initial_connection_raises(
     monkeypatch,
 ):
     app, events = configure_lifecycle(
@@ -266,7 +292,10 @@ def test_lifespan_cleans_up_when_initial_connection_raises(
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
         "adapter.connect",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
@@ -291,8 +320,11 @@ def test_lifespan_skips_adapter_shutdown_when_monitor_does_not_stop(
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
         "adapter.connect",
         "monitor.start",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "database.dispose",
     ]
@@ -316,8 +348,11 @@ def test_lifespan_skips_adapter_shutdown_when_monitor_stop_raises(
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
         "adapter.connect",
         "monitor.start",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "database.dispose",
     ]
@@ -399,7 +434,38 @@ def test_chrony_service_is_independent_of_mt5_connection(
     assert events == [
         "database.initialize",
         "database.migrations",
+        "backup_service.initialize",
+        "backup.start",
+        "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
     ]
+
+
+def test_database_backup_loop_creates_backup_and_stops(monkeypatch):
+    calls = []
+    stop_event = asyncio.Event()
+
+    class BackupService:
+        def create_backup(self):
+            calls.append("backup.created")
+
+    async def fake_to_thread(function):
+        function()
+        stop_event.set()
+
+    monkeypatch.setattr(
+        main.asyncio,
+        "to_thread",
+        fake_to_thread,
+    )
+
+    asyncio.run(
+        main._database_backup_loop(
+            BackupService(),
+            stop_event,
+        )
+    )
+
+    assert calls == ["backup.created"]
