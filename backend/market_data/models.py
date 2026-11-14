@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -60,6 +59,14 @@ class MarketCandle(BaseModel):
             raise ValueError("Candle timestamp must already be UTC.")
 
         return value.astimezone(timezone.utc)
+
+    @field_validator("tick_volume", "real_volume", mode="before")
+    @classmethod
+    def reject_boolean_volume(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Volume values must not be boolean.")
+
+        return value
 
     @field_validator("open", "high", "low", "close")
     @classmethod
