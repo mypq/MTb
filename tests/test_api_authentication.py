@@ -1,4 +1,3 @@
-
 from types import SimpleNamespace
 
 import pytest
@@ -132,3 +131,12 @@ def test_market_data_endpoint_rejects_unconfigured_token(
         response.json()["detail"]
         == "API access token is not configured."
     )
+
+
+def test_health_endpoint_is_public_and_exposes_only_status(
+    api_client,
+):
+    response = api_client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
