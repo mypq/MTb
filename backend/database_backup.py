@@ -97,7 +97,7 @@ class DatabaseBackupService:
             self._verify_backup(temporary_path)
 
             os.replace(temporary_path, backup_path)
-
+            self._prune_backups()
             return backup_path
 
         except DatabaseBackupError:
@@ -197,6 +197,37 @@ class DatabaseBackupService:
                         "Restore failed and the primary database "
                         "could not be reinitialized."
                     ) from exc
+
+    def _prune_backups(self) -> None:
+        backups = sorted(
+            self._backup_directory.glob("gold_bot_*.sqlite3"),
+            key=lambda path: path.name,
+            reverse=True,
+        )
+
+        valid_backups: list[Path] = []
+
+        for backup_path in backups:
+            try:
+                self._verify_backup(backup_path)
+            except DatabaseBackupError:
+                try:
+                    backup_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise DatabaseBackupError(
+                        f"Failed to remove invalid backup: {backup_path.name}"
+                    ) from exc
+                continue
+
+            valid_backups.append(backup_path)
+
+        for old_backup in valid_backups[self.BACKUP_RETENTION_LIMIT:]:
+            try:
+                old_backup.unlink(missing_ok=True)
+            except OSError as exc:
+                raise DatabaseBackupError(
+                    f"Failed to remove expired backup: {old_backup.name}"
+                ) from exc
 
     def _write_backup(self, destination_path: Path) -> None:
         source_connection = None
