@@ -74,8 +74,11 @@ def make_mt5_module(
     return mt5
 
 
+_DEFAULT_TIMESTAMP = object()
+
+
 def make_rate(
-    timestamp=None,
+    timestamp=_DEFAULT_TIMESTAMP,
     open_price=2000.0,
     high=2005.0,
     low=1995.0,
@@ -83,7 +86,7 @@ def make_rate(
     tick_volume=120,
     real_volume=0,
 ):
-    if timestamp is None:
+    if timestamp is _DEFAULT_TIMESTAMP:
         timestamp = int(
             (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
         )
