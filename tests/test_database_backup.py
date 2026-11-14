@@ -129,9 +129,7 @@ def test_backup_requires_initialized_database():
         DatabaseBackupService(database)
 
 
-def test_backup_rejects_missing_source_database(
-    tmp_path,
-):
+def test_backup_rejects_missing_source_database(tmp_path):
     database_path = tmp_path / "missing.db"
     database = Database(
         f"sqlite:///{database_path.as_posix()}"
@@ -151,3 +149,99 @@ def test_backup_rejects_missing_source_database(
             service.create_backup()
     finally:
         database.dispose()
+
+
+def test_restore_backup_restores_primary_database(database, tmp_path):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_path = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'changed-data'")
+        )
+
+    service.restore_backup(backup_path)
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
+
+
+def test_restore_rejects_corrupt_backup_without_changing_primary(
+    database,
+    tmp_path,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    corrupt_backup = tmp_path / "corrupt.sqlite3"
+    corrupt_backup.write_bytes(b"not-a-valid-sqlite-database")
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'original-primary'")
+        )
+
+    with pytest.raises(DatabaseBackupError):
+        service.restore_backup(corrupt_backup)
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "original-primary"
+
+
+def test_restore_rejects_missing_backup(database, tmp_path):
+    service = DatabaseBackupService(database)
+
+    missing_backup = tmp_path / "missing.sqlite3"
+
+    with pytest.raises(DatabaseBackupError):
+        service.restore_backup(missing_backup)
+
+
+def test_restore_rejects_primary_database_as_backup(
+    database,
+):
+    service = DatabaseBackupService(database)
+
+    with pytest.raises(DatabaseBackupError):
+        service.restore_backup(service._database_path)
+
+
+def test_restore_does_not_leave_temporary_files(
+    database,
+    tmp_path,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    backup_path = service.create_backup()
+
+    with database.session() as session:
+        session.execute(
+            text("UPDATE records SET value = 'changed-data'")
+        )
+
+    service.restore_backup(backup_path)
+
+    temporary_files = list(
+        service._database_path.parent.glob(
+            f".{service._database_path.name}.restore.*.tmp"
+        )
+    )
+
+    assert temporary_files == []
