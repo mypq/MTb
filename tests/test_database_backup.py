@@ -1,119 +1,153 @@
-from datetime import datetime, timezone
-import os
+
 from pathlib import Path
 import sqlite3
-from uuid import uuid4
 
-from sqlalchemy.engine.url import make_url
+import pytest
+from sqlalchemy import text
 
 from backend.database import Database
+from backend.database_backup import (
+    DatabaseBackupError,
+    DatabaseBackupService,
+)
 
 
-class DatabaseBackupError(Exception):
-    """Raised when a database backup operation fails."""
+@pytest.fixture
+def database(tmp_path: Path):
+    database_path = tmp_path / "gold_bot.db"
+    db = Database(f"sqlite:///{database_path.as_posix()}")
+    db.initialize()
 
-    pass
-
-
-class DatabaseBackupService:
-    def __init__(
-        self,
-        database: Database,
-        backup_directory: Path | None = None,
-    ):
-        self._database = database
-        
-        # استخراج مسار ملف قاعدة البيانات من رابط SQLAlchemy
-        url = make_url(str(database.engine.url))
-        if url.drivername not in ("sqlite", "sqlite+pysqlite"):
-            raise DatabaseBackupError("Only SQLite databases are supported.")
-        
-        database_file = url.database
-        if not database_file or database_file == ":memory:":
-            raise DatabaseBackupError(
-                "Database backup requires a file-based SQLite database, not in-memory."
+    try:
+        with db.session() as session:
+            session.execute(
+                text(
+                    "CREATE TABLE records "
+                    "(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+                )
             )
-        
-        self._database_path = Path(database_file)
-        
-        if not self._database_path.is_file():
-            raise DatabaseBackupError(
-                "The source database file does not exist or has not been initialized."
-            )
-            
-        if backup_directory is not None:
-            self._backup_directory = Path(backup_directory)
-        else:
-            self._backup_directory = self._database_path.parent / "backups"
-
-    def _write_backup(self, destination_path: Path) -> None:
-        """نسخ قاعدة البيانات بشكل آمن باستخدام واجهة النسخ الاحتياطي لـ SQLite."""
-        try:
-            with sqlite3.connect(self._database_path) as source_conn:
-                with sqlite3.connect(destination_path) as dest_conn:
-                    source_conn.backup(dest_conn)
-        except Exception as exc:
-            raise DatabaseBackupError("Failed to write backup file.") from exc
-
-    def _verify_backup(self, backup_path: Path) -> None:
-        """التحقق من سلامة ملف النسخ الاحتياطي."""
-        try:
-            with sqlite3.connect(backup_path) as connection:
-                cursor = connection.execute("PRAGMA integrity_check")
-                result = cursor.fetchall()
-                if result != [("ok",)]:
-                    raise DatabaseBackupError("Backup integrity check failed.")
-        except Exception as exc:
-            if isinstance(exc, DatabaseBackupError):
-                raise
-            raise DatabaseBackupError("Failed to verify backup database.") from exc
-
-    def create_backup(self) -> Path:
-        """Create and verify one atomic SQLite backup file."""
-
-        if not self._database_path.is_file():
-            raise DatabaseBackupError(
-                "The source database file does not exist."
+            session.execute(
+                text(
+                    "INSERT INTO records (value) VALUES ('backup-test')"
+                )
             )
 
-        temporary_path: Path | None = None
+        yield db
+    finally:
+        db.dispose()
 
-        try:
-            self._backup_directory.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
 
-            timestamp = datetime.now(timezone.utc).strftime(
-                "%Y%m%dT%H%M%S%fZ"
-            )
+def test_create_backup_creates_verified_database(database, tmp_path):
+    backup_directory = tmp_path / "backups"
+    service = DatabaseBackupService(database, backup_directory)
 
-            backup_path = (
-                self._backup_directory
-                / f"gold_bot_{timestamp}.sqlite3"
-            )
+    backup_path = service.create_backup()
 
-            temporary_path = (
-                self._backup_directory
-                / f".{backup_path.name}.{uuid4().hex}.tmp"
-            )
+    assert backup_path.is_file()
+    assert backup_path.parent == backup_directory
+    assert backup_path.stat().st_size > 0
+    assert backup_path.name.endswith(".sqlite3")
 
-            self._write_backup(temporary_path)
-            self._verify_backup(temporary_path)
+    connection = sqlite3.connect(backup_path)
+    try:
+        integrity = connection.execute(
+            "PRAGMA integrity_check"
+        ).fetchall()
 
-            os.replace(temporary_path, backup_path)
+        value = connection.execute(
+            "SELECT value FROM records"
+        ).fetchone()
+    finally:
+        connection.close()
 
-            return backup_path
+    assert integrity == [("ok",)]
+    assert value == ("backup-test",)
 
-        except DatabaseBackupError:
-            raise
-        except Exception as exc:
-            raise DatabaseBackupError(
-                "Failed to create a verified database backup."
-            ) from exc
-        finally:
-            if temporary_path is not None:
-                try:
-                    temporary_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+
+def test_create_backup_does_not_modify_source_database(
+    database,
+    tmp_path,
+):
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+
+    service.create_backup()
+
+    with database.session() as session:
+        value = session.execute(
+            text("SELECT value FROM records")
+        ).scalar_one()
+
+    assert value == "backup-test"
+
+
+def test_failed_backup_does_not_leave_temporary_files(
+    database,
+    tmp_path,
+    monkeypatch,
+):
+    backup_directory = tmp_path / "backups"
+    service = DatabaseBackupService(
+        database,
+        backup_directory,
+    )
+
+    def fail_verification(path):
+        raise DatabaseBackupError("forced verification failure")
+
+    monkeypatch.setattr(
+        service,
+        "_verify_backup",
+        fail_verification,
+    )
+
+    with pytest.raises(DatabaseBackupError):
+        service.create_backup()
+
+    assert list(backup_directory.glob("*.sqlite3")) == []
+    assert list(backup_directory.glob("*.tmp")) == []
+    assert list(backup_directory.glob(".*.tmp")) == []
+
+
+def test_backup_rejects_in_memory_database():
+    database = Database("sqlite:///:memory:")
+    database.initialize()
+
+    try:
+        with pytest.raises(DatabaseBackupError):
+            DatabaseBackupService(database)
+    finally:
+        database.dispose()
+
+
+def test_backup_requires_initialized_database():
+    database = Database("sqlite:///:memory:")
+
+    with pytest.raises(DatabaseBackupError):
+        DatabaseBackupService(database)
+
+
+def test_backup_rejects_missing_source_database(
+    tmp_path,
+):
+    database_path = tmp_path / "missing.db"
+    database = Database(
+        f"sqlite:///{database_path.as_posix()}"
+    )
+    database.initialize()
+
+    try:
+        database.engine.dispose()
+        database_path.unlink(missing_ok=True)
+
+        service = DatabaseBackupService(
+            database,
+            tmp_path / "backups",
+        )
+
+        with pytest.raises(DatabaseBackupError):
+            service.create_backup()
+    finally:
+        database.dispose()
