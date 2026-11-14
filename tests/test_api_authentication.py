@@ -146,3 +146,12 @@ def test_system_status_endpoint_rejects_missing_token(api_client):
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing bearer token."
     assert response.headers["www-authenticate"] == "Bearer"
+def test_system_status_endpoint_rejects_invalid_token(api_client):
+    response = api_client.get(
+        "/api/v1/system/status",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid API access token."
+    assert response.headers["www-authenticate"] == "Bearer"
