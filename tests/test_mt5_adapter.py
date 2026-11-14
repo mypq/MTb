@@ -724,16 +724,8 @@ def test_empty_symbol_information_name_is_rejected():
 
     with pytest.raises(Exception):
         adapter.get_symbol_info("XAUUSD")
-@pytest.mark.parametrize(
-    ("digits", "point", "expected"),
-    [
-        (2, 0.01, 2),
-        (3, 0.001, 3),
-        (4, 0.0001, 4),
-        (5, 0.00001, 5),
-        (0, 1.0, 0),
-    ],
-)
+
+
 @pytest.mark.parametrize(
     ("digits", "point", "tick_size"),
     [
