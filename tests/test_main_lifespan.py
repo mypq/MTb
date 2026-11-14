@@ -1,3 +1,4 @@
+
 import asyncio
 from types import SimpleNamespace
 
@@ -78,8 +79,9 @@ class FakeBackupService:
 
 
 class FakeMarketDataService:
-    def __init__(self, source):
+    def __init__(self, source, validator=None):
         self.source = source
+        self.validator = validator
 
 
 class FakeMarketDataRepository:
