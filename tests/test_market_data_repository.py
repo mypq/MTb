@@ -274,3 +274,165 @@ def test_conflicting_candle_rolls_back_new_candles_in_same_batch(
 
     # Nothing from the conflicting batch must be persisted.
     assert database_counts(database) == (1, 1)
+
+def test_persisted_candle_preserves_all_market_fields(repository):
+    repo, database = repository
+    snapshot = make_snapshot(count=1)
+
+    repo.save_snapshot(snapshot)
+
+    with database.session() as session:
+        record = session.scalar(select(MarketCandleRecord))
+
+        assert record is not None
+        candle = snapshot.batch.candles[0]
+
+        assert record.symbol == candle.symbol
+        assert record.timeframe == candle.timeframe
+        assert record.timestamp == candle.timestamp
+        assert record.open_price == candle.open
+        assert record.high_price == candle.high
+        assert record.low_price == candle.low
+        assert record.close_price == candle.close
+        assert record.tick_volume == candle.tick_volume
+        assert record.real_volume == candle.real_volume
+        assert record.volume_source == candle.volume_source.value
+        assert record.is_closed == candle.is_closed
+        assert record.quality == candle.quality.value
+
+
+def test_same_timestamp_for_different_symbols_is_independent(repository):
+    repo, database = repository
+
+    original = make_snapshot(count=1)
+    repo.save_snapshot(original)
+
+    candle = original.batch.candles[0].model_copy(
+        update={"symbol": "EURUSD"}
+    )
+
+    batch = original.batch.model_copy(
+        update={
+            "symbol": "EURUSD",
+            "candles": (candle,),
+        }
+    )
+
+    service = MarketDataService(FakeMarketDataSource(batch))
+    snapshot = service.get_snapshot(
+        "EURUSD",
+        "M5",
+        1,
+        CHECKED_AT,
+    )
+
+    result = repo.save_snapshot(snapshot)
+
+    assert result.inserted_candles == 1
+    assert result.duplicate_candles == 0
+    assert database_counts(database) == (2, 2)
+
+
+def test_same_timestamp_for_different_timeframes_is_independent(repository):
+    repo, database = repository
+
+    original = make_snapshot(count=1)
+    repo.save_snapshot(original)
+
+    candle = original.batch.candles[0].model_copy(
+        update={"timeframe": "M15"}
+    )
+
+    batch = original.batch.model_copy(
+        update={
+            "timeframe": "M15",
+            "candles": (candle,),
+        }
+    )
+
+    service = MarketDataService(FakeMarketDataSource(batch))
+    snapshot = service.get_snapshot(
+        "XAUUSD",
+        "M15",
+        1,
+        CHECKED_AT,
+    )
+
+    result = repo.save_snapshot(snapshot)
+
+    assert result.inserted_candles == 1
+    assert database_counts(database) == (2, 2)
+
+
+def test_unknown_volume_snapshot_can_be_persisted(repository):
+    repo, database = repository
+
+    original = make_snapshot(count=1)
+    candle = original.batch.candles[0].model_copy(
+        update={"volume_source": VolumeSource.UNKNOWN}
+    )
+
+    batch = original.batch.model_copy(
+        update={"candles": (candle,)}
+    )
+
+    snapshot = MarketDataService(
+        FakeMarketDataSource(batch)
+    ).get_snapshot(
+        "XAUUSD",
+        "M5",
+        1,
+        CHECKED_AT,
+    )
+
+    assert snapshot.analysis_eligible is True
+    assert snapshot.volume_data_available is False
+
+    result = repo.save_snapshot(snapshot)
+
+    assert result.inserted_candles == 1
+    assert database_counts(database) == (1, 1)
+
+
+def test_all_duplicate_snapshot_does_not_create_another_batch(repository):
+    repo, database = repository
+    snapshot = make_snapshot(count=3)
+
+    first = repo.save_snapshot(snapshot)
+    second = repo.save_snapshot(snapshot)
+
+    assert first.batch_id is not None
+    assert second.batch_id is None
+    assert second.inserted_candles == 0
+    assert second.duplicate_candles == 3
+    assert database_counts(database) == (1, 3)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("open_price", 2001.0),
+        ("high_price", 2006.0),
+        ("low_price", 1994.0),
+        ("tick_volume", 101),
+        ("volume_source", "UNKNOWN"),
+        ("quality", "INCOMPLETE"),
+    ],
+)
+def test_any_existing_candle_field_conflict_is_rejected(
+    repository,
+    field,
+    value,
+):
+    repo, database = repository
+    repo.save_snapshot(make_snapshot(count=1))
+
+    with database.session() as session:
+        record = session.scalar(select(MarketCandleRecord))
+        assert record is not None
+        setattr(record, field, value)
+
+    with pytest.raises(MarketDataPersistenceConflict):
+        repo.save_snapshot(make_snapshot(count=1))
+
+    assert database_counts(database) == (1, 1)
