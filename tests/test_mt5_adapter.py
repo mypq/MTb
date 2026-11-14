@@ -478,3 +478,40 @@ def test_unsupported_timeframe_is_rejected():
 
     with pytest.raises(ValueError):
         adapter.get_closed_candles("XAUUSD", "M2", 10)
+
+def test_initialization_exception_returns_error_status():
+    mt5 = make_mt5_module()
+    mt5.initialize.side_effect = RuntimeError("Initialization crashed")
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=mt5,
+    )
+
+    status = adapter.connect()
+
+    assert status.state == MT5ConnectionState.ERROR
+    assert "RuntimeError" in status.message
+    mt5.initialize.assert_called_once()
+
+
+def test_candle_retrieval_exception_is_wrapped_as_adapter_error():
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.copy_rates_from_pos.side_effect = RuntimeError(
+        "Terminal communication failed"
+    )
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="candle retrieval raised RuntimeError",
+    ) as error:
+        adapter.get_closed_candles("XAUUSD", "M5", 10)
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    mt5.copy_rates_from_pos.assert_called_once_with(
+        "XAUUSD",
+        5,
+        1,
+        10,
+    )
