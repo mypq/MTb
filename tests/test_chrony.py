@@ -1,3 +1,4 @@
+
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import patch
 
@@ -304,6 +305,7 @@ def test_chrony_rejects_non_positive_timeout():
     with pytest.raises(ValueError):
         ChronyStatusService(command=["chronyc"], timeout_seconds=0)
 
+
 @pytest.mark.parametrize(
     "timeout",
     [
@@ -375,7 +377,7 @@ def test_chrony_rejects_negative_root_dispersion():
 
 def test_chrony_rejects_more_than_three_authenticated_nts_sources():
     four_sources = AUTHDATA_OUTPUT + (
-        "ntp4.example.net NTS 1 30 128 23m 0 0 8 64\n"
+        "unknown.nts.example NTS 1 30 128 23m 0 0 8 64\n"
     )
     service = ChronyStatusService(command=["chronyc"])
 
@@ -385,10 +387,27 @@ def test_chrony_rejects_more_than_three_authenticated_nts_sources():
     ):
         status = service.snapshot()
 
-    assert status.available is True
+    assert status.available is False
     assert status.synchronized is False
-    assert status.nts_authenticated_sources == 4
-    assert status.quorum_met is False
+    assert "Unexpected NTS source" in status.error
+
+
+def test_chrony_rejects_unapproved_nts_source():
+    invalid_authdata = AUTHDATA_OUTPUT.replace(
+        "gbg1-ts.nts.netnod.se",
+        "other.nts.example",
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=invalid_authdata),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert "Unexpected NTS source" in status.error
 
 
 @pytest.mark.parametrize("stratum", ["-1", "17", "999"])
@@ -409,6 +428,7 @@ def test_chrony_rejects_out_of_range_stratum(stratum):
     assert status.synchronized is False
     assert "invalid stratum" in status.error
 
+
 def test_chrony_error_reports_insufficient_healthy_sources():
     service = ChronyStatusService(command=["chronyc"])
 
@@ -426,7 +446,7 @@ def test_chrony_error_reports_insufficient_healthy_sources():
     assert status.nts_authenticated_sources == 3
     assert status.quorum_met is False
     assert "2 healthy Chrony sources" in status.error
-    assert "minimum 3" in status.error
+    assert "required exactly 3" in status.error
 
 
 def test_chrony_error_reports_authenticated_source_mismatch():
@@ -450,3 +470,21 @@ def test_chrony_error_reports_authenticated_source_mismatch():
     assert "3 healthy Chrony sources" in status.error
     assert "2 authenticated NTS sources" in status.error
     assert "required exactly 3" in status.error
+
+
+def test_chrony_rejects_more_than_three_healthy_sources():
+    four_sources = SOURCES_OUTPUT + (
+        "^+ 192.0.2.10 1 7 377 20 +10us +/- 1ms\n"
+    )
+    service = ChronyStatusService(command=["chronyc"])
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(sources=four_sources),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.healthy_sources == 4
+    assert status.quorum_met is False
