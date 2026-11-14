@@ -967,3 +967,16 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
 
     adapter.shutdown()
     assert mt5.shutdown.call_count == 2
+def test_symbol_information_request_exception_is_wrapped():
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info.side_effect = RuntimeError(
+        "Terminal communication failed"
+    )
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="symbol information request raised RuntimeError",
+    ) as error:
+        adapter.get_symbol_info("XAUUSD")
+
+    assert isinstance(error.value.__cause__, RuntimeError)
