@@ -1,4 +1,3 @@
-
 import logging
 from contextlib import asynccontextmanager
 
@@ -6,6 +5,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 
 from backend import __version__
 from backend.config import get_settings
+from backend.database import Database
+from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.service import MarketDataService
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
@@ -24,38 +25,53 @@ async def lifespan(app: FastAPI):
         interval_seconds=10.0,
     )
     chrony_service = ChronyStatusService()
+    database = Database(settings.DATABASE_URL)
 
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
     app.state.market_data_service = MarketDataService(source=adapter)
     app.state.chrony_status_service = chrony_service
+    app.state.database = database
 
     try:
+        database.initialize()
+        upgrade_database()
+
         if settings.MT5_ENABLED:
             adapter.connect()
             monitor.start()
 
         yield
     finally:
-        monitor_stopped = False
-
         try:
-            monitor_stopped = monitor.stop()
-        except Exception:
-            logger.exception("Failed to stop MT5 connection monitor.")
+            monitor_stopped = False
 
-        if monitor_stopped is True:
             try:
-                adapter.shutdown()
+                monitor_stopped = monitor.stop()
             except Exception:
-                logger.exception("Failed to shut down MT5 adapter.")
-                raise
-        else:
-            logger.critical(
-                "MT5 adapter shutdown skipped because the monitor "
-                "worker may still be running. Manual recovery is required."
-            )
+                logger.exception(
+                    "Failed to stop MT5 connection monitor."
+                )
+
+            if monitor_stopped is True:
+                try:
+                    adapter.shutdown()
+                except Exception:
+                    logger.exception(
+                        "Failed to shut down MT5 adapter."
+                    )
+                    raise
+            else:
+                logger.critical(
+                    "MT5 adapter shutdown skipped because the monitor "
+                    "worker may still be running. Manual recovery is required."
+                )
+        finally:
+            try:
+                database.dispose()
+            except Exception:
+                logger.exception("Failed to dispose database engine.")
 
 
 def create_app() -> FastAPI:
