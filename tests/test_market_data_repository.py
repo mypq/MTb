@@ -248,3 +248,29 @@ def test_invalid_snapshot_argument_is_rejected(repository):
         repo.save_snapshot(None)
 
     assert database_counts(database) == (0, 0)
+def test_conflicting_candle_rolls_back_new_candles_in_same_batch(
+    repository,
+):
+    repo, database = repository
+
+    # Store one candle first.
+    first_result = repo.save_snapshot(
+        make_snapshot(count=1)
+    )
+
+    assert first_result.inserted_candles == 1
+    assert database_counts(database) == (1, 1)
+
+    # This batch contains:
+    # 1. A new older candle.
+    # 2. An existing candle with conflicting close price.
+    conflicting_snapshot = make_snapshot(
+        count=2,
+        close=2003.0,
+    )
+
+    with pytest.raises(MarketDataPersistenceConflict):
+        repo.save_snapshot(conflicting_snapshot)
+
+    # Nothing from the conflicting batch must be persisted.
+    assert database_counts(database) == (1, 1)
