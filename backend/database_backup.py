@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -19,6 +18,8 @@ class DatabaseBackupError(RuntimeError):
 
 class DatabaseBackupService:
     """Creates verified backups and safely restores the primary SQLite database."""
+
+    BACKUP_RETENTION_LIMIT = 30
 
     def __init__(
         self,
