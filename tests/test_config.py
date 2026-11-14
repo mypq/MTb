@@ -124,3 +124,57 @@ def test_empty_mt5_login_is_normalized() -> None:
     settings = make_settings(MT5_LOGIN="")
 
     assert settings.MT5_LOGIN is None
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("APP_PORT", "invalid"),
+        ("MT5_TIMEOUT_MS", 999),
+        ("MT5_TIMEOUT_MS", 0),
+        ("MAX_OPEN_POSITIONS", "invalid"),
+        ("MAX_RISK_PER_TRADE_PERCENT", "invalid"),
+        ("MAX_DAILY_LOSS_PERCENT", "invalid"),
+    ],
+)
+def test_invalid_configuration_types_are_rejected(
+    field: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("MT5_TIMEOUT_MS", 1000),
+        ("MT5_TIMEOUT_MS", 10_000),
+        ("APP_PORT", 8000),
+        ("MAX_OPEN_POSITIONS", 1),
+    ],
+)
+def test_valid_configuration_boundaries_are_accepted(
+    field: str,
+    value: object,
+) -> None:
+    settings = make_settings(**{field: value})
+
+    assert getattr(settings, field) == value
+
+
+def test_default_host_is_localhost_only() -> None:
+    settings = make_settings()
+
+    assert settings.APP_HOST == "127.0.0.1"
+
+
+def test_default_timeframe_is_five_minutes() -> None:
+    settings = make_settings()
+
+    assert settings.DEFAULT_TIMEFRAME == "M5"
+
+
+def test_empty_mt5_credentials_are_safe_by_default() -> None:
+    settings = make_settings()
+
+    assert settings.MT5_ENABLED is False
+    assert settings.MT5_PASSWORD.get_secret_value() == ""
