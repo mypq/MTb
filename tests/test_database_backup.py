@@ -506,3 +506,110 @@ def test_operation_lock_is_released_after_backup_failure(
         ).scalar_one()
 
     assert value == "backup-test"
+
+def test_restore_waits_until_active_database_sessions_finish(
+    database,
+    backup_service,
+    tmp_path,
+):
+    from threading import Event, Thread
+
+    backup_path = backup_service.create_backup()
+
+    session_entered = Event()
+    release_session = Event()
+    restore_started = Event()
+    restore_finished = Event()
+    errors = []
+
+    def hold_session():
+        try:
+            with database.session():
+                session_entered.set()
+                if not release_session.wait(timeout=5):
+                    raise TimeoutError("Session release timed out.")
+        except Exception as exc:
+            errors.append(exc)
+
+    def restore():
+        restore_started.set()
+        try:
+            backup_service.restore_backup(backup_path)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            restore_finished.set()
+
+    session_thread = Thread(target=hold_session)
+    restore_thread = Thread(target=restore)
+
+    session_thread.start()
+    assert session_entered.wait(timeout=5)
+
+    restore_thread.start()
+    assert restore_started.wait(timeout=5)
+
+    try:
+        assert not restore_finished.wait(timeout=0.2)
+    finally:
+        release_session.set()
+        session_thread.join(timeout=5)
+        restore_thread.join(timeout=5)
+
+    assert not session_thread.is_alive()
+    assert not restore_thread.is_alive()
+    assert not errors
+    assert restore_finished.is_set()
+
+
+def test_new_database_sessions_wait_during_backup_restore(
+    database,
+    backup_service,
+):
+    from threading import Event, Thread
+
+    backup_path = backup_service.create_backup()
+
+    maintenance_entered = Event()
+    release_maintenance = Event()
+    session_started = Event()
+    session_entered = Event()
+    errors = []
+
+    def hold_maintenance():
+        try:
+            with database.maintenance():
+                maintenance_entered.set()
+                if not release_maintenance.wait(timeout=5):
+                    raise TimeoutError("Maintenance release timed out.")
+        except Exception as exc:
+            errors.append(exc)
+
+    def open_session():
+        session_started.set()
+        try:
+            with database.session():
+                session_entered.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    maintenance_thread = Thread(target=hold_maintenance)
+    session_thread = Thread(target=open_session)
+
+    maintenance_thread.start()
+    assert maintenance_entered.wait(timeout=5)
+
+    session_thread.start()
+    assert session_started.wait(timeout=5)
+
+    try:
+        assert not session_entered.wait(timeout=0.2)
+    finally:
+        release_maintenance.set()
+        maintenance_thread.join(timeout=5)
+        session_thread.join(timeout=5)
+
+    assert not maintenance_thread.is_alive()
+    assert not session_thread.is_alive()
+    assert not errors
+    assert session_entered.is_set()
