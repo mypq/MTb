@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -45,17 +46,35 @@ class ChronyStatusService:
         *,
         timeout_seconds: float = 3.0,
     ) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero.")
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise ValueError("timeout_seconds must be a finite positive number.")
+
+        try:
+            timeout_value = float(timeout_seconds)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "timeout_seconds must be a finite positive number."
+            ) from exc
+
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise ValueError("timeout_seconds must be a finite positive number.")
 
         if command is None:
             command = self._default_command()
 
-        if not command or any(not part for part in command):
+        if (
+            not command
+            or any(
+                not isinstance(part, str) or not part.strip()
+                for part in command
+            )
+        ):
             raise ValueError("Chrony command must contain non-empty arguments.")
 
         self._command = tuple(command)
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = timeout_value
 
     @staticmethod
     def _default_command() -> tuple[str, ...]:
@@ -182,6 +201,7 @@ class ChronyStatusService:
         for line in output.splitlines():
             if ":" not in line:
                 continue
+
             key, value = line.split(":", 1)
             parsed[key.strip()] = value.strip()
 
@@ -204,15 +224,25 @@ class ChronyStatusService:
 
     @staticmethod
     def _parse_seconds(value: str) -> float:
-        match = re.search(
-            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)",
-            value,
-        )
+        """Parse one complete numeric token and reject non-finite values."""
+        parts = value.strip().split()
 
-        if match is None:
+        if not parts:
             raise ChronyStatusError("Chrony returned an invalid time value.")
 
-        return float(match.group())
+        try:
+            parsed = float(parts[0])
+        except (ValueError, OverflowError) as exc:
+            raise ChronyStatusError(
+                "Chrony returned an invalid time value."
+            ) from exc
+
+        if not math.isfinite(parsed):
+            raise ChronyStatusError(
+                "Chrony returned a non-finite time value."
+            )
+
+        return parsed
 
     @staticmethod
     def _parse_sources(output: str) -> tuple[str | None, int]:
@@ -254,6 +284,7 @@ class ChronyStatusService:
                     raise ChronyStatusError(
                         "Chrony returned multiple selected sources."
                     )
+
                 selected_source = source
 
         return selected_source, healthy_sources
@@ -362,6 +393,23 @@ class ChronyStatusService:
             stratum = int(tracking["Stratum"].split()[0])
             leap_status = tracking["Leap status"]
 
+            if not 0 <= stratum <= 16:
+                raise ChronyStatusError(
+                    "Chrony returned an invalid stratum value."
+                )
+
+            last_offset = self._parse_seconds(
+                tracking["Last offset"]
+            )
+            root_dispersion = self._parse_seconds(
+                tracking["Root dispersion"]
+            )
+
+            if root_dispersion < 0:
+                raise ChronyStatusError(
+                    "Chrony returned a negative root dispersion value."
+                )
+
             quorum_met = (
                 healthy_sources >= REQUIRED_NTS_SOURCES
                 and authenticated_sources == REQUIRED_NTS_SOURCES
@@ -381,12 +429,8 @@ class ChronyStatusService:
                 reference_id=reference_id,
                 stratum=stratum,
                 leap_status=leap_status,
-                last_offset_seconds=self._parse_seconds(
-                    tracking["Last offset"]
-                ),
-                root_dispersion_seconds=self._parse_seconds(
-                    tracking["Root dispersion"]
-                ),
+                last_offset_seconds=last_offset,
+                root_dispersion_seconds=root_dispersion,
                 selected_source=selected_source,
                 healthy_sources=healthy_sources,
                 nts_authenticated_sources=authenticated_sources,
