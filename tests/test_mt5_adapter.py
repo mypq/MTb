@@ -651,3 +651,76 @@ def test_missing_candle_field_is_rejected(missing_field):
 
     with pytest.raises(MT5AdapterError, match="failed validation"):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("digits", -1),
+        ("digits", 13),
+        ("point", 0),
+        ("point", -0.01),
+        ("trade_contract_size", 0),
+        ("trade_tick_size", 0),
+        ("trade_tick_value", -1),
+        ("volume_min", 0),
+        ("volume_max", 0),
+        ("volume_step", 0),
+        ("spread", -1),
+    ],
+)
+def test_invalid_symbol_information_is_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+
+    symbol_info = mt5.symbol_info.return_value
+    setattr(symbol_info, field, value)
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("point", float("nan")),
+        ("point", float("inf")),
+        ("trade_contract_size", float("nan")),
+        ("trade_tick_size", float("inf")),
+        ("trade_tick_value", float("nan")),
+        ("volume_min", float("nan")),
+        ("volume_max", float("inf")),
+        ("volume_step", float("nan")),
+    ],
+)
+def test_non_finite_symbol_information_is_rejected(field, value):
+    adapter, mt5 = make_connected_adapter()
+
+    symbol_info = mt5.symbol_info.return_value
+    setattr(symbol_info, field, value)
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
+
+
+def test_symbol_information_is_immutable():
+    adapter, mt5 = make_connected_adapter()
+
+    symbol = adapter.get_symbol_info("XAUUSD")
+
+    with pytest.raises(Exception):
+        symbol.digits = 3
+
+
+def test_symbol_name_is_normalized_before_mt5_lookup():
+    adapter, mt5 = make_connected_adapter()
+
+    adapter.get_symbol_info(" XAUUSD ")
+
+    mt5.symbol_info.assert_called_once_with("XAUUSD")
+
+
+def test_empty_symbol_information_name_is_rejected():
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.symbol_info.return_value.name = ""
+
+    with pytest.raises(Exception):
+        adapter.get_symbol_info("XAUUSD")
