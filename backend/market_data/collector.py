@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from math import isfinite
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,49 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def next_collection_time(
+    *,
+    timeframe_seconds: int,
+    now: datetime | None = None,
+    delay_seconds: float = 2.0,
+) -> datetime:
+    """Return the next candle close time plus a broker-update delay."""
+
+    if (
+        isinstance(timeframe_seconds, bool)
+        or not isinstance(timeframe_seconds, int)
+        or timeframe_seconds <= 0
+    ):
+        raise ValueError("timeframe_seconds must be a positive integer.")
+
+    if (
+        isinstance(delay_seconds, bool)
+        or not isinstance(delay_seconds, (int, float))
+        or not isfinite(delay_seconds)
+        or delay_seconds < 0
+    ):
+        raise ValueError(
+            "delay_seconds must be a non-negative finite number."
+        )
+
+    current = now or datetime.now(timezone.utc)
+
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must be timezone-aware.")
+
+    current = current.astimezone(timezone.utc)
+
+    timestamp = current.timestamp()
+    next_close_timestamp = (
+        (int(timestamp) // timeframe_seconds) + 1
+    ) * timeframe_seconds
+
+    return datetime.fromtimestamp(
+        next_close_timestamp + delay_seconds,
+        tz=timezone.utc,
+    )
 
 
 class MarketDataCollector:
@@ -45,9 +89,10 @@ class MarketDataCollector:
             raise ValueError("Count must be between 1 and 10000.")
 
         normalized_timeframe = normalize_timeframe(timeframe)
+        frame_seconds = timeframe_seconds(normalized_timeframe)
 
         if interval_seconds is None:
-            interval = float(timeframe_seconds(normalized_timeframe))
+            interval = float(frame_seconds)
         else:
             if (
                 isinstance(interval_seconds, bool)
@@ -67,10 +112,23 @@ class MarketDataCollector:
         self._timeframe = normalized_timeframe
         self._count = count
         self._interval_seconds = interval
+        self._timeframe_seconds = frame_seconds
 
     @property
     def interval_seconds(self) -> float:
         return self._interval_seconds
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    @property
+    def timeframe(self) -> str:
+        return self._timeframe
+
+    @property
+    def count(self) -> int:
+        return self._count
 
     def collect_once(self) -> MarketDataSaveResult | None:
         """Collect one batch and persist it only when analysis-eligible."""
