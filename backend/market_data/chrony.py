@@ -1,4 +1,3 @@
-
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -440,8 +439,10 @@ class ChronyStatusService:
                     if quorum_met
                     else (
                         "NTS quorum not met: "
-                        f"{authenticated_sources} of "
-                        f"{REQUIRED_NTS_SOURCES} sources authenticated."
+                        f"{healthy_sources} healthy Chrony sources "
+                        f"(minimum {REQUIRED_NTS_SOURCES}); "
+                        f"{authenticated_sources} authenticated NTS sources "
+                        f"(required exactly {REQUIRED_NTS_SOURCES})."
                     )
                 ),
             )
