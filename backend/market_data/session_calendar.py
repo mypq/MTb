@@ -1,4 +1,3 @@
-
 """Validated reader for the broker's weekly MT5 session bridge export."""
 
 from __future__ import annotations
@@ -370,6 +369,13 @@ class MarketSessionCalendar:
             raise ValueError(
                 "next candle must be later than previous candle."
             )
+
+        actual_seconds = (
+            next_candle_utc - previous_candle_utc
+        ).total_seconds()
+
+        if actual_seconds % timeframe_seconds != 0:
+            return False
 
         cursor = previous_candle_utc + timedelta(
             seconds=timeframe_seconds
