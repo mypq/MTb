@@ -153,7 +153,9 @@ def create_app() -> FastAPI:
         timeframe: str = settings.DEFAULT_TIMEFRAME,
         count: int = Query(default=300, ge=1, le=10000),
     ) -> dict[str, object]:
-        selected_symbol = (symbol or settings.MT5_SYMBOL).strip()
+        selected_symbol = (
+            settings.MT5_SYMBOL if symbol is None else symbol
+        ).strip()
 
         if not selected_symbol:
             raise HTTPException(
