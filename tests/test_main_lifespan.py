@@ -592,6 +592,15 @@ def test_lifespan_connects_session_calendar_to_market_data_service(
         created_services.append(service)
         return service
 
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file="sessions.json",
+        sessions_max_age_seconds=3600,
+    )
+
+    # Reapply these patches after configure_lifecycle,
+    # because it installs its own FakeMarketDataService.
     monkeypatch.setattr(
         main.MarketSessionCalendar,
         "load",
@@ -606,13 +615,6 @@ def test_lifespan_connects_session_calendar_to_market_data_service(
         main,
         "MarketDataService",
         create_service,
-    )
-
-    app, events = configure_lifecycle(
-        monkeypatch,
-        mt5_enabled=False,
-        sessions_file="sessions.json",
-        sessions_max_age_seconds=3600,
     )
 
     async def run():
