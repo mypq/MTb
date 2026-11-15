@@ -8,6 +8,10 @@ from backend.market_data.models import (
     MarketCandle,
     VolumeSource,
 )
+from backend.market_data.session_calendar import (
+    MarketSessionCalendar,
+    TradingSession,
+)
 from backend.market_data.validator import (
     MarketDataIssueCode,
     MarketDataValidator,
@@ -614,3 +618,84 @@ def test_report_has_no_issues_for_valid_single_candle_batch():
     assert report.volume_data_available is True
     assert report.issues == ()
     assert report.gaps == ()
+
+
+def test_session_calendar_symbol_mismatch_blocks_analysis():
+    calendar = MarketSessionCalendar(
+        symbol="EURUSD",
+        generated_at_utc=CHECKED_AT,
+        server_utc_offset_seconds=0,
+        trade_sessions=(
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+            (TradingSession(0, 86400),),
+        ),
+    )
+
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+
+    report = MarketDataValidator(
+        session_calendar=calendar,
+    ).validate(
+        make_batch((candle,)),
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.structurally_valid is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code
+        == MarketDataIssueCode.SESSION_CALENDAR_SYMBOL_MISMATCH
+        for issue in report.issues
+    )
+
+
+def test_weekend_closure_gap_does_not_block_analysis():
+    calendar = MarketSessionCalendar(
+        symbol="XAUUSD",
+        generated_at_utc=datetime(2026, 1, 1, tzinfo=UTC),
+        server_utc_offset_seconds=0,
+        trade_sessions=(
+            (),
+            (TradingSession(3600, 82800),),
+            (TradingSession(3600, 82800),),
+            (TradingSession(3600, 82800),),
+            (TradingSession(3600, 82800),),
+            (TradingSession(3600, 82800),),
+            (),
+        ),
+    )
+
+    checked_at = datetime(2026, 1, 5, 1, 5, tzinfo=UTC)
+
+    candles = (
+        make_candle(datetime(2026, 1, 2, 23, 0, tzinfo=UTC)),
+        make_candle(datetime(2026, 1, 5, 1, 0, tzinfo=UTC)),
+    )
+
+    batch = make_batch(candles, received_at=checked_at)
+
+    report = MarketDataValidator(
+        session_calendar=calendar,
+    ).validate(
+        batch,
+        300,
+        checked_at,
+    )
+
+    assert len(report.gaps) == 1
+    assert report.gaps[0].confirmed_closed is True
+    assert report.analysis_eligible is True
+    assert any(
+        issue.code == MarketDataIssueCode.SESSION_CLOSED_GAP
+        for issue in report.issues
+    )
+    assert not any(
+        issue.code == MarketDataIssueCode.TIME_GAP
+        for issue in report.issues
+    )
