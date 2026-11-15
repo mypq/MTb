@@ -1203,3 +1203,98 @@ def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
     assert app.state._test_workers[0].stop_calls == 1
     assert "adapter.shutdown" not in events
     assert "database.dispose" in events
+def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    class RecoveringAdapter:
+        def __init__(self, settings):
+            self.settings = settings
+            self.events = events
+            self.connect_calls = 0
+            self.state = "DISCONNECTED"
+
+        def connect(self):
+            self.connect_calls += 1
+            self.events.append("adapter.connect")
+
+            if self.connect_calls == 1:
+                self.state = "DISCONNECTED"
+            else:
+                self.state = "CONNECTED"
+
+            return SimpleNamespace(state=self.state)
+
+        def connection_status(self):
+            return SimpleNamespace(
+                state=self.state,
+                model_dump=lambda mode: {},
+            )
+
+        def shutdown(self):
+            self.events.append("adapter.shutdown")
+
+    class RecoveringMonitor:
+        def __init__(self, adapter, interval_seconds):
+            self.adapter = adapter
+            self.interval_seconds = interval_seconds
+
+        @property
+        def is_running(self):
+            return True
+
+        def start(self):
+            events.append("monitor.start")
+
+            status = self.adapter.connection_status()
+
+            if status.state != "CONNECTED":
+                self.adapter.connect()
+
+        def stop(self):
+            events.append("monitor.stop")
+            return True
+
+    monkeypatch.setattr(
+        main,
+        "MT5Adapter",
+        RecoveringAdapter,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "MT5ConnectionMonitor",
+        RecoveringMonitor,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            adapter = app.state.mt5_adapter
+            monitor = app.state.mt5_monitor
+            worker = app.state.broker_tick_worker
+            collector = app.state.market_data_collector
+
+            # The initial connection failed, but startup continued.
+            assert adapter.connect_calls == 2
+
+            # The connection monitor restored the connection.
+            assert adapter.connection_status().state == "CONNECTED"
+
+            # Both background components use the same adapter.
+            assert monitor.adapter is adapter
+            assert worker.adapter is adapter
+            assert collector.service.source is adapter
+
+            # Both market-data workers started after recovery.
+            assert worker.started is True
+            assert collector.symbol == "XAUUSD"
+
+            assert events.index("monitor.start") < events.index(
+                "broker_tick.start"
+            )
+
+    asyncio.run(run())
