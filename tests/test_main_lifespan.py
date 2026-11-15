@@ -144,6 +144,8 @@ def configure_lifecycle(
     monitor_stop_error=None,
     initialize_error=None,
     migration_error=None,
+    sessions_file=None,
+    sessions_max_age_seconds=604800,
 ):
     events = []
     collectors = []
@@ -165,8 +167,8 @@ def configure_lifecycle(
         MT5_SYMBOL=mt5_symbol,
         DEFAULT_TIMEFRAME="M5",
         DATABASE_URL="sqlite:///./data/test.db",
-        MT5_SESSIONS_FILE=None,
-        MT5_SESSIONS_MAX_AGE_SECONDS=604800,
+        MT5_SESSIONS_FILE=sessions_file,
+        MT5_SESSIONS_MAX_AGE_SECONDS=sessions_max_age_seconds,
     )
 
     def create_adapter(settings):
