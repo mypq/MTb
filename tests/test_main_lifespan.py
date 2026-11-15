@@ -702,3 +702,37 @@ def test_lifespan_stops_startup_when_session_file_is_missing(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+def test_lifespan_stops_startup_when_session_symbol_does_not_match(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file="sessions.json",
+    )
+
+    def fail_load(path, *, max_age_seconds):
+        raise main.MarketSessionCalendarError(
+            "Session calendar symbol does not match configured symbol."
+        )
+
+    monkeypatch.setattr(
+        main.MarketSessionCalendar,
+        "load",
+        staticmethod(fail_load),
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
