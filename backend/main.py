@@ -171,13 +171,9 @@ async def lifespan(app: FastAPI):
         )
 
         if settings.MT5_ENABLED:
-            try:
-                adapter.connect()
-            except Exception:
-                logger.exception(
-                    "Initial MT5 connection attempt failed. "
-                    "The API will remain available while recovery continues."
-                )
+            # A connection exception is a startup failure.
+            # A DISCONNECTED status is not: the monitor will recover it.
+            initial_status = adapter.connect()
 
             monitor.start()
 
@@ -185,40 +181,12 @@ async def lifespan(app: FastAPI):
 
             if selected_symbol:
 
-                async def start_market_data_when_connected():
+                def start_market_data_workers():
                     nonlocal broker_tick_worker
                     nonlocal collector
                     nonlocal collector_task
 
-                    while not startup_stop_event.is_set():
-                        try:
-                            status = await asyncio.to_thread(
-                                adapter.connection_status
-                            )
-                            state = getattr(
-                                status.state,
-                                "value",
-                                status.state,
-                            )
-
-                            if state == "CONNECTED":
-                                break
-
-                        except Exception:
-                            logger.exception(
-                                "Failed to check MT5 connection "
-                                "before starting market-data workers."
-                            )
-
-                        try:
-                            await asyncio.wait_for(
-                                startup_stop_event.wait(),
-                                timeout=0.1,
-                            )
-                        except asyncio.TimeoutError:
-                            pass
-
-                    if startup_stop_event.is_set():
+                    if broker_tick_worker is not None:
                         return
 
                     broker_tick_worker = BrokerTickMonitorWorker(
@@ -264,18 +232,51 @@ async def lifespan(app: FastAPI):
                         collector.interval_seconds,
                     )
 
-                current_status = await asyncio.to_thread(
-                    adapter.connection_status
-                )
-                current_state = getattr(
-                    current_status.state,
+                initial_state = getattr(
+                    initial_status.state,
                     "value",
-                    current_status.state,
+                    initial_status.state,
                 )
 
-                if current_state == "CONNECTED":
-                    await start_market_data_when_connected()
+                if initial_state == "CONNECTED":
+                    start_market_data_workers()
                 else:
+
+                    async def start_market_data_when_connected():
+                        while not startup_stop_event.is_set():
+                            try:
+                                status = await asyncio.to_thread(
+                                    adapter.connection_status
+                                )
+
+                                state = getattr(
+                                    status.state,
+                                    "value",
+                                    status.state,
+                                )
+
+                                if state == "CONNECTED":
+                                    break
+
+                            except Exception:
+                                logger.exception(
+                                    "Failed to check MT5 connection "
+                                    "before starting market-data workers."
+                                )
+
+                            try:
+                                await asyncio.wait_for(
+                                    startup_stop_event.wait(),
+                                    timeout=0.1,
+                                )
+                            except asyncio.TimeoutError:
+                                pass
+
+                        if startup_stop_event.is_set():
+                            return
+
+                        start_market_data_workers()
+
                     startup_task = asyncio.create_task(
                         start_market_data_when_connected(),
                         name="mt5-market-data-startup",
