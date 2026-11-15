@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -22,6 +23,8 @@ from backend.market_data.session_calendar import (
 )
 from backend.market_data.validator import MarketDataValidator
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
+from backend.mt5.broker_tick_monitor import BrokerTickMonitor
+from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
 
@@ -69,6 +72,12 @@ async def lifespan(app: FastAPI):
         adapter=adapter,
         interval_seconds=10.0,
     )
+
+    broker_tick_monitor = BrokerTickMonitor(
+        stale_after_seconds=15.0,
+    )
+
+    broker_tick_worker = None
 
     chrony_service = ChronyStatusService()
 
@@ -135,6 +144,8 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
+    app.state.broker_tick_monitor = broker_tick_monitor
+    app.state.broker_tick_worker = None
     app.state.market_data_service = market_data_service
     app.state.market_data_repository = market_data_repository
     app.state.market_data_collector = None
@@ -164,6 +175,26 @@ async def lifespan(app: FastAPI):
             selected_symbol = settings.MT5_SYMBOL.strip()
 
             if selected_symbol:
+                broker_tick_worker = BrokerTickMonitorWorker(
+                    adapter=adapter,
+                    monitor=broker_tick_monitor,
+                    symbol=selected_symbol,
+                    interval_seconds=1.0,
+                )
+
+                app.state.broker_tick_worker = (
+                    broker_tick_worker
+                )
+
+                broker_tick_worker.start()
+
+                logger.info(
+                    "Broker tick monitoring enabled: "
+                    "symbol=%s interval=1.0 seconds "
+                    "clock_verification=UNVERIFIED",
+                    selected_symbol,
+                )
+
                 collector = MarketDataCollector(
                     service=market_data_service,
                     repository=market_data_repository,
@@ -188,8 +219,8 @@ async def lifespan(app: FastAPI):
                 )
             else:
                 logger.warning(
-                    "Automatic market data collection skipped: "
-                    "MT5_SYMBOL is empty."
+                    "Automatic market data collection and broker "
+                    "tick monitoring skipped: MT5_SYMBOL is empty."
                 )
 
         yield
@@ -216,6 +247,19 @@ async def lifespan(app: FastAPI):
                         "Failed to stop automatic database backup."
                     )
 
+            broker_tick_worker_stopped = True
+
+            if broker_tick_worker is not None:
+                try:
+                    broker_tick_worker_stopped = (
+                        broker_tick_worker.stop()
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to stop broker tick monitor worker."
+                    )
+                    broker_tick_worker_stopped = False
+
             monitor_stopped = False
 
             try:
@@ -225,7 +269,10 @@ async def lifespan(app: FastAPI):
                     "Failed to stop MT5 connection monitor."
                 )
 
-            if monitor_stopped is True:
+            if (
+                broker_tick_worker_stopped is True
+                and monitor_stopped is True
+            ):
                 try:
                     adapter.shutdown()
                 except Exception:
@@ -235,8 +282,9 @@ async def lifespan(app: FastAPI):
                     raise
             else:
                 logger.critical(
-                    "MT5 adapter shutdown skipped because the monitor "
-                    "worker may still be running. Manual recovery is required."
+                    "MT5 adapter shutdown skipped because one or "
+                    "more MT5 monitoring workers may still be running. "
+                    "Manual recovery is required."
                 )
 
         finally:
@@ -274,8 +322,34 @@ def create_app() -> FastAPI:
             application.state.chrony_status_service
         )
 
+        broker_tick_worker = getattr(
+            application.state,
+            "broker_tick_worker",
+            None,
+        )
+
         connection = adapter.connection_status()
         chrony = chrony_service.snapshot()
+
+        if broker_tick_worker is not None:
+            broker_tick_status = broker_tick_worker.status()
+        else:
+            broker_tick_status = {
+                "running": False,
+                "state": "NO_DATA",
+                "clock_verification": "UNVERIFIED",
+                "symbol": None,
+                "account_login": None,
+                "broker_server": None,
+                "last_broker_time_msc": None,
+                "seconds_since_progress": None,
+                "samples_received": 0,
+                "timestamp_advances": 0,
+                "repeated_timestamps": 0,
+                "timestamp_regressions": 0,
+                "identity_changes": 0,
+                "last_error": None,
+            }
 
         return {
             "application": settings.APP_NAME,
@@ -290,6 +364,7 @@ def create_app() -> FastAPI:
             "mt5_enabled": settings.MT5_ENABLED,
             "mt5_connection": connection.model_dump(mode="json"),
             "mt5_monitor_running": monitor.is_running,
+            "broker_tick_monitor": broker_tick_status,
             "time_sync": {
                 "provider": "chrony",
                 "available": chrony.available,
