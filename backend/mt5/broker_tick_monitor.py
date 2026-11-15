@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ class BrokerTickMonitor:
 
         self._last_broker_time_msc: int | None = None
         self._last_progress_monotonic_ns: int | None = None
+        self._last_received_monotonic_ns: int | None = None
 
         self._samples_received = 0
         self._timestamp_advances = 0
@@ -88,6 +90,19 @@ class BrokerTickMonitor:
             )
 
         with self._lock:
+            if (
+                self._last_received_monotonic_ns is not None
+                and sample.received_monotonic_ns
+                < self._last_received_monotonic_ns
+            ):
+                raise ValueError(
+                    "Sample monotonic receipt time moved backwards."
+                )
+
+            self._last_received_monotonic_ns = (
+                sample.received_monotonic_ns
+            )
+
             self._samples_received += 1
 
             identity = (
@@ -122,14 +137,6 @@ class BrokerTickMonitor:
             if self._last_progress_monotonic_ns is None:
                 raise RuntimeError(
                     "Monitor internal progression state is invalid."
-                )
-
-            if (
-                sample.received_monotonic_ns
-                < self._last_progress_monotonic_ns
-            ):
-                raise ValueError(
-                    "Sample monotonic receipt time moved backwards."
                 )
 
             previous_timestamp = self._last_broker_time_msc
@@ -189,6 +196,7 @@ class BrokerTickMonitor:
 
             self._last_broker_time_msc = None
             self._last_progress_monotonic_ns = None
+            self._last_received_monotonic_ns = None
 
             self._samples_received = 0
             self._timestamp_advances = 0
