@@ -1,3 +1,4 @@
+
 """Read-only health checks for the local Chrony time service."""
 
 from __future__ import annotations
@@ -14,9 +15,10 @@ REQUIRED_NTS_SOURCES = 3
 
 REQUIRED_NTS_SOURCE_NAMES = frozenset({
     "time.cloudflare.com",
-    "mmo1-ts.nts.netnod.se",
     "ntppool1.time.nl",
 })
+
+NETNOD_NTS_DOMAIN = ".nts.netnod.se"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,10 +121,12 @@ class ChronyStatusService:
     def _run_sources(self) -> str:
         """Read Chrony sources with the required WSL privilege."""
         if os.name == "nt":
+            wsl = shutil.which("wsl.exe") or shutil.which("wsl") or "wsl.exe"
+
             try:
                 result = subprocess.run(
                     [
-                        "wsl.exe",
+                        wsl,
                         "--exec",
                         "sudo",
                         "-n",
@@ -161,10 +165,12 @@ class ChronyStatusService:
     def _run_authdata(self) -> str:
         """Read NTS authentication records with the required WSL privilege."""
         if os.name == "nt":
+            wsl = shutil.which("wsl.exe") or shutil.which("wsl") or "wsl.exe"
+
             try:
                 result = subprocess.run(
                     [
-                        "wsl.exe",
+                        wsl,
                         "--exec",
                         "sudo",
                         "-n",
@@ -294,13 +300,40 @@ class ChronyStatusService:
         return selected_source, healthy_sources
 
     @staticmethod
-    def _parse_authdata(output: str) -> int:
-        """Count healthy NTS authentication records.
+    def _nts_provider(source: str) -> str | None:
+        """Return the approved provider identity for an NTS hostname."""
+        source_key = source.strip().rstrip(".").casefold()
 
-        Only the three explicitly approved NTS sources are accepted.
-        An empty table provides zero authenticated sources.
+        if source_key in REQUIRED_NTS_SOURCE_NAMES:
+            if source_key == "time.cloudflare.com":
+                return "cloudflare"
+
+            if source_key == "ntppool1.time.nl":
+                return "time.nl"
+
+        if (
+            source_key.endswith(NETNOD_NTS_DOMAIN)
+            and source_key != NETNOD_NTS_DOMAIN.lstrip(".")
+        ):
+            hostname = source_key.removesuffix(NETNOD_NTS_DOMAIN)
+
+            if hostname and all(
+                part and part.replace("-", "").isalnum()
+                for part in hostname.rstrip(".").split(".")
+            ):
+                return "netnod"
+
+        return None
+
+    @classmethod
+    def _parse_authdata(cls, output: str) -> int:
+        """Count healthy NTS records from the three approved providers.
+
+        Netnod endpoint names may vary, but must belong to the exact
+        nts.netnod.se DNS suffix. Only one authenticated record per
+        approved provider is accepted.
         """
-        authenticated_sources = 0
+        authenticated_providers: set[str] = set()
         seen_sources: set[str] = set()
         header_found = False
 
@@ -338,7 +371,7 @@ class ChronyStatusService:
                 _cookie_length,
             ) = fields
 
-            source_key = source.casefold()
+            source_key = source.strip().rstrip(".").casefold()
 
             if source_key in seen_sources:
                 raise ChronyStatusError(
@@ -350,9 +383,16 @@ class ChronyStatusService:
             if mode != "NTS":
                 continue
 
-            if source_key not in REQUIRED_NTS_SOURCE_NAMES:
+            provider = cls._nts_provider(source)
+
+            if provider is None:
                 raise ChronyStatusError(
                     f"Unexpected NTS source: {source}."
+                )
+
+            if provider in authenticated_providers:
+                raise ChronyStatusError(
+                    f"Multiple NTS sources found for provider: {provider}."
                 )
 
             try:
@@ -366,19 +406,24 @@ class ChronyStatusService:
 
             if (
                 attempts_count < 0
-                or nak_count != 0
-                or cookie_count <= 0
+                or nak_count < 0
+                or cookie_count < 0
             ):
+                raise ChronyStatusError(
+                    "Chrony returned negative NTS authentication statistics."
+                )
+
+            if nak_count != 0 or cookie_count <= 0:
                 continue
 
-            authenticated_sources += 1
+            authenticated_providers.add(provider)
 
         if not header_found:
             raise ChronyStatusError(
                 "Chrony authdata output is missing its expected header."
             )
 
-        return authenticated_sources
+        return len(authenticated_providers)
 
     def snapshot(self) -> ChronyStatus:
         """Return current Chrony status; query failures are unavailable."""
@@ -451,7 +496,7 @@ class ChronyStatusService:
                         "NTS quorum not met: "
                         f"{healthy_sources} healthy Chrony sources "
                         f"(required exactly {REQUIRED_NTS_SOURCES}); "
-                        f"{authenticated_sources} authenticated NTS sources "
+                        f"{authenticated_sources} authenticated NTS providers "
                         f"(required exactly {REQUIRED_NTS_SOURCES})."
                     )
                 ),
