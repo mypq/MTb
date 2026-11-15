@@ -77,7 +77,6 @@ class MarketDataCollector:
         symbol: str,
         timeframe: str,
         count: int = 300,
-        interval_seconds: float | None = None,
     ) -> None:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
@@ -91,32 +90,12 @@ class MarketDataCollector:
         normalized_timeframe = normalize_timeframe(timeframe)
         frame_seconds = timeframe_seconds(normalized_timeframe)
 
-        if interval_seconds is None:
-            interval = float(frame_seconds)
-        else:
-            if (
-                isinstance(interval_seconds, bool)
-                or not isinstance(interval_seconds, (int, float))
-                or not isfinite(interval_seconds)
-                or interval_seconds <= 0
-            ):
-                raise ValueError(
-                    "interval_seconds must be a positive finite number."
-                )
-
-            interval = float(interval_seconds)
-
         self._service = service
         self._repository = repository
         self._symbol = symbol.strip()
         self._timeframe = normalized_timeframe
         self._count = count
-        self._interval_seconds = interval
         self._timeframe_seconds = frame_seconds
-
-    @property
-    def interval_seconds(self) -> float:
-        return self._interval_seconds
 
     @property
     def symbol(self) -> str:
