@@ -624,6 +624,17 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
         async with main.lifespan(app):
             adapter = app.state.mt5_adapter
             monitor = app.state.mt5_monitor
+
+            # Wait for the background startup coordinator.
+            for _ in range(100):
+                if (
+                    app.state.broker_tick_worker is not None
+                    and app.state.market_data_collector is not None
+                ):
+                    break
+
+                await asyncio.sleep(0.01)
+
             worker = app.state.broker_tick_worker
             collector = app.state.market_data_collector
 
@@ -633,6 +644,8 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
 
             # All components use the same adapter.
             assert monitor.adapter is adapter
+            assert worker is not None
+            assert collector is not None
             assert worker.adapter is adapter
             assert collector.service.source is adapter
 
