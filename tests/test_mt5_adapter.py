@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -952,9 +951,19 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
     assert initial_status.state == MT5ConnectionState.CONNECTED
     assert mt5.initialize.call_count == 1
 
-    # Simulate losing the broker connection while the terminal
-    # was previously connected.
+    # Simulate losing the broker connection.
     mt5.terminal_info.return_value.connected = False
+
+    # Reading must fail without initiating reconnection.
+    with pytest.raises(
+        MT5AdapterError,
+        match="connection is not ready",
+    ):
+        adapter.get_broker_time_sample("XAUUSD")
+
+    assert mt5.initialize.call_count == 1
+    assert mt5.shutdown.call_count == 0
+    mt5.symbol_info_tick.assert_not_called()
 
     def restore_terminal_connection(**kwargs):
         mt5.terminal_info.return_value.connected = True
@@ -970,9 +979,25 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
     assert mt5.shutdown.call_count == 1
     assert mt5.initialize.call_count == 2
 
+    # Reading succeeds only after the connection monitor restores MT5.
+    mt5.symbol_info_tick.return_value = make_tick(
+        time_msc=1794729600123,
+    )
+
+    sample = adapter.get_broker_time_sample("XAUUSD")
+
+    assert sample.symbol == "XAUUSD"
+    assert sample.broker_time_msc == 1794729600123
+    assert sample.account_login == 123456
+    assert sample.broker_server == "Demo-Server"
+
+    mt5.symbol_info_tick.assert_called_once_with("XAUUSD")
+
+    # Existing market-data reads must also work after recovery.
     timestamp = int(
         (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=timestamp),
     ]
