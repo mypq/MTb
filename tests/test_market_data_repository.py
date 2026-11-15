@@ -507,6 +507,20 @@ def test_get_history_rejects_invalid_arguments(
         repo.get_history(symbol, timeframe, count)
 
 
+@pytest.mark.parametrize(
+    "timeframe",
+    ["W1", "MN1"],
+)
+def test_get_history_rejects_unsupported_timeframes(
+    repository,
+    timeframe,
+):
+    repo, database = repository
+
+    with pytest.raises(ValueError):
+        repo.get_history("XAUUSD", timeframe, 10)
+
+
 def test_get_history_normalizes_symbol_and_timeframe(repository):
     repo, database = repository
     repo.save_snapshot(make_snapshot(count=2))
