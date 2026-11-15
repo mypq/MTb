@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -651,10 +650,8 @@ class MT5Adapter:
                 self._initialized_by_client = False
 
     def _require_connection(self) -> Any:
+        """Return the active MT5 module without initiating reconnection."""
         status = self.connection_status()
-
-        if status.state != MT5ConnectionState.CONNECTED:
-            status = self.connect()
 
         if status.state != MT5ConnectionState.CONNECTED:
             raise MT5AdapterError(
