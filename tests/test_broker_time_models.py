@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -42,7 +41,7 @@ def test_raw_broker_timestamp_is_preserved():
 
 
 def test_received_timestamp_must_be_utc():
-    with pytest.raises(ValidationError, match="already UTC"):
+    with pytest.raises(ValidationError, match="already be UTC"):
         make_sample(
             received_at_utc=datetime(
                 2026, 11, 15, 15, 0,
