@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -66,9 +65,7 @@ class BrokerTimeSample(BaseModel):
                 "received_at_utc must already be UTC."
             )
 
-        return value.astimezone(datetime.now().astimezone().tzinfo).astimezone(
-            __import__("datetime").timezone.utc
-        )
+        return value.astimezone(timezone.utc)
 
     @field_validator("bid", "ask", mode="before")
     @classmethod
