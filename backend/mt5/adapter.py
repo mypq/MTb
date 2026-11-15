@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from math import isfinite
 from operator import index
 from threading import RLock
+from time import monotonic_ns
 from typing import Any
 
 from backend.config import Settings, get_settings
@@ -19,6 +20,7 @@ from backend.mt5.models import (
     MT5ConnectionStatus,
     MT5SymbolInfo,
 )
+from backend.mt5.time_models import BrokerTimeSample
 from backend.mt5.timeframes import (
     normalize_timeframe,
     resolve_mt5_timeframe,
@@ -245,6 +247,103 @@ class MT5Adapter:
             except Exception as exc:
                 raise MT5AdapterError(
                     "MT5 returned malformed account information."
+                ) from exc
+
+    def get_broker_time_sample(
+        self,
+        symbol: str,
+    ) -> BrokerTimeSample:
+        """Capture one broker quote timestamp and its local receipt clocks.
+
+        The broker timestamp is preserved as a raw millisecond value.
+        This is a quote-event sample, not a broker wall-clock response.
+        """
+        if not isinstance(symbol, str):
+            raise ValueError("Symbol name must be a string.")
+
+        normalized_symbol = symbol.strip()
+
+        if not normalized_symbol:
+            raise ValueError("Symbol name cannot be empty.")
+
+        with self._lock:
+            mt5 = self._require_connection()
+
+            try:
+                account = mt5.account_info()
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 account identity request raised "
+                    f"{type(exc).__name__}."
+                ) from exc
+
+            if account is None:
+                raise MT5AdapterError(
+                    "MT5 account identity is unavailable. "
+                    f"{self._last_error_message(mt5)}"
+                )
+
+            try:
+                account_login = index(account.login)
+                broker_server = str(account.server).strip()
+
+                if account_login <= 0 or not broker_server:
+                    raise ValueError(
+                        "MT5 returned invalid account identity."
+                    )
+
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                raise MT5AdapterError(
+                    "MT5 returned malformed account identity."
+                ) from exc
+
+            try:
+                tick = mt5.symbol_info_tick(normalized_symbol)
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 tick request raised "
+                    f"{type(exc).__name__}."
+                ) from exc
+
+            received_monotonic = monotonic_ns()
+            received_at = datetime.now(timezone.utc)
+
+            if tick is None:
+                raise MT5AdapterError(
+                    "MT5 returned no tick for "
+                    f"{normalized_symbol!r}. "
+                    f"{self._last_error_message(mt5)}"
+                )
+
+            try:
+                raw_timestamp = tick.time_msc
+
+                if isinstance(raw_timestamp, bool):
+                    raise ValueError(
+                        "MT5 returned an invalid tick timestamp."
+                    )
+
+                broker_time_msc = index(raw_timestamp)
+
+                if broker_time_msc <= 0:
+                    raise ValueError(
+                        "MT5 returned a non-positive tick timestamp."
+                    )
+
+                return BrokerTimeSample(
+                    symbol=normalized_symbol,
+                    broker_time_msc=broker_time_msc,
+                    received_at_utc=received_at,
+                    received_monotonic_ns=received_monotonic,
+                    bid=tick.bid,
+                    ask=tick.ask,
+                    account_login=account_login,
+                    broker_server=broker_server,
+                )
+
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                raise MT5AdapterError(
+                    f"MT5 tick data failed validation: {exc}"
                 ) from exc
 
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
