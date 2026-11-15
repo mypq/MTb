@@ -1,6 +1,7 @@
-
 import time
 from datetime import datetime, timezone
+from threading import Event
+from time import monotonic_ns
 
 import pytest
 
@@ -11,6 +12,11 @@ from backend.mt5.broker_tick_monitor import (
 from backend.mt5.broker_tick_worker import (
     BrokerTickMonitorWorker,
 )
+from backend.mt5.models import (
+    MT5ConnectionState,
+    MT5ConnectionStatus,
+)
+from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.mt5.time_models import BrokerTimeSample
 
 
@@ -255,23 +261,117 @@ def test_worker_stop_rejects_invalid_timeout(timeout):
         worker.stop(timeout_seconds=timeout)
 
 
-def test_worker_recovers_after_adapter_error():
-    worker, adapter, monitor = make_worker(
-        adapter_error=RuntimeError("Temporary failure"),
+def test_worker_recovers_after_mt5_connection_is_restored():
+    class RecoveringAdapter:
+        def __init__(self):
+            self.connected = False
+            self.failure_seen = Event()
+            self.success_seen = Event()
+            self.tick_calls = 0
+
+        def connection_status(self):
+            state = (
+                MT5ConnectionState.CONNECTED
+                if self.connected
+                else MT5ConnectionState.DISCONNECTED
+            )
+
+            return MT5ConnectionStatus(
+                state=state,
+                terminal_connected=self.connected,
+                trading_allowed=False,
+                message=state.value,
+            )
+
+        def connect(self):
+            self.connected = True
+
+            return MT5ConnectionStatus(
+                state=MT5ConnectionState.CONNECTED,
+                terminal_connected=True,
+                trading_allowed=False,
+                message="Reconnected",
+            )
+
+        def get_broker_time_sample(self, symbol):
+            if not self.connected:
+                self.failure_seen.set()
+                raise RuntimeError("MT5 connection unavailable")
+
+            self.tick_calls += 1
+            self.success_seen.set()
+
+            return make_sample(
+                symbol=symbol,
+                timestamp=1794708000000 + self.tick_calls,
+                monotonic_ns=monotonic_ns(),
+            )
+
+    adapter = RecoveringAdapter()
+    monitor = BrokerTickMonitor(stale_after_seconds=15)
+
+    worker = BrokerTickMonitorWorker(
+        adapter,
+        monitor,
+        symbol="XAUUSD",
+        interval_seconds=0.01,
     )
 
-    with pytest.raises(RuntimeError):
-        worker.check_once()
+    connection_monitor = MT5ConnectionMonitor(
+        adapter,
+        interval_seconds=60,
+    )
 
-    adapter.error = None
-    adapter.sample = make_sample()
+    worker.start()
 
-    worker.check_once()
+    try:
+        assert adapter.failure_seen.wait(timeout=2)
 
-    assert worker.last_error is None
-    assert monitor.snapshot(
-        now_monotonic_ns=1_000_000_000,
-    ).state == BrokerTickState.HEALTHY
+        deadline = time.monotonic() + 2
+
+        while (
+            worker.last_error != "RuntimeError"
+            and time.monotonic() < deadline
+        ):
+            Event().wait(0.005)
+
+        assert worker.last_error == "RuntimeError"
+        assert monitor.snapshot(
+            now_monotonic_ns=monotonic_ns(),
+        ).samples_received == 0
+
+        connection_status = connection_monitor.check_once()
+
+        assert connection_status.state == (
+            MT5ConnectionState.CONNECTED
+        )
+        assert adapter.connected is True
+
+        assert adapter.success_seen.wait(timeout=2)
+
+        deadline = time.monotonic() + 2
+
+        while (
+            (
+                worker.last_error is not None
+                or monitor.snapshot(
+                    now_monotonic_ns=monotonic_ns(),
+                ).samples_received == 0
+            )
+            and time.monotonic() < deadline
+        ):
+            Event().wait(0.005)
+
+        status = worker.status()
+
+        assert status["running"] is True
+        assert status["state"] == "HEALTHY"
+        assert status["samples_received"] >= 1
+        assert status["last_error"] is None
+        assert status["clock_verification"] == "UNVERIFIED"
+
+    finally:
+        assert worker.stop(timeout_seconds=2) is True
 
 
 def test_worker_does_not_claim_broker_clock_is_verified():
