@@ -54,6 +54,54 @@ class FakeMonitor:
         return self.stop_result
 
 
+class FakeBrokerTickMonitor:
+    def __init__(self, stale_after_seconds):
+        self.stale_after_seconds = stale_after_seconds
+
+
+class FakeBrokerTickWorker:
+    def __init__(
+        self,
+        adapter,
+        monitor,
+        *,
+        symbol,
+        interval_seconds,
+        lifecycle_order,
+        stop_result=True,
+        stop_error=None,
+    ):
+        self.adapter = adapter
+        self.monitor = monitor
+        self.symbol = symbol
+        self.interval_seconds = interval_seconds
+        self.lifecycle_order = lifecycle_order
+        self.stop_result = stop_result
+        self.stop_error = stop_error
+        self.started = False
+        self.stop_calls = 0
+
+    def start(self):
+        self.started = True
+        self.lifecycle_order.append("broker_tick.start")
+
+    def stop(self):
+        self.stop_calls += 1
+        self.lifecycle_order.append("broker_tick.stop")
+
+        if self.stop_error is not None:
+            raise self.stop_error
+
+        return self.stop_result
+
+    def status(self):
+        return {
+            "running": self.started,
+            "state": "NO_DATA",
+            "clock_verification": "UNVERIFIED",
+        }
+
+
 class FakeDatabase:
     def __init__(self, database_url, events, initialize_error=None):
         self.database_url = database_url
@@ -149,13 +197,18 @@ def configure_lifecycle(
     connect_error=None,
     monitor_stop_result=True,
     monitor_stop_error=None,
+    worker_stop_result=True,
+    worker_stop_error=None,
     initialize_error=None,
     migration_error=None,
     sessions_file=None,
     sessions_max_age_seconds=604800,
 ):
     events = []
+    lifecycle_order = []
     collectors = []
+    workers = []
+    broker_monitors = []
 
     def create_collector(service, repository, *, symbol, timeframe, count):
         collector = FakeMarketDataCollector(
@@ -193,6 +246,32 @@ def configure_lifecycle(
             stop_error=monitor_stop_error,
         )
 
+    def create_broker_tick_monitor(stale_after_seconds):
+        monitor = FakeBrokerTickMonitor(
+            stale_after_seconds=stale_after_seconds,
+        )
+        broker_monitors.append(monitor)
+        return monitor
+
+    def create_broker_tick_worker(
+        adapter,
+        monitor,
+        *,
+        symbol,
+        interval_seconds,
+    ):
+        worker = FakeBrokerTickWorker(
+            adapter=adapter,
+            monitor=monitor,
+            symbol=symbol,
+            interval_seconds=interval_seconds,
+            lifecycle_order=lifecycle_order,
+            stop_result=worker_stop_result,
+            stop_error=worker_stop_error,
+        )
+        workers.append(worker)
+        return worker
+
     def create_database(database_url):
         return FakeDatabase(
             database_url=database_url,
@@ -216,6 +295,16 @@ def configure_lifecycle(
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "MT5Adapter", create_adapter)
     monkeypatch.setattr(main, "MT5ConnectionMonitor", create_monitor)
+    monkeypatch.setattr(
+        main,
+        "BrokerTickMonitor",
+        create_broker_tick_monitor,
+    )
+    monkeypatch.setattr(
+        main,
+        "BrokerTickMonitorWorker",
+        create_broker_tick_worker,
+    )
     monkeypatch.setattr(main, "Database", create_database)
     monkeypatch.setattr(
         main,
@@ -251,6 +340,10 @@ def configure_lifecycle(
     )
 
     app = SimpleNamespace(state=SimpleNamespace())
+    app.state._test_workers = workers
+    app.state._test_broker_monitors = broker_monitors
+    app.state._test_lifecycle_order = lifecycle_order
+
     return app, events
 
 
@@ -355,7 +448,7 @@ def test_lifespan_skips_collector_when_mt5_symbol_is_empty(
         "adapter.connect",
         "monitor.start",
         "backup.start",
-        "backup.stop",
+        "collector.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
@@ -601,8 +694,6 @@ def test_lifespan_connects_session_calendar_to_market_data_service(
         sessions_max_age_seconds=3600,
     )
 
-    # Reapply these patches after configure_lifecycle,
-    # because it installs its own FakeMarketDataService.
     monkeypatch.setattr(
         main.MarketSessionCalendar,
         "load",
@@ -811,6 +902,8 @@ def test_lifespan_stops_startup_when_session_file_is_stale(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+
+
 def test_lifespan_stops_startup_when_session_file_is_too_far_in_future(
     monkeypatch,
     tmp_path,
@@ -942,3 +1035,159 @@ def test_lifespan_uses_configured_session_file_max_age(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+
+
+def test_broker_tick_worker_starts_with_configured_symbol_and_stops(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        mt5_symbol="XAUUSD",
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            worker = app.state.broker_tick_worker
+
+            assert worker is not None
+            assert worker.started is True
+            assert worker.symbol == "XAUUSD"
+            assert worker.interval_seconds == 1.0
+
+            assert worker.adapter is app.state.mt5_adapter
+            assert worker.monitor is app.state.broker_tick_monitor
+
+            assert (
+                app.state.broker_tick_monitor.stale_after_seconds
+                == 15.0
+            )
+
+            assert app.state._test_lifecycle_order == [
+                "broker_tick.start",
+            ]
+
+    asyncio.run(run())
+
+    worker = app.state._test_workers[0]
+
+    assert worker.stop_calls == 1
+    assert worker.started is True
+
+    assert app.state._test_lifecycle_order == [
+        "broker_tick.start",
+        "broker_tick.stop",
+    ]
+
+
+def test_broker_tick_worker_stops_before_mt5_monitor(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            pass
+
+    asyncio.run(run())
+
+    order = app.state._test_lifecycle_order
+
+    assert order.index("broker_tick.start") < order.index(
+        "broker_tick.stop"
+    )
+
+    assert order.index("broker_tick.stop") < order.index(
+        "monitor.stop"
+    )
+
+
+def test_lifespan_skips_broker_tick_worker_when_mt5_disabled(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            assert app.state.broker_tick_worker is None
+            assert app.state._test_workers == []
+
+    asyncio.run(run())
+
+    assert app.state._test_workers == []
+
+
+def test_lifespan_skips_broker_tick_worker_when_symbol_is_empty(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        mt5_symbol="   ",
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            assert app.state.broker_tick_worker is None
+            assert app.state._test_workers == []
+
+    asyncio.run(run())
+
+    assert app.state._test_workers == []
+
+
+def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_fails_to_stop(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        worker_stop_result=False,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            pass
+
+    asyncio.run(run())
+
+    assert app.state._test_workers[0].stop_calls == 1
+
+    assert "broker_tick.stop" in (
+        app.state._test_lifecycle_order
+    )
+
+    assert "monitor.stop" in (
+        app.state._test_lifecycle_order
+    )
+
+    assert "adapter.shutdown" not in events
+    assert "database.dispose" in events
+
+
+def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+        worker_stop_error=RuntimeError(
+            "Simulated broker tick worker stop failure"
+        ),
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            pass
+
+    asyncio.run(run())
+
+    assert app.state._test_workers[0].stop_calls == 1
+    assert "adapter.shutdown" not in events
+    assert "database.dispose" in events
