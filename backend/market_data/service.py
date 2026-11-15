@@ -118,8 +118,8 @@ class MarketDataService:
         if isinstance(count, bool) or not isinstance(count, int):
             raise TypeError("Count must be an integer.")
 
-        if count <= 0:
-            raise ValueError("Count must be greater than zero.")
+        if not 1 <= count <= 10000:
+            raise ValueError("Count must be between 1 and 10000.")
 
         requested_symbol = symbol.strip()
         requested_timeframe = normalize_timeframe(timeframe)
