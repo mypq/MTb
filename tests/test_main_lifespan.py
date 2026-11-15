@@ -641,3 +641,37 @@ def test_lifespan_connects_session_calendar_to_market_data_service(
             )
 
     asyncio.run(run())
+def test_lifespan_stops_startup_when_session_calendar_is_invalid(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file="invalid_sessions.json",
+    )
+
+    def fail_load(path, *, max_age_seconds):
+        raise main.MarketSessionCalendarError(
+            "Simulated invalid session calendar"
+        )
+
+    monkeypatch.setattr(
+        main.MarketSessionCalendar,
+        "load",
+        staticmethod(fail_load),
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
