@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -141,6 +140,9 @@ async def lifespan(app: FastAPI):
     collector_stop_event = asyncio.Event()
     collector_task = None
 
+    startup_stop_event = asyncio.Event()
+    startup_task = None
+
     app.state.settings = settings
     app.state.mt5_adapter = adapter
     app.state.mt5_monitor = monitor
@@ -169,54 +171,121 @@ async def lifespan(app: FastAPI):
         )
 
         if settings.MT5_ENABLED:
-            adapter.connect()
+            try:
+                adapter.connect()
+            except Exception:
+                logger.exception(
+                    "Initial MT5 connection attempt failed. "
+                    "The API will remain available while recovery continues."
+                )
+
             monitor.start()
 
             selected_symbol = settings.MT5_SYMBOL.strip()
 
             if selected_symbol:
-                broker_tick_worker = BrokerTickMonitorWorker(
-                    adapter=adapter,
-                    monitor=broker_tick_monitor,
-                    symbol=selected_symbol,
-                    interval_seconds=1.0,
+
+                async def start_market_data_when_connected():
+                    nonlocal broker_tick_worker
+                    nonlocal collector
+                    nonlocal collector_task
+
+                    while not startup_stop_event.is_set():
+                        try:
+                            status = await asyncio.to_thread(
+                                adapter.connection_status
+                            )
+                            state = getattr(
+                                status.state,
+                                "value",
+                                status.state,
+                            )
+
+                            if state == "CONNECTED":
+                                break
+
+                        except Exception:
+                            logger.exception(
+                                "Failed to check MT5 connection "
+                                "before starting market-data workers."
+                            )
+
+                        try:
+                            await asyncio.wait_for(
+                                startup_stop_event.wait(),
+                                timeout=0.1,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
+
+                    if startup_stop_event.is_set():
+                        return
+
+                    broker_tick_worker = BrokerTickMonitorWorker(
+                        adapter=adapter,
+                        monitor=broker_tick_monitor,
+                        symbol=selected_symbol,
+                        interval_seconds=1.0,
+                    )
+
+                    app.state.broker_tick_worker = (
+                        broker_tick_worker
+                    )
+
+                    broker_tick_worker.start()
+
+                    logger.info(
+                        "Broker tick monitoring enabled: "
+                        "symbol=%s interval=1.0 seconds "
+                        "clock_verification=UNVERIFIED",
+                        selected_symbol,
+                    )
+
+                    collector = MarketDataCollector(
+                        service=market_data_service,
+                        repository=market_data_repository,
+                        symbol=selected_symbol,
+                        timeframe=settings.DEFAULT_TIMEFRAME,
+                        count=300,
+                    )
+
+                    app.state.market_data_collector = collector
+
+                    collector_task = asyncio.create_task(
+                        collector.run(collector_stop_event),
+                        name="market-data-collector",
+                    )
+
+                    logger.info(
+                        "Automatic market data collection enabled: "
+                        "symbol=%s timeframe=%s interval=%.1f seconds",
+                        selected_symbol,
+                        settings.DEFAULT_TIMEFRAME,
+                        collector.interval_seconds,
+                    )
+
+                current_status = await asyncio.to_thread(
+                    adapter.connection_status
+                )
+                current_state = getattr(
+                    current_status.state,
+                    "value",
+                    current_status.state,
                 )
 
-                app.state.broker_tick_worker = (
-                    broker_tick_worker
-                )
+                if current_state == "CONNECTED":
+                    await start_market_data_when_connected()
+                else:
+                    startup_task = asyncio.create_task(
+                        start_market_data_when_connected(),
+                        name="mt5-market-data-startup",
+                    )
 
-                broker_tick_worker.start()
+                    logger.info(
+                        "Market-data workers are waiting for "
+                        "MT5 connection recovery."
+                    )
 
-                logger.info(
-                    "Broker tick monitoring enabled: "
-                    "symbol=%s interval=1.0 seconds "
-                    "clock_verification=UNVERIFIED",
-                    selected_symbol,
-                )
-
-                collector = MarketDataCollector(
-                    service=market_data_service,
-                    repository=market_data_repository,
-                    symbol=selected_symbol,
-                    timeframe=settings.DEFAULT_TIMEFRAME,
-                    count=300,
-                )
-
-                app.state.market_data_collector = collector
-
-                collector_task = asyncio.create_task(
-                    collector.run(collector_stop_event),
-                    name="market-data-collector",
-                )
-
-                logger.info(
-                    "Automatic market data collection enabled: "
-                    "symbol=%s timeframe=%s interval=%.1f seconds",
-                    selected_symbol,
-                    settings.DEFAULT_TIMEFRAME,
-                    collector.interval_seconds,
-                )
             else:
                 logger.warning(
                     "Automatic market data collection and broker "
@@ -227,6 +296,16 @@ async def lifespan(app: FastAPI):
 
     finally:
         try:
+            startup_stop_event.set()
+
+            if startup_task is not None:
+                try:
+                    await startup_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop MT5 market-data startup coordinator."
+                    )
+
             if collector_task is not None:
                 collector_stop_event.set()
 
