@@ -83,6 +83,11 @@ class FakeMarketDataService:
         self.validator = validator
 
 
+class FakeMarketDataValidator:
+    def __init__(self, session_calendar=None):
+        self.session_calendar = session_calendar
+
+
 class FakeMarketDataRepository:
     def __init__(self, database):
         self.database = database
