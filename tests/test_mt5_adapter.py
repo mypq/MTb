@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -482,6 +483,7 @@ def test_unsupported_timeframe_is_rejected():
     with pytest.raises(ValueError):
         adapter.get_closed_candles("XAUUSD", "M2", 10)
 
+
 def test_initialization_exception_returns_error_status():
     mt5 = make_mt5_module()
     mt5.initialize.side_effect = RuntimeError("Initialization crashed")
@@ -518,6 +520,8 @@ def test_candle_retrieval_exception_is_wrapped_as_adapter_error():
         1,
         10,
     )
+
+
 def test_account_information_unavailable_raises_adapter_error():
     adapter, mt5 = make_connected_adapter()
     mt5.account_info.return_value = None
@@ -556,6 +560,8 @@ def test_connection_status_handles_terminal_exception():
 
     assert status.state == MT5ConnectionState.ERROR
     assert "RuntimeError" in status.message
+
+
 def test_monitor_recovers_real_adapter_after_initial_connection_failure():
     from backend.mt5.monitor import MT5ConnectionMonitor
 
@@ -581,6 +587,8 @@ def test_monitor_recovers_real_adapter_after_initial_connection_failure():
 
     adapter.shutdown()
     mt5.shutdown.assert_called_once()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -654,6 +662,8 @@ def test_missing_candle_field_is_rejected(missing_field):
 
     with pytest.raises(MT5AdapterError, match="failed validation"):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -784,6 +794,8 @@ def test_point_and_tick_size_can_have_different_values():
 
     assert symbol.point == 0.001
     assert symbol.trade_tick_size == 0.005
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -822,6 +834,7 @@ def test_invalid_symbol_spread_is_rejected(field, value):
 
     with pytest.raises(Exception):
         adapter.get_symbol_info("XAUUSD")
+
 
 @pytest.mark.parametrize(
     ("field", "value"),
@@ -868,6 +881,7 @@ def test_negative_account_margin_is_rejected():
 
 def test_negative_balance_equity_and_free_margin_are_preserved():
     adapter, mt5 = make_connected_adapter()
+    adapter.connect()
     mt5.account_info.return_value.balance = -10.0
     mt5.account_info.return_value.equity = -15.0
     mt5.account_info.return_value.margin_free = -20.0
@@ -877,6 +891,7 @@ def test_negative_balance_equity_and_free_margin_are_preserved():
     assert account.balance == -10.0
     assert account.equity == -15.0
     assert account.free_margin == -20.0
+
 
 @pytest.mark.parametrize(
     "timestamp",
@@ -920,6 +935,8 @@ def test_integer_candle_timestamp_is_accepted():
         timestamp,
         tz=timezone.utc,
     )
+
+
 def test_monitor_recovers_after_active_mt5_connection_is_lost():
     from backend.mt5.monitor import MT5ConnectionMonitor
 
@@ -967,6 +984,8 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
 
     adapter.shutdown()
     assert mt5.shutdown.call_count == 2
+
+
 def test_symbol_information_request_exception_is_wrapped():
     adapter, mt5 = make_connected_adapter()
     mt5.symbol_info.side_effect = RuntimeError(
@@ -980,12 +999,17 @@ def test_symbol_information_request_exception_is_wrapped():
         adapter.get_symbol_info("XAUUSD")
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
+
+_DEFAULT_TICK_TIMESTAMP = object()
+
+
 def make_tick(
-    time_msc=None,
+    time_msc=_DEFAULT_TICK_TIMESTAMP,
     bid=4100.10,
     ask=4100.20,
 ):
-    if time_msc is None:
+    if time_msc is _DEFAULT_TICK_TIMESTAMP:
         time_msc = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     return SimpleNamespace(
@@ -1089,7 +1113,10 @@ def test_broker_time_sample_rejects_missing_account_identity():
     adapter, mt5 = make_connected_adapter()
     mt5.account_info.return_value = None
 
-    with pytest.raises(MT5AdapterError, match="identity is unavailable"):
+    with pytest.raises(
+        MT5AdapterError,
+        match="connection is not ready",
+    ):
         adapter.get_broker_time_sample("XAUUSD")
 
     mt5.symbol_info_tick.assert_not_called()
