@@ -980,3 +980,139 @@ def test_symbol_information_request_exception_is_wrapped():
         adapter.get_symbol_info("XAUUSD")
 
     assert isinstance(error.value.__cause__, RuntimeError)
+def make_tick(
+    time_msc=None,
+    bid=4100.10,
+    ask=4100.20,
+):
+    if time_msc is None:
+        time_msc = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    return SimpleNamespace(
+        time_msc=time_msc,
+        bid=bid,
+        ask=ask,
+    )
+
+
+def test_broker_time_sample_maps_tick_and_account_identity():
+    adapter, mt5 = make_connected_adapter()
+    timestamp = 1794729600123
+    mt5.symbol_info_tick.return_value = make_tick(
+        time_msc=timestamp,
+    )
+
+    sample = adapter.get_broker_time_sample("XAUUSD")
+
+    mt5.symbol_info_tick.assert_called_once_with("XAUUSD")
+
+    assert sample.symbol == "XAUUSD"
+    assert sample.broker_time_msc == timestamp
+    assert sample.account_login == 123456
+    assert sample.broker_server == "Demo-Server"
+    assert sample.bid == 4100.10
+    assert sample.ask == 4100.20
+    assert sample.received_at_utc.utcoffset() == timedelta(0)
+    assert sample.received_monotonic_ns >= 0
+
+
+def test_broker_time_sample_preserves_raw_millisecond_timestamp():
+    adapter, mt5 = make_connected_adapter()
+    timestamp = 1794729600123
+    mt5.symbol_info_tick.return_value = make_tick(time_msc=timestamp)
+
+    sample = adapter.get_broker_time_sample("XAUUSD")
+
+    assert sample.broker_time_msc == timestamp
+
+
+def test_broker_time_sample_normalizes_symbol_before_lookup():
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info_tick.return_value = make_tick()
+
+    adapter.get_broker_time_sample(" XAUUSD ")
+
+    mt5.symbol_info_tick.assert_called_once_with("XAUUSD")
+
+
+def test_broker_time_sample_rejects_empty_symbol():
+    adapter, mt5 = make_connected_adapter()
+
+    with pytest.raises(ValueError, match="Symbol name cannot be empty"):
+        adapter.get_broker_time_sample("   ")
+
+    mt5.symbol_info_tick.assert_not_called()
+
+
+def test_broker_time_sample_rejects_missing_tick():
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info_tick.return_value = None
+
+    with pytest.raises(MT5AdapterError, match="no tick"):
+        adapter.get_broker_time_sample("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [0, -1, True, 123.5, "123", None],
+)
+def test_broker_time_sample_rejects_invalid_tick_timestamp(timestamp):
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info_tick.return_value = make_tick(time_msc=timestamp)
+
+    with pytest.raises(MT5AdapterError, match="tick data failed validation"):
+        adapter.get_broker_time_sample("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    ("bid", "ask"),
+    [
+        (0, 1),
+        (-1, 1),
+        (2, 1),
+        (float("nan"), 2),
+        (1, float("inf")),
+    ],
+)
+def test_broker_time_sample_rejects_invalid_tick_prices(bid, ask):
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info_tick.return_value = make_tick(
+        bid=bid,
+        ask=ask,
+    )
+
+    with pytest.raises(MT5AdapterError, match="tick data failed validation"):
+        adapter.get_broker_time_sample("XAUUSD")
+
+
+def test_broker_time_sample_rejects_missing_account_identity():
+    adapter, mt5 = make_connected_adapter()
+    mt5.account_info.return_value = None
+
+    with pytest.raises(MT5AdapterError, match="identity is unavailable"):
+        adapter.get_broker_time_sample("XAUUSD")
+
+    mt5.symbol_info_tick.assert_not_called()
+
+
+def test_broker_time_sample_wraps_tick_request_exception():
+    adapter, mt5 = make_connected_adapter()
+    mt5.symbol_info_tick.side_effect = RuntimeError("Tick request failed")
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="tick request raised RuntimeError",
+    ) as error:
+        adapter.get_broker_time_sample("XAUUSD")
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+
+
+def test_broker_time_sample_rejects_invalid_account_identity():
+    adapter, mt5 = make_connected_adapter()
+    mt5.account_info.return_value.login = True
+
+    with pytest.raises(MT5AdapterError, match="malformed account identity"):
+        adapter.get_broker_time_sample("XAUUSD")
+
+    mt5.symbol_info_tick.assert_not_called()
