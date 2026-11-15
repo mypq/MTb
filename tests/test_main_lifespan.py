@@ -1,10 +1,13 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
 
+from backend.mt5.models import MT5ConnectionState
+from backend.mt5.monitor import MT5ConnectionMonitor as RealMT5ConnectionMonitor
 import backend.main as main
 
 
@@ -382,6 +385,166 @@ def configure_lifecycle(
     )
 
     return app, events
+
+
+def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    allow_recovery = Event()
+    worker_started = Event()
+    collector_started = Event()
+    adapter_lock = __import__("threading").Lock()
+
+    class ControlledAdapter:
+        def __init__(self, settings):
+            self.settings = settings
+            self.connect_calls = 0
+            self.state = MT5ConnectionState.DISCONNECTED
+
+        def connect(self):
+            with adapter_lock:
+                self.connect_calls += 1
+                call_number = self.connect_calls
+
+            if call_number == 1:
+                self.state = MT5ConnectionState.DISCONNECTED
+                return SimpleNamespace(state=self.state)
+
+            allow_recovery.wait(timeout=5)
+
+            if allow_recovery.is_set():
+                self.state = MT5ConnectionState.CONNECTED
+
+            return SimpleNamespace(state=self.state)
+
+        def connection_status(self):
+            with adapter_lock:
+                return SimpleNamespace(state=self.state)
+
+        def shutdown(self):
+            events.append("adapter.shutdown")
+
+    class ControlledWorker:
+        def __init__(
+            self,
+            adapter,
+            monitor,
+            *,
+            symbol,
+            interval_seconds,
+        ):
+            self.adapter = adapter
+            self.monitor = monitor
+            self.symbol = symbol
+            self.interval_seconds = interval_seconds
+            self.started_state = None
+
+        def start(self):
+            self.started_state = self.adapter.connection_status().state
+            worker_started.set()
+
+        def stop(self):
+            return True
+
+        def status(self):
+            return {
+                "running": worker_started.is_set(),
+                "state": "NO_DATA",
+                "clock_verification": "UNVERIFIED",
+            }
+
+    class ControlledCollector:
+        def __init__(
+            self,
+            service,
+            repository,
+            *,
+            symbol,
+            timeframe,
+            count,
+        ):
+            self.service = service
+            self.repository = repository
+            self.symbol = symbol
+            self.timeframe = timeframe
+            self.count = count
+
+        async def run(self, stop_event):
+            self.started_state = (
+                self.service.source.connection_status().state
+            )
+            collector_started.set()
+            await stop_event.wait()
+
+    monkeypatch.setattr(main, "MT5Adapter", ControlledAdapter)
+
+    monkeypatch.setattr(
+        main,
+        "MT5ConnectionMonitor",
+        lambda adapter, interval_seconds: RealMT5ConnectionMonitor(
+            adapter,
+            interval_seconds=0.01,
+        ),
+    )
+
+    monkeypatch.setattr(
+        main,
+        "BrokerTickMonitorWorker",
+        ControlledWorker,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "MarketDataCollector",
+        ControlledCollector,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            try:
+                # The real monitor is attempting recovery.
+                # Workers must not start while recovery is blocked.
+                assert not worker_started.is_set()
+                assert not collector_started.is_set()
+
+                allow_recovery.set()
+
+                # Both workers must start after the real monitor
+                # successfully restores the MT5 connection.
+                assert await asyncio.wait_for(
+                    asyncio.to_thread(worker_started.wait),
+                    timeout=2,
+                )
+
+                assert await asyncio.wait_for(
+                    asyncio.to_thread(collector_started.wait),
+                    timeout=2,
+                )
+
+                assert (
+                    app.state.mt5_adapter.connection_status().state
+                    == MT5ConnectionState.CONNECTED
+                )
+
+                assert (
+                    app.state.broker_tick_worker.started_state
+                    == MT5ConnectionState.CONNECTED
+                )
+
+                assert (
+                    app.state.market_data_collector.started_state
+                    == MT5ConnectionState.CONNECTED
+                )
+
+            finally:
+                allow_recovery.set()
+
+    asyncio.run(run())
 
 
 def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
