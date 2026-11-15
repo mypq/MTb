@@ -811,3 +811,134 @@ def test_lifespan_stops_startup_when_session_file_is_stale(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+def test_lifespan_stops_startup_when_session_file_is_too_far_in_future(
+    monkeypatch,
+    tmp_path,
+):
+    future_file = tmp_path / "future_sessions.json"
+
+    generated_at = int(
+        (
+            datetime.now(timezone.utc)
+            + timedelta(minutes=10)
+        ).timestamp()
+    )
+
+    data = {
+        "schema_version": 1,
+        "status": "ok",
+        "symbol": "XAUUSD",
+        "generated_at_utc_epoch": generated_at,
+        "server_utc_offset_seconds": 7200,
+        "schedule_kind": "weekly_recurring",
+        "days": [
+            {
+                "day_of_week": day,
+                "trade": (
+                    [
+                        {
+                            "from_seconds": 3720,
+                            "to_seconds": 86280,
+                        }
+                    ]
+                    if day in (1, 2, 3, 4, 5)
+                    else []
+                ),
+                "quote": [],
+            }
+            for day in range(7)
+        ],
+    }
+
+    future_file.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file=str(future_file),
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
+
+
+def test_lifespan_uses_configured_session_file_max_age(
+    monkeypatch,
+    tmp_path,
+):
+    sessions_file = tmp_path / "sessions.json"
+
+    generated_at = int(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(hours=2)
+        ).timestamp()
+    )
+
+    data = {
+        "schema_version": 1,
+        "status": "ok",
+        "symbol": "XAUUSD",
+        "generated_at_utc_epoch": generated_at,
+        "server_utc_offset_seconds": 7200,
+        "schedule_kind": "weekly_recurring",
+        "days": [
+            {
+                "day_of_week": day,
+                "trade": (
+                    [
+                        {
+                            "from_seconds": 3720,
+                            "to_seconds": 86280,
+                        }
+                    ]
+                    if day in (1, 2, 3, 4, 5)
+                    else []
+                ),
+                "quote": [],
+            }
+            for day in range(7)
+        ],
+    }
+
+    sessions_file.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file=str(sessions_file),
+        sessions_max_age_seconds=3600,
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
