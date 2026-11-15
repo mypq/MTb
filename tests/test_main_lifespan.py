@@ -473,6 +473,7 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             self.symbol = symbol
             self.timeframe = timeframe
             self.count = count
+            self.interval_seconds = 300.0
 
         async def run(self, stop_event):
             self.started_state = (
