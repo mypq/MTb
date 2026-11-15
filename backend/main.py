@@ -226,10 +226,9 @@ async def lifespan(app: FastAPI):
 
                     logger.info(
                         "Automatic market data collection enabled: "
-                        "symbol=%s timeframe=%s interval=%.1f seconds",
+                        "symbol=%s timeframe=%s schedule=candle_close+2s",
                         selected_symbol,
                         settings.DEFAULT_TIMEFRAME,
-                        collector.interval_seconds,
                     )
 
                 initial_state = getattr(
