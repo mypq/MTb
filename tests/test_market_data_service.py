@@ -229,17 +229,22 @@ def test_non_batch_source_response_is_rejected():
         )
 
 
-@pytest.mark.parametrize("count", [0, -1])
-def test_non_positive_count_is_rejected(count):
-    service, _ = make_service(make_batch())
+@pytest.mark.parametrize("count", [0, -1, 10001])
+def test_out_of_range_count_is_rejected(count):
+    service, source = make_service(make_batch())
 
-    with pytest.raises(ValueError, match="greater than zero"):
+    with pytest.raises(
+        ValueError,
+        match="between 1 and 10000",
+    ):
         service.get_snapshot(
             "XAUUSD",
             "M5",
             count,
             CHECKED_AT,
         )
+
+    assert source.last_request is None
 
 
 @pytest.mark.parametrize("count", [True, 2.0, "2"])
@@ -377,7 +382,8 @@ def test_unknown_volume_blocks_only_volume_required_analysis():
             1,
             require_volume=True,
             checked_at=CHECKED_AT,
-)
+        )
+
 
 @pytest.mark.parametrize("symbol", [None, 123, True, [], {}])
 def test_non_string_symbol_is_rejected_before_source_request(symbol):
