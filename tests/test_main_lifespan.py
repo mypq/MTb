@@ -18,12 +18,13 @@ class FakeAdapter:
         self.events.append("adapter.connect")
         if self.connect_error is not None:
             raise self.connect_error
+        return SimpleNamespace(state="CONNECTED")
 
     def shutdown(self):
         self.events.append("adapter.shutdown")
 
     def connection_status(self):
-        return SimpleNamespace(model_dump=lambda mode: {})
+        return SimpleNamespace(model_dump=lambda mode: {}, state="CONNECTED")
 
 
 class FakeMonitor:
@@ -240,26 +241,31 @@ def configure_lifecycle(
     )
 
     def create_adapter(settings):
-        return FakeAdapter(
+        adapter = FakeAdapter(
             settings=settings,
             events=events,
             connect_error=connect_error,
         )
+        app.state.mt5_adapter = adapter
+        return adapter
 
     def create_monitor(adapter, interval_seconds):
-        return FakeMonitor(
+        monitor = FakeMonitor(
             adapter=adapter,
             interval_seconds=interval_seconds,
             stop_result=monitor_stop_result,
             stop_error=monitor_stop_error,
             lifecycle_order=lifecycle_order,
         )
+        app.state.mt5_monitor = monitor
+        return monitor
 
     def create_broker_tick_monitor(stale_after_seconds):
         monitor = FakeBrokerTickMonitor(
             stale_after_seconds=stale_after_seconds,
         )
         broker_monitors.append(monitor)
+        app.state.broker_tick_monitor = monitor
         return monitor
 
     def create_broker_tick_worker(
@@ -279,17 +285,22 @@ def configure_lifecycle(
             stop_error=worker_stop_error,
         )
         workers.append(worker)
+        app.state.broker_tick_worker = worker
         return worker
 
     def create_database(database_url):
-        return FakeDatabase(
+        database = FakeDatabase(
             database_url=database_url,
             events=events,
             initialize_error=initialize_error,
         )
+        app.state.database = database
+        return database
 
     def create_backup_service(database):
-        return FakeBackupService(database, events)
+        backup_service = FakeBackupService(database, events)
+        app.state.database_backup_service = backup_service
+        return backup_service
 
     async def fake_backup_loop(backup_service, stop_event):
         events.append("backup.start")
@@ -300,6 +311,28 @@ def configure_lifecycle(
         events.append("database.migrations")
         if migration_error is not None:
             raise migration_error
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    app.state._test_workers = workers
+    app.state._test_broker_monitors = broker_monitors
+    app.state._test_lifecycle_order = lifecycle_order
+    app.state.market_data_collector = None
+    app.state.market_data_service = None
+    app.state.market_data_repository = None
+    app.state.mt5_adapter = None
+    app.state.mt5_monitor = None
+    app.state.broker_tick_monitor = None
+    app.state.broker_tick_worker = None
+
+    def create_service(source, validator=None):
+        service = FakeMarketDataService(source=source, validator=validator)
+        app.state.market_data_service = service
+        return service
+
+    def create_repository(database):
+        repo = FakeMarketDataRepository(database)
+        app.state.market_data_repository = repo
+        return repo
 
     monkeypatch.setattr(main, "get_settings", lambda: settings)
     monkeypatch.setattr(main, "MT5Adapter", create_adapter)
@@ -330,12 +363,12 @@ def configure_lifecycle(
     monkeypatch.setattr(
         main,
         "MarketDataService",
-        FakeMarketDataService,
+        create_service,
     )
     monkeypatch.setattr(
         main,
         "MarketDataRepository",
-        FakeMarketDataRepository,
+        create_repository,
     )
     monkeypatch.setattr(
         main,
@@ -348,12 +381,109 @@ def configure_lifecycle(
         FakeChronyStatusService,
     )
 
-    app = SimpleNamespace(state=SimpleNamespace())
-    app.state._test_workers = workers
-    app.state._test_broker_monitors = broker_monitors
-    app.state._test_lifecycle_order = lifecycle_order
-
     return app, events
+
+
+def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    lifecycle_order = app.state._test_lifecycle_order
+
+    class RecoveringAdapter:
+        def __init__(self, settings):
+            self.settings = settings
+            self.events = events
+            self.connect_calls = 0
+            self.state = "DISCONNECTED"
+
+        def connect(self):
+            self.connect_calls += 1
+            self.events.append("adapter.connect")
+
+            if self.connect_calls == 1:
+                self.state = "DISCONNECTED"
+            else:
+                self.state = "CONNECTED"
+
+            return SimpleNamespace(state=self.state)
+
+        def connection_status(self):
+            return SimpleNamespace(
+                state=self.state,
+                model_dump=lambda mode: {},
+            )
+
+        def shutdown(self):
+            self.events.append("adapter.shutdown")
+
+    class RecoveringMonitor:
+        def __init__(self, adapter, interval_seconds):
+            self.adapter = adapter
+            self.interval_seconds = interval_seconds
+
+        @property
+        def is_running(self):
+            return True
+
+        def start(self):
+            events.append("monitor.start")
+            lifecycle_order.append("monitor.start")
+
+            status = self.adapter.connection_status()
+
+            if status.state != "CONNECTED":
+                self.adapter.connect()
+
+        def stop(self):
+            events.append("monitor.stop")
+            lifecycle_order.append("monitor.stop")
+            return True
+
+    monkeypatch.setattr(
+        main,
+        "MT5Adapter",
+        RecoveringAdapter,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "MT5ConnectionMonitor",
+        RecoveringMonitor,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            adapter = app.state.mt5_adapter
+            monitor = app.state.mt5_monitor
+            worker = app.state.broker_tick_worker
+            collector = app.state.market_data_collector
+
+            # Initial connection failed, then recovery succeeded.
+            assert adapter.connect_calls == 2
+            assert adapter.connection_status().state == "CONNECTED"
+
+            # All components use the same adapter.
+            assert monitor.adapter is adapter
+            assert worker.adapter is adapter
+            assert collector.service.source is adapter
+
+            # Workers were created and started.
+            assert worker.started is True
+            assert collector.symbol == "XAUUSD"
+
+            # Monitor started before the broker tick worker.
+            assert lifecycle_order.index(
+                "monitor.start"
+            ) < lifecycle_order.index(
+                "broker_tick.start"
+            )
+
+    asyncio.run(run())
 
 
 def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
@@ -1203,98 +1333,3 @@ def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
     assert app.state._test_workers[0].stop_calls == 1
     assert "adapter.shutdown" not in events
     assert "database.dispose" in events
-def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
-    monkeypatch,
-):
-    app, events = configure_lifecycle(
-        monkeypatch,
-        mt5_enabled=True,
-    )
-
-    class RecoveringAdapter:
-        def __init__(self, settings):
-            self.settings = settings
-            self.events = events
-            self.connect_calls = 0
-            self.state = "DISCONNECTED"
-
-        def connect(self):
-            self.connect_calls += 1
-            self.events.append("adapter.connect")
-
-            if self.connect_calls == 1:
-                self.state = "DISCONNECTED"
-            else:
-                self.state = "CONNECTED"
-
-            return SimpleNamespace(state=self.state)
-
-        def connection_status(self):
-            return SimpleNamespace(
-                state=self.state,
-                model_dump=lambda mode: {},
-            )
-
-        def shutdown(self):
-            self.events.append("adapter.shutdown")
-
-    class RecoveringMonitor:
-        def __init__(self, adapter, interval_seconds):
-            self.adapter = adapter
-            self.interval_seconds = interval_seconds
-
-        @property
-        def is_running(self):
-            return True
-
-        def start(self):
-            events.append("monitor.start")
-
-            status = self.adapter.connection_status()
-
-            if status.state != "CONNECTED":
-                self.adapter.connect()
-
-        def stop(self):
-            events.append("monitor.stop")
-            return True
-
-    monkeypatch.setattr(
-        main,
-        "MT5Adapter",
-        RecoveringAdapter,
-    )
-
-    monkeypatch.setattr(
-        main,
-        "MT5ConnectionMonitor",
-        RecoveringMonitor,
-    )
-
-    async def run():
-        async with main.lifespan(app):
-            adapter = app.state.mt5_adapter
-            monitor = app.state.mt5_monitor
-            worker = app.state.broker_tick_worker
-            collector = app.state.market_data_collector
-
-            # The initial connection failed, but startup continued.
-            assert adapter.connect_calls == 2
-
-            # The connection monitor restored the connection.
-            assert adapter.connection_status().state == "CONNECTED"
-
-            # Both background components use the same adapter.
-            assert monitor.adapter is adapter
-            assert worker.adapter is adapter
-            assert collector.service.source is adapter
-
-            # Both market-data workers started after recovery.
-            assert worker.started is True
-            assert collector.symbol == "XAUUSD"
-
-            assert events.index("monitor.start") < events.index(
-                "broker_tick.start"
-            )
-
-    asyncio.run(run())
