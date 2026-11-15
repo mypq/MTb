@@ -197,9 +197,12 @@ def test_status_contains_monitor_and_worker_state():
 
 def test_status_is_json_compatible():
     import json
+    from time import monotonic_ns
 
     worker, adapter, monitor = make_worker(
-        sample=make_sample(),
+        sample=make_sample(
+            monotonic_ns=monotonic_ns(),
+        ),
     )
 
     worker.check_once()
