@@ -70,7 +70,6 @@ def make_collector(
     snapshot=None,
     service_error=None,
     repository_error=None,
-    interval_seconds=None,
 ):
     service = FakeMarketDataService(
         snapshot=snapshot or make_snapshot(),
@@ -86,7 +85,6 @@ def make_collector(
         symbol=" XAUUSD ",
         timeframe="m5",
         count=300,
-        interval_seconds=interval_seconds,
     )
 
     return collector, service, repository
@@ -95,17 +93,9 @@ def make_collector(
 def test_collector_normalizes_symbol_and_timeframe():
     collector, service, repository = make_collector()
 
-    assert collector._symbol == "XAUUSD"
-    assert collector._timeframe == "M5"
-    assert collector.interval_seconds == 300.0
-
-
-def test_collector_uses_explicit_interval():
-    collector, service, repository = make_collector(
-        interval_seconds=45,
-    )
-
-    assert collector.interval_seconds == 45.0
+    assert collector.symbol == "XAUUSD"
+    assert collector.timeframe == "M5"
+    assert collector.count == 300
 
 
 @pytest.mark.parametrize(
@@ -155,34 +145,6 @@ def test_collector_rejects_unsupported_timeframe(timeframe):
             FakeMarketDataRepository(),
             symbol="XAUUSD",
             timeframe=timeframe,
-        )
-
-
-@pytest.mark.parametrize(
-    "interval",
-    [
-        0,
-        -1,
-        True,
-        False,
-        float("inf"),
-        float("-inf"),
-        float("nan"),
-        "300",
-        None,
-    ],
-)
-def test_collector_rejects_invalid_explicit_interval(interval):
-    if interval is None:
-        return
-
-    with pytest.raises(ValueError):
-        MarketDataCollector(
-            FakeMarketDataService(make_snapshot()),
-            FakeMarketDataRepository(),
-            symbol="XAUUSD",
-            timeframe="M5",
-            interval_seconds=interval,
         )
 
 
