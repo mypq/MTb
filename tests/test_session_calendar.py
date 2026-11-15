@@ -112,7 +112,7 @@ def test_future_session_file_is_rejected(tmp_path):
     ):
         MarketSessionCalendar.load(
             path,
-            now_utc=datetime(2026, 1, 1, 0, 6, tzinfo=UTC),
+            now_utc=datetime(2025, 12, 31, 23, 54, tzinfo=UTC),
         )
 
 
