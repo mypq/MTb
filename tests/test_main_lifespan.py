@@ -563,3 +563,79 @@ def test_database_backup_loop_creates_backup_and_stops(monkeypatch):
     )
 
     assert calls == ["backup.created"]
+
+
+def test_lifespan_connects_session_calendar_to_market_data_service(
+    monkeypatch,
+):
+    calendar = SimpleNamespace(symbol="XAUUSD")
+    load_calls = []
+    created_validators = []
+    created_services = []
+
+    def fake_load(path, *, max_age_seconds):
+        load_calls.append((path, max_age_seconds))
+        return calendar
+
+    def create_validator(session_calendar=None):
+        validator = FakeMarketDataValidator(
+            session_calendar=session_calendar,
+        )
+        created_validators.append(validator)
+        return validator
+
+    def create_service(source, validator=None):
+        service = FakeMarketDataService(
+            source=source,
+            validator=validator,
+        )
+        created_services.append(service)
+        return service
+
+    monkeypatch.setattr(
+        main.MarketSessionCalendar,
+        "load",
+        staticmethod(fake_load),
+    )
+    monkeypatch.setattr(
+        main,
+        "MarketDataValidator",
+        create_validator,
+    )
+    monkeypatch.setattr(
+        main,
+        "MarketDataService",
+        create_service,
+    )
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file="sessions.json",
+        sessions_max_age_seconds=3600,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            assert load_calls == [
+                ("sessions.json", 3600),
+            ]
+
+            assert len(created_validators) == 1
+            assert (
+                created_validators[0].session_calendar
+                is calendar
+            )
+
+            assert len(created_services) == 1
+            assert (
+                created_services[0].validator
+                is created_validators[0]
+            )
+
+            assert (
+                app.state.market_data_service
+                is created_services[0]
+            )
+
+    asyncio.run(run())
