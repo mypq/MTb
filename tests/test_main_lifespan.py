@@ -1,4 +1,6 @@
 import asyncio
+import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -641,6 +643,8 @@ def test_lifespan_connects_session_calendar_to_market_data_service(
             )
 
     asyncio.run(run())
+
+
 def test_lifespan_stops_startup_when_session_calendar_is_invalid(
     monkeypatch,
 ):
@@ -675,6 +679,8 @@ def test_lifespan_stops_startup_when_session_calendar_is_invalid(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+
+
 def test_lifespan_stops_startup_when_session_file_is_missing(
     monkeypatch,
     tmp_path,
@@ -702,6 +708,8 @@ def test_lifespan_stops_startup_when_session_file_is_missing(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+
+
 def test_lifespan_stops_startup_when_session_symbol_does_not_match(
     monkeypatch,
 ):
@@ -720,6 +728,73 @@ def test_lifespan_stops_startup_when_session_symbol_does_not_match(
         main.MarketSessionCalendar,
         "load",
         staticmethod(fail_load),
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
+
+
+def test_lifespan_stops_startup_when_session_file_is_stale(
+    monkeypatch,
+    tmp_path,
+):
+    stale_file = tmp_path / "stale_sessions.json"
+
+    generated_at = int(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(days=30)
+        ).timestamp()
+    )
+
+    data = {
+        "schema_version": 1,
+        "status": "ok",
+        "symbol": "XAUUSD",
+        "generated_at_utc_epoch": generated_at,
+        "server_utc_offset_seconds": 7200,
+        "schedule_kind": "weekly_recurring",
+        "days": [
+            {
+                "day_of_week": day,
+                "trade": (
+                    [
+                        {
+                            "from_seconds": 3720,
+                            "to_seconds": 86280,
+                        }
+                    ]
+                    if day in (1, 2, 3, 4, 5)
+                    else []
+                ),
+                "quote": [],
+            }
+            for day in range(7)
+        ],
+    }
+
+    stale_file.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file=str(stale_file),
+        sessions_max_age_seconds=3600,
     )
 
     async def run():
