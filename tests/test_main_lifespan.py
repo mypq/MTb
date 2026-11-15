@@ -1073,6 +1073,7 @@ def test_broker_tick_worker_starts_with_configured_symbol_and_stops(
             )
 
             assert app.state._test_lifecycle_order == [
+                "monitor.start",
                 "broker_tick.start",
             ]
 
@@ -1084,8 +1085,10 @@ def test_broker_tick_worker_starts_with_configured_symbol_and_stops(
     assert worker.started is True
 
     assert app.state._test_lifecycle_order == [
+        "monitor.start",
         "broker_tick.start",
         "broker_tick.stop",
+        "monitor.stop",
     ]
 
 
