@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from backend.market_data.models import (
     VolumeSource,
 )
 from backend.market_data.service import MarketDataSnapshot
+from backend.mt5.timeframes import normalize_timeframe
 
 
 class MarketDataPersistenceError(RuntimeError):
@@ -79,7 +79,7 @@ class MarketDataRepository:
             raise ValueError("Count must be between 1 and 10000.")
 
         normalized_symbol = symbol.strip()
-        normalized_timeframe = timeframe.strip().upper()
+        normalized_timeframe = normalize_timeframe(timeframe)
 
         with self._database.session() as session:
             records = session.scalars(
