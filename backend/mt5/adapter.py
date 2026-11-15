@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -284,7 +285,14 @@ class MT5Adapter:
                 )
 
             try:
-                account_login = index(account.login)
+                raw_login = account.login
+
+                if isinstance(raw_login, bool):
+                    raise ValueError(
+                        "MT5 returned a boolean account login."
+                    )
+
+                account_login = index(raw_login)
                 broker_server = str(account.server).strip()
 
                 if account_login <= 0 or not broker_server:
