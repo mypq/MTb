@@ -675,3 +675,30 @@ def test_lifespan_stops_startup_when_session_calendar_is_invalid(
     assert "database.migrations" not in events
     assert "backup_service.initialize" not in events
     assert "backup.start" not in events
+def test_lifespan_stops_startup_when_session_file_is_missing(
+    monkeypatch,
+    tmp_path,
+):
+    missing_file = tmp_path / "missing_sessions.json"
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+        sessions_file=str(missing_file),
+    )
+
+    async def run():
+        with pytest.raises(
+            RuntimeError,
+            match="Cannot start with an invalid MT5 session calendar",
+        ):
+            async with main.lifespan(app):
+                pass
+
+    asyncio.run(run())
+
+    assert not missing_file.exists()
+    assert "database.initialize" not in events
+    assert "database.migrations" not in events
+    assert "backup_service.initialize" not in events
+    assert "backup.start" not in events
