@@ -33,12 +33,14 @@ class FakeMonitor:
         interval_seconds,
         stop_result=True,
         stop_error=None,
+        lifecycle_order=None,
     ):
         self.adapter = adapter
         self.interval_seconds = interval_seconds
         self.events = adapter.events
         self.stop_result = stop_result
         self.stop_error = stop_error
+        self.lifecycle_order = lifecycle_order
 
     @property
     def is_running(self):
@@ -46,11 +48,17 @@ class FakeMonitor:
 
     def start(self):
         self.events.append("monitor.start")
+        if self.lifecycle_order is not None:
+            self.lifecycle_order.append("monitor.start")
 
     def stop(self):
         self.events.append("monitor.stop")
+        if self.lifecycle_order is not None:
+            self.lifecycle_order.append("monitor.stop")
+
         if self.stop_error is not None:
             raise self.stop_error
+
         return self.stop_result
 
 
@@ -244,6 +252,7 @@ def configure_lifecycle(
             interval_seconds=interval_seconds,
             stop_result=monitor_stop_result,
             stop_error=monitor_stop_error,
+            lifecycle_order=lifecycle_order,
         )
 
     def create_broker_tick_monitor(stale_after_seconds):
@@ -448,7 +457,7 @@ def test_lifespan_skips_collector_when_mt5_symbol_is_empty(
         "adapter.connect",
         "monitor.start",
         "backup.start",
-        "collector.stop",
+        "backup.stop",
         "monitor.stop",
         "adapter.shutdown",
         "database.dispose",
