@@ -17,13 +17,14 @@ from backend.mt5 import MT5Adapter, MT5ConnectionState
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read-only live MT5 clock evidence collector."
+        description="Read-only MT5 clock and candle evidence collector."
     )
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--duration-seconds", type=int, default=900)
     parser.add_argument("--interval-seconds", type=float, default=1.0)
     parser.add_argument("--ntp-interval-seconds", type=int, default=60)
     parser.add_argument("--output", default=None)
+
     args = parser.parse_args()
 
     if args.duration_seconds < 60:
@@ -36,13 +37,59 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def json_epochs(rates) -> str:
     if rates is None:
         return "[]"
+
     return json.dumps(
         [int(rate["time"]) for rate in rates],
         separators=(",", ":"),
     )
+
+
+def timed_call(function):
+    """
+    Record wall-clock and monotonic boundaries around one MT5 call.
+    The returned end time is the observation time for that call.
+    """
+    start_utc = utc_now()
+    start_mono = monotonic_ns()
+
+    result = function()
+
+    end_mono = monotonic_ns()
+    end_utc = utc_now()
+
+    return {
+        "result": result,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "start_mono_ns": start_mono,
+        "end_mono_ns": end_mono,
+        "duration_seconds": (
+            end_mono - start_mono
+        ) / 1_000_000_000,
+    }
+
+
+def corrected_epoch(local_epoch, ntp_result):
+    if (
+        local_epoch is None
+        or ntp_result is None
+        or not ntp_result.verified
+        or ntp_result.offset_seconds is None
+    ):
+        return None
+
+    return float(local_epoch) + float(ntp_result.offset_seconds)
+
+
+def iso_or_empty(value):
+    return value.isoformat() if value is not None else ""
 
 
 def main() -> int:
@@ -78,7 +125,10 @@ def main() -> int:
         import MetaTrader5 as mt5
     except ImportError:
         adapter.shutdown()
-        print("ERROR: MetaTrader5 package is not installed.", file=sys.stderr)
+        print(
+            "ERROR: MetaTrader5 package is not installed.",
+            file=sys.stderr,
+        )
         return 4
 
     if not mt5.symbol_select(symbol, True):
@@ -92,47 +142,88 @@ def main() -> int:
     verifier = NtpTimeVerifier()
     last_ntp_check = 0.0
     ntp_result = None
-    started = time.monotonic()
+    started_mono = time.monotonic()
 
     fields = [
-        "captured_at_utc",
-        "capture_monotonic_ns",
-        "ntp_verified",
-        "ntp_checked_at_unix",
-        "ntp_offset_seconds",
-        "ntp_uncertainty_seconds",
+        "cycle_start_local_utc",
+        "cycle_end_local_utc",
+        "cycle_start_monotonic_ns",
+        "cycle_end_monotonic_ns",
+        "capture_elapsed_seconds",
         "account_login",
         "broker_server",
         "symbol",
+        "ntp_verified",
+        "ntp_checked_at_unix",
+        "ntp_age_seconds",
+        "ntp_offset_seconds",
+        "ntp_uncertainty_seconds",
+        "ntp_sample_count",
+        "ntp_servers",
+        "ntp_error",
+        "tick_read_start_local_utc",
+        "tick_read_end_local_utc",
+        "tick_read_start_monotonic_ns",
+        "tick_read_end_monotonic_ns",
+        "tick_read_duration_seconds",
         "tick_time_msc_raw",
         "tick_time_epoch_raw",
+        "tick_corrected_read_midpoint_utc",
         "tick_minus_corrected_utc_seconds",
+        "m1_read_start_local_utc",
+        "m1_read_end_local_utc",
+        "m1_read_start_monotonic_ns",
+        "m1_read_end_monotonic_ns",
+        "m1_read_duration_seconds",
         "m1_closed_open_epochs_raw",
+        "m1_latest_closed_open_raw",
+        "m1_corrected_read_midpoint_utc",
+        "m1_latest_closed_open_minus_corrected_utc_seconds",
+        "m1_predicted_active_open_minus_corrected_utc_seconds",
+        "m5_read_start_local_utc",
+        "m5_read_end_local_utc",
+        "m5_read_start_monotonic_ns",
+        "m5_read_end_monotonic_ns",
+        "m5_read_duration_seconds",
         "m5_closed_open_epochs_raw",
-        "latest_m1_open_minus_corrected_utc_seconds",
-        "latest_m5_open_minus_corrected_utc_seconds",
-        "capture_elapsed_seconds",
-        "read_duration_seconds",
+        "m5_latest_closed_open_raw",
+        "m5_corrected_read_midpoint_utc",
+        "m5_latest_closed_open_minus_corrected_utc_seconds",
+        "m5_predicted_active_open_minus_corrected_utc_seconds",
         "read_error",
     ]
 
     print(f"Read-only collection started: symbol={symbol}")
     print(f"Duration: {args.duration_seconds}s; output: {output}")
+    print("NTP correction is recorded separately from raw local time.")
 
     try:
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
+        with output.open(
+            "w",
+            newline="",
+            encoding="utf-8",
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=fields,
+            )
             writer.writeheader()
 
-            while time.monotonic() - started < args.duration_seconds:
+            while (
+                time.monotonic() - started_mono
+                < args.duration_seconds
+            ):
                 loop_started = time.monotonic()
-                read_start_ns = monotonic_ns()
-                read_start_utc = datetime.now(timezone.utc)
+                cycle_start_utc = utc_now()
+                cycle_start_mono = monotonic_ns()
 
-                row = {field: None for field in fields}
+                row = {
+                    field: "" for field in fields
+                }
+
                 row.update({
-                    "captured_at_utc": read_start_utc.isoformat(),
-                    "capture_monotonic_ns": read_start_ns,
+                    "cycle_start_local_utc": cycle_start_utc.isoformat(),
+                    "cycle_start_monotonic_ns": cycle_start_mono,
                     "symbol": symbol,
                     "ntp_verified": False,
                     "m1_closed_open_epochs_raw": "[]",
@@ -144,104 +235,269 @@ def main() -> int:
                     loop_started - last_ntp_check
                     >= args.ntp_interval_seconds
                 ):
-                    ntp_result = verifier.verify()
+                    try:
+                        ntp_result = verifier.verify()
+                    except Exception as exc:
+                        ntp_result = None
+                        row["ntp_error"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
                     last_ntp_check = loop_started
 
+                ntp_trusted = (
+                    ntp_result is not None
+                    and ntp_result.verified
+                    and verifier.is_trusted()
+                )
+
                 if ntp_result is not None:
-                    row["ntp_verified"] = ntp_result.verified
                     row["ntp_checked_at_unix"] = (
-                        ntp_result.checked_at_unix
+                        ntp_result.checked_at_unix or ""
                     )
                     row["ntp_offset_seconds"] = (
                         ntp_result.offset_seconds
+                        if ntp_result.offset_seconds is not None
+                        else ""
                     )
                     row["ntp_uncertainty_seconds"] = (
                         ntp_result.uncertainty_seconds
+                        if ntp_result.uncertainty_seconds is not None
+                        else ""
                     )
+                    row["ntp_sample_count"] = (
+                        ntp_result.sample_count
+                    )
+                    row["ntp_servers"] = ";".join(
+                        ntp_result.servers
+                    )
+                    if ntp_result.error:
+                        row["ntp_error"] = ntp_result.error
+
+                row["ntp_verified"] = ntp_trusted
 
                 try:
-                    account = mt5.account_info()
-                    tick = mt5.symbol_info_tick(symbol)
-
-                    rates_m1 = mt5.copy_rates_from_pos(
-                        symbol, mt5.TIMEFRAME_M1, 1, 3
+                    account_call = timed_call(
+                        lambda: mt5.account_info()
                     )
-                    rates_m5 = mt5.copy_rates_from_pos(
-                        symbol, mt5.TIMEFRAME_M5, 1, 3
-                    )
+                    account = account_call["result"]
 
-                    if account is None or tick is None:
+                    if account is None:
                         raise RuntimeError(
-                            f"MT5 data unavailable: {mt5.last_error()}"
-                        )
-
-                    if rates_m1 is None or rates_m5 is None:
-                        raise RuntimeError(
-                            f"MT5 candle data unavailable: {mt5.last_error()}"
+                            f"MT5 account_info failed: {mt5.last_error()}"
                         )
 
                     row["account_login"] = int(account.login)
                     row["broker_server"] = str(account.server)
 
+                    tick_call = timed_call(
+                        lambda: mt5.symbol_info_tick(symbol)
+                    )
+                    tick = tick_call["result"]
+
+                    if tick is None:
+                        raise RuntimeError(
+                            f"MT5 tick read failed: {mt5.last_error()}"
+                        )
+
+                    row["tick_read_start_local_utc"] = (
+                        tick_call["start_utc"].isoformat()
+                    )
+                    row["tick_read_end_local_utc"] = (
+                        tick_call["end_utc"].isoformat()
+                    )
+                    row["tick_read_start_monotonic_ns"] = (
+                        tick_call["start_mono_ns"]
+                    )
+                    row["tick_read_end_monotonic_ns"] = (
+                        tick_call["end_mono_ns"]
+                    )
+                    row["tick_read_duration_seconds"] = (
+                        tick_call["duration_seconds"]
+                    )
                     row["tick_time_msc_raw"] = int(tick.time_msc)
                     row["tick_time_epoch_raw"] = (
                         int(tick.time_msc) / 1000.0
                     )
 
-                    row["m1_closed_open_epochs_raw"] = json_epochs(
-                        rates_m1
+                    m1_call = timed_call(
+                        lambda: mt5.copy_rates_from_pos(
+                            symbol,
+                            mt5.TIMEFRAME_M1,
+                            1,
+                            3,
+                        )
                     )
-                    row["m5_closed_open_epochs_raw"] = json_epochs(
-                        rates_m5
+                    rates_m1 = m1_call["result"]
+
+                    if rates_m1 is None:
+                        raise RuntimeError(
+                            f"MT5 M1 read failed: {mt5.last_error()}"
+                        )
+
+                    row["m1_read_start_local_utc"] = (
+                        m1_call["start_utc"].isoformat()
+                    )
+                    row["m1_read_end_local_utc"] = (
+                        m1_call["end_utc"].isoformat()
+                    )
+                    row["m1_read_start_monotonic_ns"] = (
+                        m1_call["start_mono_ns"]
+                    )
+                    row["m1_read_end_monotonic_ns"] = (
+                        m1_call["end_mono_ns"]
+                    )
+                    row["m1_read_duration_seconds"] = (
+                        m1_call["duration_seconds"]
+                    )
+                    row["m1_closed_open_epochs_raw"] = (
+                        json_epochs(rates_m1)
                     )
 
-                    receipt_utc = datetime.now(
-                        timezone.utc
-                    ).timestamp()
+                    m5_call = timed_call(
+                        lambda: mt5.copy_rates_from_pos(
+                            symbol,
+                            mt5.TIMEFRAME_M5,
+                            1,
+                            3,
+                        )
+                    )
+                    rates_m5 = m5_call["result"]
 
-                    if (
-                        ntp_result is not None
-                        and ntp_result.verified
-                        and ntp_result.offset_seconds is not None
-                    ):
-                        corrected_utc = (
-                            receipt_utc + ntp_result.offset_seconds
+                    if rates_m5 is None:
+                        raise RuntimeError(
+                            f"MT5 M5 read failed: {mt5.last_error()}"
+                        )
+
+                    row["m5_read_start_local_utc"] = (
+                        m5_call["start_utc"].isoformat()
+                    )
+                    row["m5_read_end_local_utc"] = (
+                        m5_call["end_utc"].isoformat()
+                    )
+                    row["m5_read_start_monotonic_ns"] = (
+                        m5_call["start_mono_ns"]
+                    )
+                    row["m5_read_end_monotonic_ns"] = (
+                        m5_call["end_mono_ns"]
+                    )
+                    row["m5_read_duration_seconds"] = (
+                        m5_call["duration_seconds"]
+                    )
+                    row["m5_closed_open_epochs_raw"] = (
+                        json_epochs(rates_m5)
+                    )
+
+                    if ntp_trusted:
+                        offset = ntp_result.offset_seconds
+
+                        tick_mid_local = (
+                            tick_call["start_utc"].timestamp()
+                            + tick_call["end_utc"].timestamp()
+                        ) / 2.0
+
+                        tick_mid_corrected = corrected_epoch(
+                            tick_mid_local,
+                            ntp_result,
+                        )
+
+                        row["tick_corrected_read_midpoint_utc"] = (
+                            datetime.fromtimestamp(
+                                tick_mid_corrected,
+                                tz=timezone.utc,
+                            ).isoformat()
                         )
 
                         row["tick_minus_corrected_utc_seconds"] = (
-                            row["tick_time_epoch_raw"] - corrected_utc
+                            row["tick_time_epoch_raw"]
+                            - tick_mid_corrected
+                        )
+
+                        m1_mid_local = (
+                            m1_call["start_utc"].timestamp()
+                            + m1_call["end_utc"].timestamp()
+                        ) / 2.0
+
+                        m1_mid_corrected = corrected_epoch(
+                            m1_mid_local,
+                            ntp_result,
                         )
 
                         m1_epochs = [
                             int(rate["time"]) for rate in rates_m1
                         ]
+
+                        if m1_epochs:
+                            latest_m1 = max(m1_epochs)
+                            row["m1_latest_closed_open_raw"] = latest_m1
+                            row["m1_corrected_read_midpoint_utc"] = (
+                                datetime.fromtimestamp(
+                                    m1_mid_corrected,
+                                    tz=timezone.utc,
+                                ).isoformat()
+                            )
+                            row[
+                                "m1_latest_closed_open_minus_corrected_utc_seconds"
+                            ] = latest_m1 - m1_mid_corrected
+
+                            row[
+                                "m1_predicted_active_open_minus_corrected_utc_seconds"
+                            ] = (
+                                latest_m1 + 60 - m1_mid_corrected
+                            )
+
+                        m5_mid_local = (
+                            m5_call["start_utc"].timestamp()
+                            + m5_call["end_utc"].timestamp()
+                        ) / 2.0
+
+                        m5_mid_corrected = corrected_epoch(
+                            m5_mid_local,
+                            ntp_result,
+                        )
+
                         m5_epochs = [
                             int(rate["time"]) for rate in rates_m5
                         ]
 
-                        if m1_epochs:
-                            row[
-                                "latest_m1_open_minus_corrected_utc_seconds"
-                            ] = max(m1_epochs) - corrected_utc
-
                         if m5_epochs:
+                            latest_m5 = max(m5_epochs)
+                            row["m5_latest_closed_open_raw"] = latest_m5
+                            row["m5_corrected_read_midpoint_utc"] = (
+                                datetime.fromtimestamp(
+                                    m5_mid_corrected,
+                                    tz=timezone.utc,
+                                ).isoformat()
+                            )
                             row[
-                                "latest_m5_open_minus_corrected_utc_seconds"
-                            ] = max(m5_epochs) - corrected_utc
+                                "m5_latest_closed_open_minus_corrected_utc_seconds"
+                            ] = latest_m5 - m5_mid_corrected
+
+                            row[
+                                "m5_predicted_active_open_minus_corrected_utc_seconds"
+                            ] = (
+                                latest_m5 + 300 - m5_mid_corrected
+                            )
+
+                        row["ntp_age_seconds"] = (
+                            cycle_start_utc.timestamp()
+                            - ntp_result.checked_at_unix
+                        )
 
                 except Exception as exc:
                     row["read_error"] = (
                         f"{type(exc).__name__}: {exc}"
                     )
 
-                read_end_ns = monotonic_ns()
+                cycle_end_mono = monotonic_ns()
+                cycle_end_utc = utc_now()
 
-                row["read_duration_seconds"] = (
-                    read_end_ns - read_start_ns
-                ) / 1_000_000_000
-
+                row["cycle_end_local_utc"] = (
+                    cycle_end_utc.isoformat()
+                )
+                row["cycle_end_monotonic_ns"] = cycle_end_mono
                 row["capture_elapsed_seconds"] = (
-                    time.monotonic() - started
+                    time.monotonic() - started_mono
                 )
 
                 writer.writerow(row)
