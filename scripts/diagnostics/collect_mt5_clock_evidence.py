@@ -85,6 +85,34 @@ def corrected_epoch(local_epoch, ntp_result):
     return float(local_epoch) + float(ntp_result.offset_seconds)
 
 
+def track_update(
+    previous_value,
+    current_value,
+    now_monotonic,
+    previous_change_monotonic,
+):
+    if current_value is None:
+        return "NO_DATA", previous_change_monotonic, ""
+
+    if previous_value is None:
+        return "INITIAL", now_monotonic, 0.0
+
+    if current_value != previous_value:
+        return "UPDATED", now_monotonic, 0.0
+
+    changed_at = (
+        previous_change_monotonic
+        if previous_change_monotonic is not None
+        else now_monotonic
+    )
+
+    return (
+        "UNCHANGED",
+        changed_at,
+        max(0.0, now_monotonic - changed_at),
+    )
+
+
 def resolve_ntp_state(
     verifier: NtpTimeVerifier,
     attempt_result: NtpVerification | None,
@@ -117,6 +145,89 @@ def resolve_ntp_state(
     )
 
     return candidate, trusted, error or ""
+
+
+def read_stream(function):
+    """
+    Read one MT5 stream independently.
+
+    Returns:
+        call: timed call result, or None
+        value: returned data, or None
+        status: INITIAL/UPDATED/UNCHANGED is assigned later;
+                NO_DATA for an empty result;
+                READ_ERROR for an exception.
+        error: error description, if any.
+    """
+    try:
+        call = timed_call(function)
+        value = call["result"]
+
+        if value is None:
+            return call, None, "NO_DATA", ""
+
+        return call, value, "", ""
+
+    except Exception as exc:
+        return (
+            None,
+            None,
+            "READ_ERROR",
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+def apply_read_timing(row, prefix, call):
+    if call is None:
+        return
+
+    row[f"{prefix}_read_start_local_utc"] = (
+        call["start_utc"].isoformat()
+    )
+    row[f"{prefix}_read_end_local_utc"] = (
+        call["end_utc"].isoformat()
+    )
+    row[f"{prefix}_read_start_monotonic_ns"] = (
+        call["start_mono_ns"]
+    )
+    row[f"{prefix}_read_end_monotonic_ns"] = (
+        call["end_mono_ns"]
+    )
+    row[f"{prefix}_read_duration_seconds"] = (
+        call["duration_seconds"]
+    )
+
+
+def apply_stream_tracking(
+    row,
+    prefix,
+    current_value,
+    previous_value,
+    previous_change_monotonic,
+    now_monotonic,
+    read_status="",
+):
+    if read_status == "READ_ERROR":
+        row[f"{prefix}_update_status"] = "READ_ERROR"
+        row[f"{prefix}_unchanged_seconds"] = ""
+        return previous_value, previous_change_monotonic
+
+    if read_status == "NO_DATA":
+        row[f"{prefix}_update_status"] = "NO_DATA"
+        row[f"{prefix}_unchanged_seconds"] = ""
+        return previous_value, previous_change_monotonic
+
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=previous_value,
+        current_value=current_value,
+        now_monotonic=now_monotonic,
+        previous_change_monotonic=previous_change_monotonic,
+    )
+
+    row[f"{prefix}_update_status"] = status
+    row[f"{prefix}_unchanged_seconds"] = unchanged_seconds
+
+    return current_value, changed_at
 
 
 def main() -> int:
@@ -170,6 +281,14 @@ def main() -> int:
     last_ntp_check = 0.0
     started_mono = time.monotonic()
 
+    previous_tick = None
+    previous_m1 = None
+    previous_m5 = None
+
+    tick_last_change = None
+    m1_last_change = None
+    m5_last_change = None
+
     fields = [
         "cycle_start_local_utc",
         "cycle_end_local_utc",
@@ -194,6 +313,8 @@ def main() -> int:
         "tick_read_duration_seconds",
         "tick_time_msc_raw",
         "tick_time_epoch_raw",
+        "tick_update_status",
+        "tick_unchanged_seconds",
         "tick_corrected_read_midpoint_utc",
         "tick_minus_corrected_utc_seconds",
         "m1_read_start_local_utc",
@@ -203,6 +324,8 @@ def main() -> int:
         "m1_read_duration_seconds",
         "m1_closed_open_epochs_raw",
         "m1_latest_closed_open_raw",
+        "m1_update_status",
+        "m1_unchanged_seconds",
         "m1_corrected_read_midpoint_utc",
         "m1_latest_closed_open_minus_corrected_utc_seconds",
         "m1_predicted_active_open_minus_corrected_utc_seconds",
@@ -213,6 +336,8 @@ def main() -> int:
         "m5_read_duration_seconds",
         "m5_closed_open_epochs_raw",
         "m5_latest_closed_open_raw",
+        "m5_update_status",
+        "m5_unchanged_seconds",
         "m5_corrected_read_midpoint_utc",
         "m5_latest_closed_open_minus_corrected_utc_seconds",
         "m5_predicted_active_open_minus_corrected_utc_seconds",
@@ -222,6 +347,7 @@ def main() -> int:
     print(f"Read-only collection started: symbol={symbol}")
     print(f"Duration: {args.duration_seconds}s; output: {output}")
     print("NTP correction is recorded separately from raw local time.")
+    print("Market update tracking records changes only; it does not classify stale data.")
 
     try:
         with output.open(
@@ -255,6 +381,9 @@ def main() -> int:
                     "read_error": "",
                 })
 
+                errors = []
+
+                # NTP verification
                 ntp_attempt = None
                 ntp_attempt_error = ""
 
@@ -297,6 +426,7 @@ def main() -> int:
                     row["ntp_sample_count"] = ntp_result.sample_count
                     row["ntp_servers"] = ";".join(ntp_result.servers)
 
+                # Account information
                 try:
                     account_call = timed_call(
                         lambda: mt5.account_info()
@@ -304,106 +434,135 @@ def main() -> int:
                     account = account_call["result"]
 
                     if account is None:
-                        raise RuntimeError(
-                            f"MT5 account_info failed: {mt5.last_error()}"
+                        errors.append(
+                            f"account_info: {mt5.last_error()}"
                         )
+                    else:
+                        row["account_login"] = int(account.login)
+                        row["broker_server"] = str(account.server)
 
-                    row["account_login"] = int(account.login)
-                    row["broker_server"] = str(account.server)
+                except Exception as exc:
+                    errors.append(
+                        f"account_info: {type(exc).__name__}: {exc}"
+                    )
 
-                    tick_call = timed_call(
-                        lambda: mt5.symbol_info_tick(symbol)
-                    )
-                    tick = tick_call["result"]
+                # Tick read
+                tick_call, tick, tick_status, tick_error = read_stream(
+                    lambda: mt5.symbol_info_tick(symbol)
+                )
 
-                    if tick is None:
-                        raise RuntimeError(
-                            f"MT5 tick read failed: {mt5.last_error()}"
-                        )
+                apply_read_timing(row, "tick", tick_call)
 
-                    row["tick_read_start_local_utc"] = (
-                        tick_call["start_utc"].isoformat()
-                    )
-                    row["tick_read_end_local_utc"] = (
-                        tick_call["end_utc"].isoformat()
-                    )
-                    row["tick_read_start_monotonic_ns"] = (
-                        tick_call["start_mono_ns"]
-                    )
-                    row["tick_read_end_monotonic_ns"] = (
-                        tick_call["end_mono_ns"]
-                    )
-                    row["tick_read_duration_seconds"] = (
-                        tick_call["duration_seconds"]
-                    )
-                    row["tick_time_msc_raw"] = int(tick.time_msc)
+                if tick_error:
+                    errors.append(f"tick: {tick_error}")
+
+                tick_value = None
+
+                if tick is not None:
+                    tick_value = int(tick.time_msc)
+                    row["tick_time_msc_raw"] = tick_value
                     row["tick_time_epoch_raw"] = (
-                        int(tick.time_msc) / 1000.0
+                        tick_value / 1000.0
                     )
 
-                    m1_call = timed_call(
-                        lambda: mt5.copy_rates_from_pos(
-                            symbol, mt5.TIMEFRAME_M1, 1, 3
-                        )
-                    )
-                    rates_m1 = m1_call["result"]
+                tracking_now = time.monotonic()
 
-                    if rates_m1 is None:
-                        raise RuntimeError(
-                            f"MT5 M1 read failed: {mt5.last_error()}"
-                        )
+                previous_tick, tick_last_change = apply_stream_tracking(
+                    row=row,
+                    prefix="tick",
+                    current_value=tick_value,
+                    previous_value=previous_tick,
+                    previous_change_monotonic=tick_last_change,
+                    now_monotonic=tracking_now,
+                    read_status=tick_status,
+                )
 
-                    row["m1_read_start_local_utc"] = (
-                        m1_call["start_utc"].isoformat()
+                # M1 read
+                m1_call, rates_m1, m1_status, m1_error = read_stream(
+                    lambda: mt5.copy_rates_from_pos(
+                        symbol, mt5.TIMEFRAME_M1, 1, 3
                     )
-                    row["m1_read_end_local_utc"] = (
-                        m1_call["end_utc"].isoformat()
-                    )
-                    row["m1_read_start_monotonic_ns"] = (
-                        m1_call["start_mono_ns"]
-                    )
-                    row["m1_read_end_monotonic_ns"] = (
-                        m1_call["end_mono_ns"]
-                    )
-                    row["m1_read_duration_seconds"] = (
-                        m1_call["duration_seconds"]
-                    )
+                )
+
+                apply_read_timing(row, "m1", m1_call)
+
+                if m1_error:
+                    errors.append(f"m1: {m1_error}")
+
+                m1_latest = None
+
+                if rates_m1 is not None:
                     row["m1_closed_open_epochs_raw"] = (
                         json_epochs(rates_m1)
                     )
 
-                    m5_call = timed_call(
-                        lambda: mt5.copy_rates_from_pos(
-                            symbol, mt5.TIMEFRAME_M5, 1, 3
-                        )
-                    )
-                    rates_m5 = m5_call["result"]
+                    m1_epochs = [
+                        int(rate["time"]) for rate in rates_m1
+                    ]
 
-                    if rates_m5 is None:
-                        raise RuntimeError(
-                            f"MT5 M5 read failed: {mt5.last_error()}"
-                        )
+                    if m1_epochs:
+                        m1_latest = max(m1_epochs)
+                        row["m1_latest_closed_open_raw"] = m1_latest
+                    else:
+                        m1_status = "NO_DATA"
 
-                    row["m5_read_start_local_utc"] = (
-                        m5_call["start_utc"].isoformat()
+                tracking_now = time.monotonic()
+
+                previous_m1, m1_last_change = apply_stream_tracking(
+                    row=row,
+                    prefix="m1",
+                    current_value=m1_latest,
+                    previous_value=previous_m1,
+                    previous_change_monotonic=m1_last_change,
+                    now_monotonic=tracking_now,
+                    read_status=m1_status,
+                )
+
+                # M5 read
+                m5_call, rates_m5, m5_status, m5_error = read_stream(
+                    lambda: mt5.copy_rates_from_pos(
+                        symbol, mt5.TIMEFRAME_M5, 1, 3
                     )
-                    row["m5_read_end_local_utc"] = (
-                        m5_call["end_utc"].isoformat()
-                    )
-                    row["m5_read_start_monotonic_ns"] = (
-                        m5_call["start_mono_ns"]
-                    )
-                    row["m5_read_end_monotonic_ns"] = (
-                        m5_call["end_mono_ns"]
-                    )
-                    row["m5_read_duration_seconds"] = (
-                        m5_call["duration_seconds"]
-                    )
+                )
+
+                apply_read_timing(row, "m5", m5_call)
+
+                if m5_error:
+                    errors.append(f"m5: {m5_error}")
+
+                m5_latest = None
+
+                if rates_m5 is not None:
                     row["m5_closed_open_epochs_raw"] = (
                         json_epochs(rates_m5)
                     )
 
-                    if ntp_trusted and ntp_result is not None:
+                    m5_epochs = [
+                        int(rate["time"]) for rate in rates_m5
+                    ]
+
+                    if m5_epochs:
+                        m5_latest = max(m5_epochs)
+                        row["m5_latest_closed_open_raw"] = m5_latest
+                    else:
+                        m5_status = "NO_DATA"
+
+                tracking_now = time.monotonic()
+
+                previous_m5, m5_last_change = apply_stream_tracking(
+                    row=row,
+                    prefix="m5",
+                    current_value=m5_latest,
+                    previous_value=previous_m5,
+                    previous_change_monotonic=m5_last_change,
+                    now_monotonic=tracking_now,
+                    read_status=m5_status,
+                )
+
+                # Time correction calculations remain independent
+                # from market update tracking.
+                if ntp_trusted and ntp_result is not None:
+                    if tick_call is not None and tick is not None:
                         tick_mid_local = (
                             tick_call["start_utc"].timestamp()
                             + tick_call["end_utc"].timestamp()
@@ -413,17 +572,23 @@ def main() -> int:
                             tick_mid_local, ntp_result
                         )
 
-                        row["tick_corrected_read_midpoint_utc"] = (
-                            datetime.fromtimestamp(
-                                tick_mid_corrected,
-                                tz=timezone.utc,
-                            ).isoformat()
-                        )
-                        row["tick_minus_corrected_utc_seconds"] = (
-                            row["tick_time_epoch_raw"]
-                            - tick_mid_corrected
-                        )
+                        if tick_mid_corrected is not None:
+                            row["tick_corrected_read_midpoint_utc"] = (
+                                datetime.fromtimestamp(
+                                    tick_mid_corrected,
+                                    tz=timezone.utc,
+                                ).isoformat()
+                            )
+                            row["tick_minus_corrected_utc_seconds"] = (
+                                row["tick_time_epoch_raw"]
+                                - tick_mid_corrected
+                            )
 
+                    if (
+                        m1_call is not None
+                        and rates_m1 is not None
+                        and m1_latest is not None
+                    ):
                         m1_mid_local = (
                             m1_call["start_utc"].timestamp()
                             + m1_call["end_utc"].timestamp()
@@ -433,13 +598,7 @@ def main() -> int:
                             m1_mid_local, ntp_result
                         )
 
-                        m1_epochs = [
-                            int(rate["time"]) for rate in rates_m1
-                        ]
-
-                        if m1_epochs:
-                            latest_m1 = max(m1_epochs)
-                            row["m1_latest_closed_open_raw"] = latest_m1
+                        if m1_mid_corrected is not None:
                             row["m1_corrected_read_midpoint_utc"] = (
                                 datetime.fromtimestamp(
                                     m1_mid_corrected,
@@ -448,11 +607,16 @@ def main() -> int:
                             )
                             row[
                                 "m1_latest_closed_open_minus_corrected_utc_seconds"
-                            ] = latest_m1 - m1_mid_corrected
+                            ] = m1_latest - m1_mid_corrected
                             row[
                                 "m1_predicted_active_open_minus_corrected_utc_seconds"
-                            ] = latest_m1 + 60 - m1_mid_corrected
+                            ] = m1_latest + 60 - m1_mid_corrected
 
+                    if (
+                        m5_call is not None
+                        and rates_m5 is not None
+                        and m5_latest is not None
+                    ):
                         m5_mid_local = (
                             m5_call["start_utc"].timestamp()
                             + m5_call["end_utc"].timestamp()
@@ -462,13 +626,7 @@ def main() -> int:
                             m5_mid_local, ntp_result
                         )
 
-                        m5_epochs = [
-                            int(rate["time"]) for rate in rates_m5
-                        ]
-
-                        if m5_epochs:
-                            latest_m5 = max(m5_epochs)
-                            row["m5_latest_closed_open_raw"] = latest_m5
+                        if m5_mid_corrected is not None:
                             row["m5_corrected_read_midpoint_utc"] = (
                                 datetime.fromtimestamp(
                                     m5_mid_corrected,
@@ -477,15 +635,12 @@ def main() -> int:
                             )
                             row[
                                 "m5_latest_closed_open_minus_corrected_utc_seconds"
-                            ] = latest_m5 - m5_mid_corrected
+                            ] = m5_latest - m5_mid_corrected
                             row[
                                 "m5_predicted_active_open_minus_corrected_utc_seconds"
-                            ] = latest_m5 + 300 - m5_mid_corrected
+                            ] = m5_latest + 300 - m5_mid_corrected
 
-                except Exception as exc:
-                    row["read_error"] = (
-                        f"{type(exc).__name__}: {exc}"
-                    )
+                row["read_error"] = " | ".join(errors)
 
                 cycle_end_mono = perf_counter_ns()
                 cycle_end_utc = utc_now()
