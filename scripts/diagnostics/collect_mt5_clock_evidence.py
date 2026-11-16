@@ -11,7 +11,10 @@ from pathlib import Path
 from time import perf_counter_ns
 
 from backend.config import get_settings
-from backend.market_data.ntp_time import NtpTimeVerifier
+from backend.market_data.ntp_time import (
+    NtpTimeVerifier,
+    NtpVerification,
+)
 from backend.mt5 import MT5Adapter, MT5ConnectionState
 
 
@@ -50,12 +53,6 @@ def json_epochs(rates) -> str:
 
 
 def timed_call(function):
-    """
-    Record wall-clock and high-resolution monotonic boundaries
-    around one MT5 call.
-
-    The returned end time is the observation time for that call.
-    """
     start_utc = utc_now()
     start_mono = perf_counter_ns()
 
@@ -88,8 +85,38 @@ def corrected_epoch(local_epoch, ntp_result):
     return float(local_epoch) + float(ntp_result.offset_seconds)
 
 
-def iso_or_empty(value):
-    return value.isoformat() if value is not None else ""
+def resolve_ntp_state(
+    verifier: NtpTimeVerifier,
+    attempt_result: NtpVerification | None,
+    attempt_error: str | None = None,
+) -> tuple[NtpVerification | None, bool, str]:
+    """
+    Return the last successful NTP verification while it remains trusted.
+
+    A failed refresh must not replace a still-valid previous verification.
+    The latest refresh error is returned separately for CSV diagnostics.
+    """
+    if attempt_result is not None and attempt_result.verified:
+        candidate = attempt_result
+    else:
+        candidate = verifier.last_verification()
+
+    trusted = (
+        candidate is not None
+        and candidate.verified
+        and verifier.is_trusted()
+    )
+
+    if not trusted:
+        candidate = None
+
+    error = attempt_error or (
+        attempt_result.error
+        if attempt_result is not None and not attempt_result.verified
+        else ""
+    )
+
+    return candidate, trusted, error or ""
 
 
 def main() -> int:
@@ -141,7 +168,6 @@ def main() -> int:
 
     verifier = NtpTimeVerifier()
     last_ntp_check = 0.0
-    ntp_result = None
     started_mono = time.monotonic()
 
     fields = [
@@ -217,9 +243,7 @@ def main() -> int:
                 cycle_start_utc = utc_now()
                 cycle_start_mono = perf_counter_ns()
 
-                row = {
-                    field: "" for field in fields
-                }
+                row = {field: "" for field in fields}
 
                 row.update({
                     "cycle_start_local_utc": cycle_start_utc.isoformat(),
@@ -231,55 +255,47 @@ def main() -> int:
                     "read_error": "",
                 })
 
+                ntp_attempt = None
+                ntp_attempt_error = ""
+
                 if (
                     loop_started - last_ntp_check
                     >= args.ntp_interval_seconds
                 ):
                     try:
-                        ntp_result = verifier.verify()
+                        ntp_attempt = verifier.verify()
                     except Exception as exc:
-                        ntp_result = None
-                        row["ntp_error"] = (
+                        ntp_attempt_error = (
                             f"{type(exc).__name__}: {exc}"
                         )
 
                     last_ntp_check = loop_started
 
-                ntp_trusted = (
-                    ntp_result is not None
-                    and ntp_result.verified
-                    and verifier.is_trusted()
+                ntp_result, ntp_trusted, ntp_error = resolve_ntp_state(
+                    verifier,
+                    ntp_attempt,
+                    ntp_attempt_error,
                 )
+
+                row["ntp_verified"] = ntp_trusted
+                row["ntp_error"] = ntp_error
 
                 if ntp_result is not None:
                     row["ntp_checked_at_unix"] = (
                         ntp_result.checked_at_unix or ""
                     )
-
                     row["ntp_offset_seconds"] = (
                         ntp_result.offset_seconds
                         if ntp_result.offset_seconds is not None
                         else ""
                     )
-
                     row["ntp_uncertainty_seconds"] = (
                         ntp_result.uncertainty_seconds
                         if ntp_result.uncertainty_seconds is not None
                         else ""
                     )
-
-                    row["ntp_sample_count"] = (
-                        ntp_result.sample_count
-                    )
-
-                    row["ntp_servers"] = ";".join(
-                        ntp_result.servers
-                    )
-
-                    if ntp_result.error:
-                        row["ntp_error"] = ntp_result.error
-
-                row["ntp_verified"] = ntp_trusted
+                    row["ntp_sample_count"] = ntp_result.sample_count
+                    row["ntp_servers"] = ";".join(ntp_result.servers)
 
                 try:
                     account_call = timed_call(
@@ -308,38 +324,28 @@ def main() -> int:
                     row["tick_read_start_local_utc"] = (
                         tick_call["start_utc"].isoformat()
                     )
-
                     row["tick_read_end_local_utc"] = (
                         tick_call["end_utc"].isoformat()
                     )
-
                     row["tick_read_start_monotonic_ns"] = (
                         tick_call["start_mono_ns"]
                     )
-
                     row["tick_read_end_monotonic_ns"] = (
                         tick_call["end_mono_ns"]
                     )
-
                     row["tick_read_duration_seconds"] = (
                         tick_call["duration_seconds"]
                     )
-
                     row["tick_time_msc_raw"] = int(tick.time_msc)
-
                     row["tick_time_epoch_raw"] = (
                         int(tick.time_msc) / 1000.0
                     )
 
                     m1_call = timed_call(
                         lambda: mt5.copy_rates_from_pos(
-                            symbol,
-                            mt5.TIMEFRAME_M1,
-                            1,
-                            3,
+                            symbol, mt5.TIMEFRAME_M1, 1, 3
                         )
                     )
-
                     rates_m1 = m1_call["result"]
 
                     if rates_m1 is None:
@@ -350,36 +356,27 @@ def main() -> int:
                     row["m1_read_start_local_utc"] = (
                         m1_call["start_utc"].isoformat()
                     )
-
                     row["m1_read_end_local_utc"] = (
                         m1_call["end_utc"].isoformat()
                     )
-
                     row["m1_read_start_monotonic_ns"] = (
                         m1_call["start_mono_ns"]
                     )
-
                     row["m1_read_end_monotonic_ns"] = (
                         m1_call["end_mono_ns"]
                     )
-
                     row["m1_read_duration_seconds"] = (
                         m1_call["duration_seconds"]
                     )
-
                     row["m1_closed_open_epochs_raw"] = (
                         json_epochs(rates_m1)
                     )
 
                     m5_call = timed_call(
                         lambda: mt5.copy_rates_from_pos(
-                            symbol,
-                            mt5.TIMEFRAME_M5,
-                            1,
-                            3,
+                            symbol, mt5.TIMEFRAME_M5, 1, 3
                         )
                     )
-
                     rates_m5 = m5_call["result"]
 
                     if rates_m5 is None:
@@ -390,36 +387,30 @@ def main() -> int:
                     row["m5_read_start_local_utc"] = (
                         m5_call["start_utc"].isoformat()
                     )
-
                     row["m5_read_end_local_utc"] = (
                         m5_call["end_utc"].isoformat()
                     )
-
                     row["m5_read_start_monotonic_ns"] = (
                         m5_call["start_mono_ns"]
                     )
-
                     row["m5_read_end_monotonic_ns"] = (
                         m5_call["end_mono_ns"]
                     )
-
                     row["m5_read_duration_seconds"] = (
                         m5_call["duration_seconds"]
                     )
-
                     row["m5_closed_open_epochs_raw"] = (
                         json_epochs(rates_m5)
                     )
 
-                    if ntp_trusted:
+                    if ntp_trusted and ntp_result is not None:
                         tick_mid_local = (
                             tick_call["start_utc"].timestamp()
                             + tick_call["end_utc"].timestamp()
                         ) / 2.0
 
                         tick_mid_corrected = corrected_epoch(
-                            tick_mid_local,
-                            ntp_result,
+                            tick_mid_local, ntp_result
                         )
 
                         row["tick_corrected_read_midpoint_utc"] = (
@@ -428,7 +419,6 @@ def main() -> int:
                                 tz=timezone.utc,
                             ).isoformat()
                         )
-
                         row["tick_minus_corrected_utc_seconds"] = (
                             row["tick_time_epoch_raw"]
                             - tick_mid_corrected
@@ -440,8 +430,7 @@ def main() -> int:
                         ) / 2.0
 
                         m1_mid_corrected = corrected_epoch(
-                            m1_mid_local,
-                            ntp_result,
+                            m1_mid_local, ntp_result
                         )
 
                         m1_epochs = [
@@ -450,25 +439,19 @@ def main() -> int:
 
                         if m1_epochs:
                             latest_m1 = max(m1_epochs)
-
                             row["m1_latest_closed_open_raw"] = latest_m1
-
                             row["m1_corrected_read_midpoint_utc"] = (
                                 datetime.fromtimestamp(
                                     m1_mid_corrected,
                                     tz=timezone.utc,
                                 ).isoformat()
                             )
-
                             row[
                                 "m1_latest_closed_open_minus_corrected_utc_seconds"
                             ] = latest_m1 - m1_mid_corrected
-
                             row[
                                 "m1_predicted_active_open_minus_corrected_utc_seconds"
-                            ] = (
-                                latest_m1 + 60 - m1_mid_corrected
-                            )
+                            ] = latest_m1 + 60 - m1_mid_corrected
 
                         m5_mid_local = (
                             m5_call["start_utc"].timestamp()
@@ -476,8 +459,7 @@ def main() -> int:
                         ) / 2.0
 
                         m5_mid_corrected = corrected_epoch(
-                            m5_mid_local,
-                            ntp_result,
+                            m5_mid_local, ntp_result
                         )
 
                         m5_epochs = [
@@ -486,25 +468,19 @@ def main() -> int:
 
                         if m5_epochs:
                             latest_m5 = max(m5_epochs)
-
                             row["m5_latest_closed_open_raw"] = latest_m5
-
                             row["m5_corrected_read_midpoint_utc"] = (
                                 datetime.fromtimestamp(
                                     m5_mid_corrected,
                                     tz=timezone.utc,
                                 ).isoformat()
                             )
-
                             row[
                                 "m5_latest_closed_open_minus_corrected_utc_seconds"
                             ] = latest_m5 - m5_mid_corrected
-
                             row[
                                 "m5_predicted_active_open_minus_corrected_utc_seconds"
-                            ] = (
-                                latest_m5 + 300 - m5_mid_corrected
-                            )
+                            ] = latest_m5 + 300 - m5_mid_corrected
 
                 except Exception as exc:
                     row["read_error"] = (
@@ -517,15 +493,11 @@ def main() -> int:
                 row["cycle_end_local_utc"] = (
                     cycle_end_utc.isoformat()
                 )
-
                 row["cycle_end_monotonic_ns"] = cycle_end_mono
-
                 row["capture_elapsed_seconds"] = (
                     time.monotonic() - started_mono
                 )
 
-                # Calculate NTP age at the end of the cycle,
-                # not at the cycle start.
                 if (
                     ntp_trusted
                     and ntp_result is not None
@@ -555,7 +527,6 @@ def main() -> int:
     print(
         f"Collection finished. Evidence saved to: {output.resolve()}"
     )
-
     return 0
 
 
