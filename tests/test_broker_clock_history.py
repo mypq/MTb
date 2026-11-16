@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 SCRIPT_PATH = (
     PROJECT_ROOT
     / "scripts"
@@ -21,6 +24,7 @@ spec = importlib.util.spec_from_file_location(
     "append_broker_clock_history",
     SCRIPT_PATH,
 )
+
 history_module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = history_module
 spec.loader.exec_module(history_module)
@@ -32,7 +36,9 @@ HISTORY_FIELDS = history_module.HISTORY_FIELDS
 
 def valid_source_row(**overrides):
     row = {
-        "cycle_end_local_utc": "2026-11-16T20:44:17.258084+00:00",
+        "cycle_end_local_utc": (
+            "2026-11-16T20:44:17.258084+00:00"
+        ),
         "account_login": "337260380",
         "broker_server": "XMGlobal-MT5 9",
         "symbol": "GOLD",
@@ -44,7 +50,9 @@ def valid_source_row(**overrides):
         "tick_corrected_read_midpoint_utc": (
             "2026-11-16T20:44:17.330279+00:00"
         ),
-        "tick_minus_corrected_utc_seconds": "7199.3287205",
+        "tick_minus_corrected_utc_seconds": (
+            "7199.3287205"
+        ),
         "m1_latest_closed_open_raw": "1794868980",
         "m1_corrected_read_midpoint_utc": (
             "2026-11-16T20:44:17.330279+00:00"
@@ -61,12 +69,13 @@ def valid_source_row(**overrides):
         ),
         "read_error": "",
     }
+
     row.update(overrides)
     return row
 
 
 def write_source_csv(path, rows, fields=None):
-    fields = fields or SOURCE_FIELDS
+    fields = list(fields or SOURCE_FIELDS)
 
     with path.open(
         "w",
@@ -76,7 +85,9 @@ def write_source_csv(path, rows, fields=None):
         writer = csv.DictWriter(
             handle,
             fieldnames=fields,
+            extrasaction="ignore",
         )
+
         writer.writeheader()
         writer.writerows(rows)
 
@@ -134,6 +145,7 @@ def test_archives_tick_m1_and_m5(
     rows = read_history(output)
 
     assert len(rows) == 3
+
     assert {
         row["evidence_kind"] for row in rows
     } == {
@@ -152,7 +164,7 @@ def test_archives_tick_m1_and_m5(
         for row in rows
     )
 
-    assert "not verified offsets" in stdout
+    assert "NOT a verified broker UTC offset" in stdout
 
 
 def test_skips_unverified_ntp_rows(
@@ -233,9 +245,12 @@ def test_rejects_missing_source_columns(
         if field != "ntp_verified"
     ]
 
+    row = valid_source_row()
+    row.pop("ntp_verified")
+
     write_source_csv(
         source,
-        [valid_source_row()],
+        [row],
         fields=fields,
     )
 
@@ -285,7 +300,7 @@ def test_skips_duplicate_rows_inside_same_input(
         [row, row],
     )
 
-    result, _ = run_archiver(
+    result, stdout = run_archiver(
         monkeypatch,
         source,
         output,
@@ -293,10 +308,8 @@ def test_skips_duplicate_rows_inside_same_input(
     )
 
     assert result == 0
-
-    rows = read_history(output)
-
-    assert len(rows) == 3
+    assert len(read_history(output)) == 3
+    assert "Duplicates skipped: 3" in stdout
 
 
 def test_skips_duplicates_when_input_is_reprocessed(
@@ -340,11 +353,9 @@ def test_preserves_old_rows_when_adding_new_session(
     source = tmp_path / "evidence.csv"
     output = tmp_path / "history.csv"
 
-    first = valid_source_row()
-
     write_source_csv(
         source,
-        [first],
+        [valid_source_row()],
     )
 
     result, _ = run_archiver(
@@ -429,13 +440,13 @@ def test_skips_invalid_numeric_observations(
     source = tmp_path / "evidence.csv"
     output = tmp_path / "history.csv"
 
-    row = valid_source_row(
-        tick_minus_corrected_utc_seconds=invalid_value,
-    )
-
     write_source_csv(
         source,
-        [row],
+        [
+            valid_source_row(
+                tick_minus_corrected_utc_seconds=invalid_value,
+            )
+        ],
     )
 
     result, _ = run_archiver(
@@ -450,6 +461,7 @@ def test_skips_invalid_numeric_observations(
     rows = read_history(output)
 
     assert len(rows) == 2
+
     assert {
         row["evidence_kind"] for row in rows
     } == {
@@ -485,6 +497,146 @@ def test_rejects_invalid_ntp_metadata(
     assert result == 5
     assert "no complete" in stdout.lower()
     assert not output.exists()
+
+
+def test_rejects_invalid_observation_timestamp(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [
+            valid_source_row(
+                cycle_end_local_utc="not-a-date",
+            )
+        ],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 5
+    assert not output.exists()
+
+
+def test_rejects_timezone_naive_timestamp(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [
+            valid_source_row(
+                cycle_end_local_utc="2026-11-16T20:44:17",
+            )
+        ],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 5
+    assert not output.exists()
+
+
+def test_rejects_invalid_comparison_timestamp(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [
+            valid_source_row(
+                tick_corrected_read_midpoint_utc="invalid",
+            )
+        ],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 0
+    assert len(read_history(output)) == 2
+
+
+def test_rejects_invalid_unix_timestamp(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [
+            valid_source_row(
+                tick_time_epoch_raw="Infinity",
+            )
+        ],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 0
+    assert len(read_history(output)) == 2
+
+
+def test_rejects_negative_ntp_uncertainty(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [
+            valid_source_row(
+                ntp_uncertainty_seconds="-1",
+            )
+        ],
+    )
+
+    result, stdout = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 5
+    assert "no complete" in stdout.lower()
 
 
 def test_history_uses_expected_schema(
@@ -548,4 +700,100 @@ def test_observations_are_not_marked_verified(
         for row in rows
     )
 
-    assert "not verified offsets" in stdout
+    assert "NOT a verified broker UTC offset" in stdout
+
+
+def test_lock_blocks_second_writer(
+    tmp_path,
+):
+    lock_path = tmp_path / "history.csv.lock"
+
+    with history_module.exclusive_file_lock(lock_path):
+        assert lock_path.exists()
+
+        with pytest.raises(FileExistsError):
+            descriptor = os.open(
+                str(lock_path),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            os.close(descriptor)
+
+
+def test_lock_timeout_is_reported(
+    tmp_path,
+    monkeypatch,
+):
+    lock_path = tmp_path / "history.csv.lock"
+    lock_path.write_text(
+        "held by another process",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        history_module,
+        "LOCK_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    monkeypatch.setattr(
+        history_module,
+        "LOCK_RETRY_SECONDS",
+        0.001,
+    )
+
+    with pytest.raises(TimeoutError):
+        with history_module.exclusive_file_lock(lock_path):
+            pass
+
+
+def test_history_keeps_existing_rows_unchanged(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+
+    write_source_csv(
+        source,
+        [valid_source_row()],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 0
+
+    original_rows = read_history(output)
+
+    second = valid_source_row(
+        cycle_end_local_utc=(
+            "2026-11-17T20:44:17+00:00"
+        ),
+        tick_time_epoch_raw="1794955456.659",
+        m1_latest_closed_open_raw="1794955380",
+        m5_latest_closed_open_raw="1794954900",
+    )
+
+    write_source_csv(
+        source,
+        [second],
+    )
+
+    result, _ = run_archiver(
+        monkeypatch,
+        source,
+        output,
+        capsys,
+    )
+
+    assert result == 0
+
+    final_rows = read_history(output)
+
+    assert final_rows[:3] == original_rows
+    assert len(final_rows) == 6
