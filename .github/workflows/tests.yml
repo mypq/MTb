@@ -53,8 +53,11 @@ jobs:
       - name: Run NTP verifier unit tests
         run: python -m pytest -v tests/test_ntp_time.py
 
+      - name: Run broker clock integration test
+        run: python -m pytest -vv -s tests/test_broker_clock_integration.py
+
       - name: Run complete test suite
-        run: python -m pytest -q
+        run: python -m pytest -vv -s
 
   live-ntp:
     name: Live NTP UDP 123 Verification
@@ -71,21 +74,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run live NTP verification
-        run: |
-          python - <<'PY'
-          from backend.market_data.ntp_time import NtpTimeVerifier
+      - name: Install NTP test dependencies
+        run: python -m pip install -r requirements-dev.txt
 
-          verifier = NtpTimeVerifier()
-          result = verifier.verify()
-
-          print(f"VERIFIED: {result.verified}")
-          print(f"SAMPLE_COUNT: {result.sample_count}")
-          print(f"OFFSET_SECONDS: {result.offset_seconds}")
-          print(f"UNCERTAINTY_SECONDS: {result.uncertainty_seconds}")
-          print(f"SERVERS: {result.servers}")
-          print(f"ERROR: {result.error}")
-
-          if not result.verified:
-              raise SystemExit("Live NTP verification failed.")
-          PY
+      - name: Run live NTP UDP 123 verification
+        run: python -m pytest -v -s tests/test_ntp_live.py
