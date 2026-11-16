@@ -8,6 +8,7 @@ from threading import Event, Lock, Thread, current_thread
 from time import monotonic_ns
 from typing import TYPE_CHECKING
 
+from backend.market_data.broker_clock import BrokerClockCalibrator
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.time_models import BrokerTimeSample
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class BrokerTickMonitorWorker:
-    """Background worker that observes read-only MT5 quote timestamps."""
+    """Background worker for broker quote monitoring and clock calibration."""
 
     def __init__(
         self,
@@ -28,6 +29,7 @@ class BrokerTickMonitorWorker:
         *,
         symbol: str,
         interval_seconds: float = 1.0,
+        clock_calibrator: BrokerClockCalibrator | None = None,
     ) -> None:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
@@ -47,8 +49,17 @@ class BrokerTickMonitorWorker:
                 "monitor must be a BrokerTickMonitor instance."
             )
 
+        if (
+            clock_calibrator is not None
+            and not isinstance(clock_calibrator, BrokerClockCalibrator)
+        ):
+            raise TypeError(
+                "clock_calibrator must be a BrokerClockCalibrator."
+            )
+
         self._adapter = adapter
         self._monitor = monitor
+        self._clock_calibrator = clock_calibrator
         self._symbol = symbol.strip()
         self._interval_seconds = float(interval_seconds)
 
@@ -147,7 +158,7 @@ class BrokerTickMonitorWorker:
         return True
 
     def check_once(self):
-        """Read and observe one broker quote sample."""
+        """Read one broker quote and send it to both monitoring services."""
         sample = self._adapter.get_broker_time_sample(
             self._symbol
         )
@@ -164,13 +175,26 @@ class BrokerTickMonitorWorker:
 
         snapshot = self._monitor.observe(sample)
 
+        if self._clock_calibrator is not None:
+            calibration = self._clock_calibrator.observe(sample)
+
+            logger.debug(
+                "Broker clock calibration: status=%s offset=%s "
+                "uncertainty=%s samples=%s reason=%s",
+                calibration.status.value,
+                calibration.offset_seconds,
+                calibration.uncertainty_seconds,
+                calibration.sample_count,
+                calibration.reason,
+            )
+
         with self._status_lock:
             self._last_error = None
 
         return snapshot
 
     def status(self) -> dict[str, object]:
-        """Return a JSON-compatible worker and monitor status."""
+        """Return JSON-compatible worker and clock-monitoring status."""
         snapshot = self._monitor.snapshot(
             now_monotonic_ns=monotonic_ns()
         )
@@ -179,6 +203,23 @@ class BrokerTickMonitorWorker:
         result["state"] = snapshot.state.value
         result["running"] = self.is_running
         result["last_error"] = self.last_error
+
+        if self._clock_calibrator is None:
+            result["clock_calibration"] = {
+                "status": "UNCONFIGURED",
+                "offset_seconds": None,
+                "uncertainty_seconds": None,
+                "sample_count": 0,
+                "reason": "Clock calibrator is not configured.",
+            }
+        else:
+            calibration = asdict(
+                self._clock_calibrator.snapshot()
+            )
+            calibration["status"] = (
+                self._clock_calibrator.snapshot().status.value
+            )
+            result["clock_calibration"] = calibration
 
         return result
 
