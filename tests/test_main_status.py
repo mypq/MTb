@@ -1,4 +1,3 @@
-
 import asyncio
 from types import SimpleNamespace
 
@@ -27,6 +26,19 @@ class FakeChronyStatusService:
 
     def snapshot(self):
         return self.status
+
+
+class FakeNtpVerificationMonitor:
+    def snapshot(self):
+        return {
+            "provider": "external_ntp_udp_123",
+            "trusted": False,
+            "verification_interval_seconds": 3600.0,
+            "last_attempt": None,
+            "last_attempt_at_unix": None,
+            "last_success": None,
+            "last_error": None,
+        }
 
 
 class FakeBrokerTickWorker:
@@ -65,6 +77,9 @@ def create_status_endpoint(
     application.state.mt5_monitor = FakeMonitor()
     application.state.chrony_status_service = (
         FakeChronyStatusService(chrony_status)
+    )
+    application.state.ntp_verification_monitor = (
+        FakeNtpVerificationMonitor()
     )
     application.state.broker_tick_worker = broker_tick_worker
 
