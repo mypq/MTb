@@ -58,7 +58,7 @@ def make_sample(seconds):
     )
 
 
-def test_worker_feeds_samples_into_broker_clock_calibrator():
+def test_worker_produces_estimate_without_claiming_broker_utc_verification():
     ntp = make_ntp_verifier()
     assert ntp.verify().verified is True
 
@@ -85,12 +85,17 @@ def test_worker_feeds_samples_into_broker_clock_calibrator():
 
     result = calibrator.snapshot()
 
-    assert result.status == BrokerClockStatus.VERIFIED
+    assert result.status == BrokerClockStatus.ESTIMATED
     assert result.offset_seconds == 7200.0
     assert result.sample_count == 5
+    assert result.reason is not None
+    assert "not verified broker UTC" in result.reason
 
     status = worker.status()
 
+    # Tick progression monitoring does not verify UTC alignment.
     assert status["clock_verification"] == "UNVERIFIED"
-    assert status["clock_calibration"]["status"] == "VERIFIED"
+
+    # Calibration is exposed only as an estimate.
+    assert status["clock_calibration"]["status"] == "ESTIMATED"
     assert status["clock_calibration"]["offset_seconds"] == 7200.0
