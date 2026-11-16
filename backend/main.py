@@ -23,6 +23,7 @@ from backend.market_data.session_calendar import (
     MarketSessionCalendarError,
 )
 from backend.market_data.validator import MarketDataValidator
+from backend.market_data.broker_clock import BrokerClockCalibrator
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
@@ -81,9 +82,21 @@ async def lifespan(app: FastAPI):
     broker_tick_worker = None
 
     chrony_service = ChronyStatusService()
+
+    ntp_verifier = NtpTimeVerifier()
+
     ntp_verification_monitor = NtpVerificationMonitor(
-        verifier=NtpTimeVerifier(),
+        verifier=ntp_verifier,
         interval_seconds=60 * 60,
+    )
+
+    broker_clock_calibrator = BrokerClockCalibrator(
+        ntp_verifier,
+        required_samples=5,
+        max_samples=9,
+        minimum_span_seconds=3.0,
+        maximum_spread_seconds=0.5,
+        maximum_offset_change_seconds=1.0,
     )
 
     ntp_stop_event = asyncio.Event()
@@ -162,6 +175,7 @@ async def lifespan(app: FastAPI):
     app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
     app.state.ntp_verification_monitor = ntp_verification_monitor
+    app.state.broker_clock_calibrator = broker_clock_calibrator
     app.state.database = database
     app.state.database_backup_service = None
 
@@ -209,6 +223,7 @@ async def lifespan(app: FastAPI):
                         monitor=broker_tick_monitor,
                         symbol=selected_symbol,
                         interval_seconds=1.0,
+                        clock_calibrator=broker_clock_calibrator,
                     )
 
                     app.state.broker_tick_worker = (
