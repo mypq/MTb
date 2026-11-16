@@ -201,6 +201,26 @@ class FakeChronyStatusService:
         )
 
 
+class FakeNtpVerificationMonitor:
+    def __init__(self, verifier, interval_seconds=3600):
+        self.verifier = verifier
+        self.interval_seconds = interval_seconds
+
+    async def run(self, stop_event):
+        await stop_event.wait()
+
+    def snapshot(self):
+        return {
+            "provider": "external_ntp_udp_123",
+            "trusted": False,
+            "verification_interval_seconds": self.interval_seconds,
+            "last_attempt": None,
+            "last_attempt_at_unix": None,
+            "last_success": None,
+            "last_error": None,
+        }
+
+
 def configure_lifecycle(
     monkeypatch,
     *,
@@ -382,6 +402,11 @@ def configure_lifecycle(
         main,
         "ChronyStatusService",
         FakeChronyStatusService,
+    )
+    monkeypatch.setattr(
+        main,
+        "NtpVerificationMonitor",
+        FakeNtpVerificationMonitor,
     )
 
     return app, events
