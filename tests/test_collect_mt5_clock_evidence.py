@@ -9,6 +9,7 @@ from backend.market_data.ntp_time import (
 )
 from scripts.diagnostics.collect_mt5_clock_evidence import (
     resolve_ntp_state,
+    track_update,
 )
 
 
@@ -207,3 +208,90 @@ def test_successful_new_verification_replaces_previous_one():
     assert result is second
     assert result is not first
     assert error == ""
+
+
+def test_first_market_observation_is_initial():
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=None,
+        current_value=12345,
+        now_monotonic=100.0,
+        previous_change_monotonic=None,
+    )
+
+    assert status == "INITIAL"
+    assert changed_at == 100.0
+    assert unchanged_seconds == 0.0
+
+
+def test_market_observation_detects_changed_value():
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=12345,
+        current_value=12346,
+        now_monotonic=105.0,
+        previous_change_monotonic=100.0,
+    )
+
+    assert status == "UPDATED"
+    assert changed_at == 105.0
+    assert unchanged_seconds == 0.0
+
+
+def test_market_observation_detects_unchanged_value():
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=12345,
+        current_value=12345,
+        now_monotonic=112.5,
+        previous_change_monotonic=100.0,
+    )
+
+    assert status == "UNCHANGED"
+    assert changed_at == 100.0
+    assert unchanged_seconds == pytest.approx(12.5)
+
+
+def test_market_observation_does_not_reset_unchanged_duration():
+    first = track_update(
+        previous_value=12345,
+        current_value=12345,
+        now_monotonic=110.0,
+        previous_change_monotonic=100.0,
+    )
+
+    second = track_update(
+        previous_value=12345,
+        current_value=12345,
+        now_monotonic=115.0,
+        previous_change_monotonic=first[1],
+    )
+
+    assert first[0] == "UNCHANGED"
+    assert first[2] == pytest.approx(10.0)
+    assert second[0] == "UNCHANGED"
+    assert second[1] == 100.0
+    assert second[2] == pytest.approx(15.0)
+
+
+def test_missing_market_observation_is_no_data():
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=12345,
+        current_value=None,
+        now_monotonic=110.0,
+        previous_change_monotonic=100.0,
+    )
+
+    assert status == "NO_DATA"
+    assert changed_at == 100.0
+    assert unchanged_seconds == ""
+
+
+def test_market_observation_with_no_previous_change_time():
+    status, changed_at, unchanged_seconds = track_update(
+        previous_value=12345,
+        current_value=12345,
+        now_monotonic=110.0,
+        previous_change_monotonic=None,
+    )
+
+    assert status == "UNCHANGED"
+    assert changed_at == 110.0
+    assert unchanged_seconds == 0.0
