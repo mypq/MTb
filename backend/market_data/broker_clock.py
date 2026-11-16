@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import timedelta
 from enum import Enum
 from math import isfinite
 from statistics import median
@@ -16,6 +15,7 @@ from backend.mt5.time_models import BrokerTimeSample
 class BrokerClockStatus(str, Enum):
     UNVERIFIED = "UNVERIFIED"
     COLLECTING = "COLLECTING"
+    ESTIMATED = "ESTIMATED"
     VERIFIED = "VERIFIED"
     DEGRADED = "DEGRADED"
     IDENTITY_CHANGED = "IDENTITY_CHANGED"
@@ -42,8 +42,14 @@ class BrokerClockCalibrator:
     Only advancing quote timestamps are used. The local receipt time is
     corrected using the latest trusted external NTP offset.
 
-    This is an event-derived estimate, not a claim that one quote timestamp
-    is a direct broker wall-clock response.
+    IMPORTANT:
+    This is an event-derived estimate, not proof of the broker's wall clock.
+    Quote age, network latency, and processing delay can affect the result.
+
+    The reported uncertainty is a dispersion indicator for the collected
+    estimates. It is not a complete bound on network or quote-age error.
+
+    This estimate must not be used to correct candle timestamps.
     """
 
     def __init__(
@@ -241,11 +247,19 @@ class BrokerClockCalibrator:
                     return self._snapshot()
 
             self._offset_seconds = measured_median
+
+            # This is only a dispersion indicator, not a complete
+            # uncertainty bound for network latency or quote age.
             self._uncertainty_seconds = (
                 ntp_result.uncertainty_seconds + spread / 2.0
             )
-            self._status = BrokerClockStatus.VERIFIED
-            self._reason = None
+
+            self._status = BrokerClockStatus.ESTIMATED
+            self._reason = (
+                "Event-derived offset estimate only. "
+                "Quote age and network latency are not independently bounded; "
+                "this result is not verified broker UTC."
+            )
 
             return self._snapshot()
 
