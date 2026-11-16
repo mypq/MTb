@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+# The update-status columns are mandatory. An old evidence file without
+# these columns cannot prove whether a stream was updated or unchanged.
 SOURCE_FIELDS = {
     "cycle_end_local_utc",
     "account_login",
@@ -22,17 +24,21 @@ SOURCE_FIELDS = {
     "ntp_offset_seconds",
     "ntp_uncertainty_seconds",
     "tick_time_epoch_raw",
+    "tick_update_status",
     "tick_corrected_read_midpoint_utc",
     "tick_minus_corrected_utc_seconds",
     "m1_latest_closed_open_raw",
+    "m1_update_status",
     "m1_corrected_read_midpoint_utc",
     "m1_latest_closed_open_minus_corrected_utc_seconds",
     "m5_latest_closed_open_raw",
+    "m5_update_status",
     "m5_corrected_read_midpoint_utc",
     "m5_latest_closed_open_minus_corrected_utc_seconds",
     "read_error",
 }
 
+# Keep the existing archive schema so existing history files remain readable.
 HISTORY_FIELDS = [
     "observed_at_local_utc",
     "account_login",
@@ -51,10 +57,36 @@ HISTORY_FIELDS = [
 LOCK_TIMEOUT_SECONDS = 30.0
 LOCK_RETRY_SECONDS = 0.1
 
+ACCEPTED_UPDATE_STATUSES = {"INITIAL", "UPDATED"}
+
+STREAM_DEFINITIONS = (
+    (
+        "tick",
+        "tick_time_epoch_raw",
+        "tick_update_status",
+        "tick_corrected_read_midpoint_utc",
+        "tick_minus_corrected_utc_seconds",
+    ),
+    (
+        "m1_closed_candle",
+        "m1_latest_closed_open_raw",
+        "m1_update_status",
+        "m1_corrected_read_midpoint_utc",
+        "m1_latest_closed_open_minus_corrected_utc_seconds",
+    ),
+    (
+        "m5_closed_candle",
+        "m5_latest_closed_open_raw",
+        "m5_update_status",
+        "m5_corrected_read_midpoint_utc",
+        "m5_latest_closed_open_minus_corrected_utc_seconds",
+    ),
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Archive MT5 broker clock observations."
+        description="Archive validated MT5 broker clock observations."
     )
     parser.add_argument("--input", required=True)
     parser.add_argument(
@@ -123,12 +155,7 @@ def observation_key(row):
 
 @contextmanager
 def exclusive_file_lock(lock_path):
-    """
-    Cross-process exclusive lock using atomic file creation.
-
-    The lock file is separate from the CSV and does not modify
-    existing historical observations.
-    """
+    """Cross-process lock using atomic file creation."""
     lock_path = Path(lock_path)
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
     descriptor = None
@@ -145,8 +172,6 @@ def exclusive_file_lock(lock_path):
                     f"Timed out waiting for archive lock: {lock_path}"
                 )
             time.sleep(LOCK_RETRY_SECONDS)
-        except OSError:
-            raise
 
     try:
         os.write(
@@ -155,9 +180,7 @@ def exclusive_file_lock(lock_path):
         )
         os.close(descriptor)
         descriptor = None
-
         yield
-
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -182,10 +205,7 @@ def load_existing_keys(destination):
         if reader.fieldnames != HISTORY_FIELDS:
             raise ValueError("history CSV schema mismatch")
 
-        return {
-            observation_key(row)
-            for row in reader
-        }
+        return {observation_key(row) for row in reader}
 
 
 def read_source_rows(source):
@@ -196,9 +216,7 @@ def read_source_rows(source):
     ) as handle:
         reader = csv.DictReader(handle)
 
-        missing = SOURCE_FIELDS.difference(
-            reader.fieldnames or ()
-        )
+        missing = SOURCE_FIELDS.difference(reader.fieldnames or ())
 
         if missing:
             raise ValueError(
@@ -209,71 +227,83 @@ def read_source_rows(source):
         return list(reader)
 
 
+def valid_identity(row):
+    return all(
+        (row.get(field) or "").strip()
+        for field in ("account_login", "broker_server", "symbol")
+    )
+
+
+def valid_ntp_metadata(row):
+    if (row.get("ntp_verified") or "").strip().lower() != "true":
+        return False
+
+    ntp_offset = number(row.get("ntp_offset_seconds"))
+    ntp_checked = number(row.get("ntp_checked_at_unix"))
+
+    return (
+        ntp_offset is not None
+        and valid_nonnegative_number(
+            row.get("ntp_uncertainty_seconds")
+        )
+        and ntp_checked is not None
+        and valid_unix_timestamp(ntp_checked)
+    )
+
+
 def build_observations(source_rows, source_name):
     observations = []
     rejected_timestamps = 0
     rejected_numeric = 0
-
-    definitions = (
-        (
-            "tick",
-            "tick_time_epoch_raw",
-            "tick_corrected_read_midpoint_utc",
-            "tick_minus_corrected_utc_seconds",
-        ),
-        (
-            "m1_closed_candle",
-            "m1_latest_closed_open_raw",
-            "m1_corrected_read_midpoint_utc",
-            "m1_latest_closed_open_minus_corrected_utc_seconds",
-        ),
-        (
-            "m5_closed_candle",
-            "m5_latest_closed_open_raw",
-            "m5_corrected_read_midpoint_utc",
-            "m5_latest_closed_open_minus_corrected_utc_seconds",
-        ),
-    )
+    rejected_identity = 0
+    skipped_untrusted_ntp = 0
+    skipped_status = {
+        "INITIAL": 0,
+        "UPDATED": 0,
+        "UNCHANGED": 0,
+        "NO_DATA": 0,
+        "READ_ERROR": 0,
+        "UNKNOWN": 0,
+    }
 
     for row in source_rows:
-        if (row.get("ntp_verified") or "").strip().lower() != "true":
+        if not valid_identity(row):
+            rejected_identity += 1
             continue
 
-        if (row.get("read_error") or "").strip():
+        if not valid_ntp_metadata(row):
+            skipped_untrusted_ntp += 1
             continue
 
-        ntp_offset = number(row.get("ntp_offset_seconds"))
-        ntp_uncertainty = number(
-            row.get("ntp_uncertainty_seconds")
-        )
-        ntp_checked = number(row.get("ntp_checked_at_unix"))
-
-        if (
-            ntp_offset is None
-            or not valid_nonnegative_number(
-                row.get("ntp_uncertainty_seconds")
-            )
-            or ntp_checked is None
-            or not valid_unix_timestamp(ntp_checked)
-        ):
-            continue
-
-        observed_at = (
-            row.get("cycle_end_local_utc") or ""
-        ).strip()
+        observed_at = (row.get("cycle_end_local_utc") or "").strip()
 
         if not valid_iso_datetime(observed_at):
             rejected_timestamps += 1
             continue
 
-        for kind, raw_field, utc_field, offset_field in definitions:
-            raw = number(row.get(raw_field))
-            offset = number(row.get(offset_field))
-            comparison = (
-                row.get(utc_field) or ""
-            ).strip()
+        ntp_offset = number(row.get("ntp_offset_seconds"))
+        ntp_uncertainty = number(row.get("ntp_uncertainty_seconds"))
+        ntp_checked = number(row.get("ntp_checked_at_unix"))
 
-            if raw is None or offset is None:
+        # A global read_error is diagnostic only. Each stream has its own
+        # update status, so one failed stream must not discard other streams.
+        for kind, raw_field, status_field, utc_field, difference_field in (
+            STREAM_DEFINITIONS
+        ):
+            status = (row.get(status_field) or "").strip().upper()
+
+            if status not in ACCEPTED_UPDATE_STATUSES:
+                if status in skipped_status:
+                    skipped_status[status] += 1
+                else:
+                    skipped_status["UNKNOWN"] += 1
+                continue
+
+            raw = number(row.get(raw_field))
+            difference = number(row.get(difference_field))
+            comparison = (row.get(utc_field) or "").strip()
+
+            if raw is None or difference is None:
                 rejected_numeric += 1
                 continue
 
@@ -287,41 +317,37 @@ def build_observations(source_rows, source_name):
 
             observations.append({
                 "observed_at_local_utc": observed_at,
-                "account_login": (
-                    row.get("account_login") or ""
-                ).strip(),
-                "broker_server": (
-                    row.get("broker_server") or ""
-                ).strip(),
-                "symbol": (
-                    row.get("symbol") or ""
-                ).strip(),
+                "account_login": (row.get("account_login") or "").strip(),
+                "broker_server": (row.get("broker_server") or "").strip(),
+                "symbol": (row.get("symbol") or "").strip(),
                 "evidence_kind": kind,
                 "raw_timestamp_epoch": str(raw),
                 "comparison_utc": comparison,
-                "observed_offset_seconds": str(offset),
+                "observed_offset_seconds": str(difference),
                 "ntp_checked_at_unix": str(ntp_checked),
                 "ntp_offset_seconds": str(ntp_offset),
                 "ntp_uncertainty_seconds": str(ntp_uncertainty),
                 "source_file": source_name,
             })
 
-    return observations, rejected_timestamps, rejected_numeric
+    stats = {
+        "rejected_timestamps": rejected_timestamps,
+        "rejected_numeric": rejected_numeric,
+        "rejected_identity": rejected_identity,
+        "skipped_untrusted_ntp": skipped_untrusted_ntp,
+        "skipped_status": skipped_status,
+    }
+
+    return observations, stats
 
 
 def append_observations(destination, observations):
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    lock_path = destination.with_name(
-        destination.name + ".lock"
-    )
+    lock_path = destination.with_name(destination.name + ".lock")
 
     with exclusive_file_lock(lock_path):
         existing_keys = load_existing_keys(destination)
-
         new_rows = []
 
         for row in observations:
@@ -331,9 +357,6 @@ def append_observations(destination, observations):
                 continue
 
             new_rows.append(row)
-
-            # Update immediately to prevent duplicates inside
-            # the same input batch.
             existing_keys.add(key)
 
         write_header = (
@@ -364,7 +387,6 @@ def append_observations(destination, observations):
 
 def main():
     args = parse_args()
-
     source = Path(args.input)
     destination = Path(args.output)
 
@@ -381,24 +403,22 @@ def main():
         print(f"ERROR: cannot read input: {exc}")
         return 4
 
-    observations, rejected_timestamps, rejected_numeric = (
-        build_observations(
-            source_rows,
-            source.name,
-        )
+    observations, stats = build_observations(
+        source_rows,
+        source.name,
     )
 
     if not observations:
-        print("ERROR: no complete NTP-trusted observations found.")
-        print(f"Rejected timestamps: {rejected_timestamps}")
-        print(f"Rejected numeric values: {rejected_numeric}")
+        print("ERROR: no eligible NTP-trusted updated observations found.")
+        print(f"Rejected timestamps: {stats['rejected_timestamps']}")
+        print(f"Rejected numeric values: {stats['rejected_numeric']}")
+        print(f"Rejected identity rows: {stats['rejected_identity']}")
+        print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
+        print(f"Skipped statuses: {stats['skipped_status']}")
         return 5
 
     try:
-        new_rows = append_observations(
-            destination,
-            observations,
-        )
+        new_rows = append_observations(destination, observations)
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 6
@@ -412,18 +432,21 @@ def main():
     duplicates = len(observations) - len(new_rows)
 
     print(f"Source rows: {len(source_rows)}")
-    print(f"Observations found: {len(observations)}")
+    print(f"Eligible observations: {len(observations)}")
     print(f"New observations: {len(new_rows)}")
     print(f"Duplicates skipped: {duplicates}")
-    print(f"Rejected timestamps: {rejected_timestamps}")
-    print(f"Rejected numeric values: {rejected_numeric}")
+    print(f"Rejected timestamps: {stats['rejected_timestamps']}")
+    print(f"Rejected numeric values: {stats['rejected_numeric']}")
+    print(f"Rejected identity rows: {stats['rejected_identity']}")
+    print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
+    print(f"Skipped statuses: {stats['skipped_status']}")
     print(f"History: {destination.resolve()}")
 
     print(
-        "IMPORTANT: observed_offset_seconds is an observed "
-        "difference against the recorded comparison time. "
-        "It is NOT a verified broker UTC offset and must NOT "
-        "be used to correct production candle timestamps."
+        "IMPORTANT: observed_offset_seconds stores the observed "
+        "difference against comparison_utc. For M1/M5 it includes "
+        "candle age and is NOT a broker UTC offset. No archived "
+        "measurement is authorization to correct production timestamps."
     )
 
     return 0
