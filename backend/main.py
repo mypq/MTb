@@ -11,6 +11,8 @@ from backend.database_backup import DatabaseBackupService
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.collector import MarketDataCollector
+from backend.market_data.ntp_monitor import NtpVerificationMonitor
+from backend.market_data.ntp_time import NtpTimeVerifier
 from backend.market_data.repository import (
     MarketDataPersistenceConflict,
     MarketDataRepository,
@@ -79,6 +81,13 @@ async def lifespan(app: FastAPI):
     broker_tick_worker = None
 
     chrony_service = ChronyStatusService()
+    ntp_verification_monitor = NtpVerificationMonitor(
+        verifier=NtpTimeVerifier(),
+        interval_seconds=60 * 60,
+    )
+
+    ntp_stop_event = asyncio.Event()
+    ntp_task = None
 
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
@@ -152,12 +161,18 @@ async def lifespan(app: FastAPI):
     app.state.market_data_repository = market_data_repository
     app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
+    app.state.ntp_verification_monitor = ntp_verification_monitor
     app.state.database = database
     app.state.database_backup_service = None
 
     try:
         database.initialize()
         upgrade_database()
+
+        ntp_task = asyncio.create_task(
+            ntp_verification_monitor.run(ntp_stop_event),
+            name="independent-ntp-verification",
+        )
 
         backup_service = DatabaseBackupService(database)
         app.state.database_backup_service = backup_service
@@ -297,6 +312,15 @@ async def lifespan(app: FastAPI):
     finally:
         try:
             startup_stop_event.set()
+            ntp_stop_event.set()
+
+            if ntp_task is not None:
+                try:
+                    await ntp_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop independent NTP verification."
+                    )
 
             if startup_task is not None:
                 try:
@@ -400,6 +424,9 @@ def create_app() -> FastAPI:
         chrony_service: ChronyStatusService = (
             application.state.chrony_status_service
         )
+        ntp_verification_monitor: NtpVerificationMonitor = (
+            application.state.ntp_verification_monitor
+        )
 
         broker_tick_worker = getattr(
             application.state,
@@ -462,6 +489,7 @@ def create_app() -> FastAPI:
                 "error": chrony.error,
                 "broker_time_verified": False,
             },
+            "ntp_verification": ntp_verification_monitor.snapshot(),
         }
 
     @application.get(
