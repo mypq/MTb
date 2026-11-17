@@ -1,4 +1,3 @@
-
 #property strict
 #property version   "1.10"
 #property description "Exports broker sessions and append-only raw clock evidence."
@@ -386,7 +385,7 @@ bool AppendClockHistorySample()
 }
 
 //+------------------------------------------------------------------+
-//| Append trading or quote sessions                                 |
+//| Append trading or quote sessions (Updated)                       |
 //+------------------------------------------------------------------+
 bool AppendSessionArray(
    string &json,
@@ -395,6 +394,8 @@ bool AppendSessionArray(
 )
 {
    json += "[";
+
+   int written_sessions = 0;
 
    for(int index = 0; index < InpMaxSessionsPerDay; index++)
    {
@@ -424,10 +425,7 @@ bool AppendSessionArray(
       }
 
       if(!found)
-         return true;
-
-      if(index > 0)
-         json += ",";
+         break;
 
       long from_seconds = (long)session_from;
       long to_seconds = (long)session_to;
@@ -445,11 +443,16 @@ bool AppendSessionArray(
          return false;
       }
 
+      if(written_sessions > 0)
+         json += ",";
+
       json += StringFormat(
          "{\"from_seconds\":%I64d,\"to_seconds\":%I64d}",
          from_seconds,
          to_seconds
       );
+
+      written_sessions++;
    }
 
    datetime extra_from = 0;
