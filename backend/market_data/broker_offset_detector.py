@@ -1,10 +1,5 @@
 
-"""Detect a broker UTC offset from MT5 clock history and trusted NTP evidence.
-
-A candidate is ready only after three consecutive, consistent samples from
-the same MT5 run and broker identity. This module does not persist offsets
-and does not modify candle timestamps.
-"""
+"""Detect a broker UTC offset from MT5 clock history and trusted NTP evidence."""
 
 from __future__ import annotations
 
@@ -46,7 +41,6 @@ class BrokerOffsetDetector:
         ntp_verifier: NtpTimeVerifier,
         *,
         required_samples: int = 3,
-        max_ntp_age_seconds: float = 6 * 60 * 60,
         max_sample_ntp_distance_seconds: float = 6 * 60 * 60,
         max_candidate_spread_seconds: float = 1.5,
         max_integer_residual_seconds: float = 1.5,
@@ -62,7 +56,6 @@ class BrokerOffsetDetector:
             raise ValueError("required_samples must be exactly 3.")
 
         for name, value in (
-            ("max_ntp_age_seconds", max_ntp_age_seconds),
             (
                 "max_sample_ntp_distance_seconds",
                 max_sample_ntp_distance_seconds,
@@ -86,7 +79,6 @@ class BrokerOffsetDetector:
 
         self._ntp = ntp_verifier
         self._required_samples = required_samples
-        self._max_ntp_age = float(max_ntp_age_seconds)
         self._max_sample_ntp_distance = float(
             max_sample_ntp_distance_seconds
         )
@@ -127,11 +119,9 @@ class BrokerOffsetDetector:
                 "MT5 terminal was not connected for this sample.",
             )
 
-        # NTP offset convention: NTP server time minus local clock.
         corrected_gmt = (
             float(sample.time_gmt_epoch) + ntp_offset
         )
-
         candidate = (
             float(sample.time_trade_server_epoch) - corrected_gmt
         )
@@ -170,20 +160,16 @@ class BrokerOffsetDetector:
                 sample.monotonic_ms - previous.monotonic_ms
             ) & 0xFFFFFFFF
 
-            consecutive = (
+            if not (
                 same_run
                 and same_identity
                 and next_sequence
                 and tick_delta > 0
-            )
-
-            if not consecutive:
+            ):
                 self._window.clear()
-
             elif rounded_candidate != int(
                 round(self._window[-1][1])
             ):
-                # A changed offset breaks the consecutive evidence window.
                 self._window.clear()
 
         self._window.append(
@@ -211,9 +197,6 @@ class BrokerOffsetDetector:
             )
 
         measured_offset = int(round(median(candidates)))
-
-        # Integer MT5 epoch fields introduce up to approximately one
-        # second of combined timestamp quantization.
         uncertainty = (
             max(item[2] for item in self._window)
             + 1.0
@@ -230,7 +213,6 @@ class BrokerOffsetDetector:
         )
 
     def reset(self) -> None:
-        """Discard all collected samples."""
         self._window.clear()
 
     def _trusted_ntp_for(
@@ -262,8 +244,12 @@ class BrokerOffsetDetector:
         ):
             return None
 
+        corrected_sample_gmt = (
+            float(sample.time_gmt_epoch) + float(offset)
+        )
+
         if (
-            abs(sample.time_local_epoch - verification.checked_at_unix)
+            abs(corrected_sample_gmt - verification.checked_at_unix)
             > self._max_sample_ntp_distance
         ):
             return None
