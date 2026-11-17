@@ -46,10 +46,23 @@ def utc_now() -> datetime:
 def json_epochs(rates) -> str:
     if rates is None:
         return "[]"
+
     return json.dumps(
         [int(rate["time"]) for rate in rates],
         separators=(",", ":"),
     )
+
+
+def latest_open_epoch(rates):
+    if rates is None:
+        return None
+
+    epochs = [int(rate["time"]) for rate in rates]
+
+    if not epochs:
+        return None
+
+    return max(epochs)
 
 
 def timed_call(function):
@@ -83,6 +96,28 @@ def corrected_epoch(local_epoch, ntp_result):
         return None
 
     return float(local_epoch) + float(ntp_result.offset_seconds)
+
+
+def read_midpoint_epoch(call, ntp_result):
+    if call is None:
+        return None
+
+    midpoint_local = (
+        call["start_utc"].timestamp()
+        + call["end_utc"].timestamp()
+    ) / 2.0
+
+    return corrected_epoch(midpoint_local, ntp_result)
+
+
+def expected_timeframe_boundary(corrected_utc_epoch, timeframe_seconds):
+    if corrected_utc_epoch is None:
+        return None
+
+    return (
+        int(corrected_utc_epoch // timeframe_seconds)
+        * timeframe_seconds
+    )
 
 
 def track_update(
@@ -154,8 +189,7 @@ def read_stream(function):
     Returns:
         call: timed call result, or None
         value: returned data, or None
-        status: INITIAL/UPDATED/UNCHANGED is assigned later;
-                NO_DATA for an empty result;
+        status: NO_DATA for an empty result;
                 READ_ERROR for an exception.
         error: error description, if any.
     """
@@ -249,6 +283,13 @@ def main() -> int:
     )
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    if output.exists():
+        print(
+            f"ERROR: Output already exists; refusing to overwrite: {output}",
+            file=sys.stderr,
+        )
+        return 6
+
     adapter = MT5Adapter(settings=settings)
     status = adapter.connect()
 
@@ -306,6 +347,7 @@ def main() -> int:
         "ntp_sample_count",
         "ntp_servers",
         "ntp_error",
+
         "tick_read_start_local_utc",
         "tick_read_end_local_utc",
         "tick_read_start_monotonic_ns",
@@ -317,6 +359,7 @@ def main() -> int:
         "tick_unchanged_seconds",
         "tick_corrected_read_midpoint_utc",
         "tick_minus_corrected_utc_seconds",
+
         "m1_read_start_local_utc",
         "m1_read_end_local_utc",
         "m1_read_start_monotonic_ns",
@@ -329,6 +372,20 @@ def main() -> int:
         "m1_corrected_read_midpoint_utc",
         "m1_latest_closed_open_minus_corrected_utc_seconds",
         "m1_predicted_active_open_minus_corrected_utc_seconds",
+
+        "m1_active_read_start_local_utc",
+        "m1_active_read_end_local_utc",
+        "m1_active_read_start_monotonic_ns",
+        "m1_active_read_end_monotonic_ns",
+        "m1_active_read_duration_seconds",
+        "m1_active_open_epochs_raw",
+        "m1_active_open_raw",
+        "m1_active_corrected_read_midpoint_utc",
+        "m1_active_open_minus_corrected_read_midpoint_seconds",
+        "m1_active_expected_utc_boundary",
+        "m1_active_open_minus_expected_utc_boundary_seconds",
+        "m1_active_read_status",
+
         "m5_read_start_local_utc",
         "m5_read_end_local_utc",
         "m5_read_start_monotonic_ns",
@@ -341,17 +398,33 @@ def main() -> int:
         "m5_corrected_read_midpoint_utc",
         "m5_latest_closed_open_minus_corrected_utc_seconds",
         "m5_predicted_active_open_minus_corrected_utc_seconds",
+
+        "m5_active_read_start_local_utc",
+        "m5_active_read_end_local_utc",
+        "m5_active_read_start_monotonic_ns",
+        "m5_active_read_end_monotonic_ns",
+        "m5_active_read_duration_seconds",
+        "m5_active_open_epochs_raw",
+        "m5_active_open_raw",
+        "m5_active_corrected_read_midpoint_utc",
+        "m5_active_open_minus_corrected_read_midpoint_seconds",
+        "m5_active_expected_utc_boundary",
+        "m5_active_open_minus_expected_utc_boundary_seconds",
+        "m5_active_read_status",
+
         "read_error",
     ]
 
     print(f"Read-only collection started: symbol={symbol}")
     print(f"Duration: {args.duration_seconds}s; output: {output}")
     print("NTP correction is recorded separately from raw local time.")
+    print("Closed candles use position=1.")
+    print("Active candles are read independently using position=0.")
     print("Market update tracking records changes only; it does not classify stale data.")
 
     try:
         with output.open(
-            "w",
+            "x",
             newline="",
             encoding="utf-8",
         ) as handle:
@@ -377,7 +450,9 @@ def main() -> int:
                     "symbol": symbol,
                     "ntp_verified": False,
                     "m1_closed_open_epochs_raw": "[]",
+                    "m1_active_open_epochs_raw": "[]",
                     "m5_closed_open_epochs_raw": "[]",
+                    "m5_active_open_epochs_raw": "[]",
                     "read_error": "",
                 })
 
@@ -477,7 +552,7 @@ def main() -> int:
                     read_status=tick_status,
                 )
 
-                # M1 read
+                # M1 closed candles: position=1
                 m1_call, rates_m1, m1_status, m1_error = read_stream(
                     lambda: mt5.copy_rates_from_pos(
                         symbol, mt5.TIMEFRAME_M1, 1, 3
@@ -487,7 +562,7 @@ def main() -> int:
                 apply_read_timing(row, "m1", m1_call)
 
                 if m1_error:
-                    errors.append(f"m1: {m1_error}")
+                    errors.append(f"m1_closed: {m1_error}")
 
                 m1_latest = None
 
@@ -495,13 +570,9 @@ def main() -> int:
                     row["m1_closed_open_epochs_raw"] = (
                         json_epochs(rates_m1)
                     )
+                    m1_latest = latest_open_epoch(rates_m1)
 
-                    m1_epochs = [
-                        int(rate["time"]) for rate in rates_m1
-                    ]
-
-                    if m1_epochs:
-                        m1_latest = max(m1_epochs)
+                    if m1_latest is not None:
                         row["m1_latest_closed_open_raw"] = m1_latest
                     else:
                         m1_status = "NO_DATA"
@@ -518,7 +589,46 @@ def main() -> int:
                     read_status=m1_status,
                 )
 
-                # M5 read
+                # M1 active candle: position=0
+                m1_active_call, rates_m1_active, m1_active_status, m1_active_error = read_stream(
+                    lambda: mt5.copy_rates_from_pos(
+                        symbol, mt5.TIMEFRAME_M1, 0, 1
+                    )
+                )
+
+                apply_read_timing(
+                    row,
+                    "m1_active",
+                    m1_active_call,
+                )
+
+                if m1_active_error:
+                    errors.append(f"m1_active: {m1_active_error}")
+
+                m1_active_open = None
+
+                if rates_m1_active is not None:
+                    row["m1_active_open_epochs_raw"] = (
+                        json_epochs(rates_m1_active)
+                    )
+                    m1_active_open = latest_open_epoch(
+                        rates_m1_active
+                    )
+
+                    if m1_active_open is not None:
+                        row["m1_active_open_raw"] = m1_active_open
+                    else:
+                        m1_active_status = "NO_DATA"
+
+                row["m1_active_read_status"] = (
+                    "READ_ERROR"
+                    if m1_active_status == "READ_ERROR"
+                    else "NO_DATA"
+                    if m1_active_status == "NO_DATA"
+                    else "OK"
+                )
+
+                # M5 closed candles: position=1
                 m5_call, rates_m5, m5_status, m5_error = read_stream(
                     lambda: mt5.copy_rates_from_pos(
                         symbol, mt5.TIMEFRAME_M5, 1, 3
@@ -528,7 +638,7 @@ def main() -> int:
                 apply_read_timing(row, "m5", m5_call)
 
                 if m5_error:
-                    errors.append(f"m5: {m5_error}")
+                    errors.append(f"m5_closed: {m5_error}")
 
                 m5_latest = None
 
@@ -536,13 +646,9 @@ def main() -> int:
                     row["m5_closed_open_epochs_raw"] = (
                         json_epochs(rates_m5)
                     )
+                    m5_latest = latest_open_epoch(rates_m5)
 
-                    m5_epochs = [
-                        int(rate["time"]) for rate in rates_m5
-                    ]
-
-                    if m5_epochs:
-                        m5_latest = max(m5_epochs)
+                    if m5_latest is not None:
                         row["m5_latest_closed_open_raw"] = m5_latest
                     else:
                         m5_status = "NO_DATA"
@@ -559,17 +665,54 @@ def main() -> int:
                     read_status=m5_status,
                 )
 
-                # Time correction calculations remain independent
-                # from market update tracking.
-                if ntp_trusted and ntp_result is not None:
-                    if tick_call is not None and tick is not None:
-                        tick_mid_local = (
-                            tick_call["start_utc"].timestamp()
-                            + tick_call["end_utc"].timestamp()
-                        ) / 2.0
+                # M5 active candle: position=0
+                m5_active_call, rates_m5_active, m5_active_status, m5_active_error = read_stream(
+                    lambda: mt5.copy_rates_from_pos(
+                        symbol, mt5.TIMEFRAME_M5, 0, 1
+                    )
+                )
 
-                        tick_mid_corrected = corrected_epoch(
-                            tick_mid_local, ntp_result
+                apply_read_timing(
+                    row,
+                    "m5_active",
+                    m5_active_call,
+                )
+
+                if m5_active_error:
+                    errors.append(f"m5_active: {m5_active_error}")
+
+                m5_active_open = None
+
+                if rates_m5_active is not None:
+                    row["m5_active_open_epochs_raw"] = (
+                        json_epochs(rates_m5_active)
+                    )
+                    m5_active_open = latest_open_epoch(
+                        rates_m5_active
+                    )
+
+                    if m5_active_open is not None:
+                        row["m5_active_open_raw"] = m5_active_open
+                    else:
+                        m5_active_status = "NO_DATA"
+
+                row["m5_active_read_status"] = (
+                    "READ_ERROR"
+                    if m5_active_status == "READ_ERROR"
+                    else "NO_DATA"
+                    if m5_active_status == "NO_DATA"
+                    else "OK"
+                )
+
+                # Time correction calculations remain independent
+                # from market update tracking and raw MT5 timestamps.
+                if ntp_trusted and ntp_result is not None:
+
+                    # Tick comparison
+                    if tick_call is not None and tick is not None:
+                        tick_mid_corrected = read_midpoint_epoch(
+                            tick_call,
+                            ntp_result,
                         )
 
                         if tick_mid_corrected is not None:
@@ -584,18 +727,15 @@ def main() -> int:
                                 - tick_mid_corrected
                             )
 
+                    # M1 closed-candle comparison
                     if (
                         m1_call is not None
                         and rates_m1 is not None
                         and m1_latest is not None
                     ):
-                        m1_mid_local = (
-                            m1_call["start_utc"].timestamp()
-                            + m1_call["end_utc"].timestamp()
-                        ) / 2.0
-
-                        m1_mid_corrected = corrected_epoch(
-                            m1_mid_local, ntp_result
+                        m1_mid_corrected = read_midpoint_epoch(
+                            m1_call,
+                            ntp_result,
                         )
 
                         if m1_mid_corrected is not None:
@@ -612,18 +752,59 @@ def main() -> int:
                                 "m1_predicted_active_open_minus_corrected_utc_seconds"
                             ] = m1_latest + 60 - m1_mid_corrected
 
+                    # M1 actual active-candle comparison
+                    if (
+                        m1_active_call is not None
+                        and rates_m1_active is not None
+                        and m1_active_open is not None
+                    ):
+                        m1_active_mid_corrected = read_midpoint_epoch(
+                            m1_active_call,
+                            ntp_result,
+                        )
+
+                        if m1_active_mid_corrected is not None:
+                            m1_expected_boundary = (
+                                expected_timeframe_boundary(
+                                    m1_active_mid_corrected,
+                                    60,
+                                )
+                            )
+
+                            row[
+                                "m1_active_corrected_read_midpoint_utc"
+                            ] = datetime.fromtimestamp(
+                                m1_active_mid_corrected,
+                                tz=timezone.utc,
+                            ).isoformat()
+
+                            row[
+                                "m1_active_open_minus_corrected_read_midpoint_seconds"
+                            ] = (
+                                m1_active_open
+                                - m1_active_mid_corrected
+                            )
+
+                            row[
+                                "m1_active_expected_utc_boundary"
+                            ] = m1_expected_boundary
+
+                            row[
+                                "m1_active_open_minus_expected_utc_boundary_seconds"
+                            ] = (
+                                m1_active_open
+                                - m1_expected_boundary
+                            )
+
+                    # M5 closed-candle comparison
                     if (
                         m5_call is not None
                         and rates_m5 is not None
                         and m5_latest is not None
                     ):
-                        m5_mid_local = (
-                            m5_call["start_utc"].timestamp()
-                            + m5_call["end_utc"].timestamp()
-                        ) / 2.0
-
-                        m5_mid_corrected = corrected_epoch(
-                            m5_mid_local, ntp_result
+                        m5_mid_corrected = read_midpoint_epoch(
+                            m5_call,
+                            ntp_result,
                         )
 
                         if m5_mid_corrected is not None:
@@ -639,6 +820,50 @@ def main() -> int:
                             row[
                                 "m5_predicted_active_open_minus_corrected_utc_seconds"
                             ] = m5_latest + 300 - m5_mid_corrected
+
+                    # M5 actual active-candle comparison
+                    if (
+                        m5_active_call is not None
+                        and rates_m5_active is not None
+                        and m5_active_open is not None
+                    ):
+                        m5_active_mid_corrected = read_midpoint_epoch(
+                            m5_active_call,
+                            ntp_result,
+                        )
+
+                        if m5_active_mid_corrected is not None:
+                            m5_expected_boundary = (
+                                expected_timeframe_boundary(
+                                    m5_active_mid_corrected,
+                                    300,
+                                )
+                            )
+
+                            row[
+                                "m5_active_corrected_read_midpoint_utc"
+                            ] = datetime.fromtimestamp(
+                                m5_active_mid_corrected,
+                                tz=timezone.utc,
+                            ).isoformat()
+
+                            row[
+                                "m5_active_open_minus_corrected_read_midpoint_seconds"
+                            ] = (
+                                m5_active_open
+                                - m5_active_mid_corrected
+                            )
+
+                            row[
+                                "m5_active_expected_utc_boundary"
+                            ] = m5_expected_boundary
+
+                            row[
+                                "m5_active_open_minus_expected_utc_boundary_seconds"
+                            ] = (
+                                m5_active_open
+                                - m5_expected_boundary
+                            )
 
                 row["read_error"] = " | ".join(errors)
 
@@ -675,6 +900,13 @@ def main() -> int:
 
     except KeyboardInterrupt:
         print("Collection interrupted by user.")
+
+    except FileExistsError:
+        print(
+            f"ERROR: Output already exists; refusing to overwrite: {output}",
+            file=sys.stderr,
+        )
+        return 6
 
     finally:
         adapter.shutdown()
