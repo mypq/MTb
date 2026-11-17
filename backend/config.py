@@ -1,4 +1,6 @@
+
 from functools import lru_cache
+import math
 from typing import Literal
 
 from pydantic import SecretStr, field_validator
@@ -63,6 +65,11 @@ class Settings(BaseSettings):
     MT5_SESSIONS_FILE: str | None = None
     MT5_SESSIONS_MAX_AGE_SECONDS: int = 604800
 
+    # MT5 broker clock evidence
+    MT5_CLOCK_HISTORY_FILE: str | None = None
+    BROKER_OFFSET_REGISTRY_FILE: str = "data/broker_offsets.jsonl"
+    BROKER_OFFSET_POLL_INTERVAL_SECONDS: float = 1.0
+
     # Market
     MT5_SYMBOL: str = ""
     DEFAULT_TIMEFRAME: Timeframe = "M5"
@@ -89,18 +96,48 @@ class Settings(BaseSettings):
             raise ValueError("This setting cannot be empty.")
         return value.strip()
 
-    @field_validator("MT5_SESSIONS_FILE", mode="before")
+    @field_validator(
+        "MT5_SESSIONS_FILE",
+        "MT5_CLOCK_HISTORY_FILE",
+        mode="before",
+    )
     @classmethod
-    def normalize_mt5_sessions_file(
+    def normalize_optional_paths(
         cls,
         value: object,
     ) -> object:
         if value is None:
             return None
         if not isinstance(value, str):
-            raise ValueError("MT5_SESSIONS_FILE must be a string.")
+            raise ValueError("Configured file paths must be strings.")
         value = value.strip()
         return value or None
+
+    @field_validator("BROKER_OFFSET_REGISTRY_FILE")
+    @classmethod
+    def validate_broker_offset_registry_file(
+        cls,
+        value: str,
+    ) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError(
+                "BROKER_OFFSET_REGISTRY_FILE cannot be empty."
+            )
+        return value
+
+    @field_validator("BROKER_OFFSET_POLL_INTERVAL_SECONDS")
+    @classmethod
+    def validate_broker_offset_poll_interval(
+        cls,
+        value: float,
+    ) -> float:
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                "BROKER_OFFSET_POLL_INTERVAL_SECONDS "
+                "must be finite and positive."
+            )
+        return value
 
     @field_validator("APP_PORT")
     @classmethod
