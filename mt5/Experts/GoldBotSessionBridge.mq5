@@ -1,18 +1,29 @@
+
 #property strict
-#property version   "1.00"
-#property description "Exports the connected broker's weekly trading and quote sessions."
+#property version   "1.10"
+#property description "Exports broker sessions and append-only raw clock evidence."
 
 input string InpSymbol = "";
 input int InpRefreshSeconds = 60;
 input int InpMaxSessionsPerDay = 32;
 
-#define SESSION_FOLDER "GoldBot"
-#define SESSION_FILE   "sessions.json"
-#define SESSION_TEMP   "sessions.json.tmp"
+#define SESSION_FOLDER       "GoldBot"
+#define SESSION_FILE         "sessions.json"
+#define SESSION_TEMP         "sessions.json.tmp"
 #define SESSION_SCHEMA_VERSION 1
 
-string g_symbol = "";
+#define CLOCK_HISTORY_FILE   "clock_history.csv"
+#define CLOCK_LOCK_FILE     "clock_history.writer.lock"
+#define CLOCK_SCHEMA_VERSION 1
 
+string g_symbol = "";
+string g_run_id = "";
+long g_sample_sequence = 0;
+int g_clock_lock_handle = INVALID_HANDLE;
+
+//+------------------------------------------------------------------+
+//| JSON escaping                                                    |
+//+------------------------------------------------------------------+
 string JsonEscape(const string value)
 {
    string escaped = "";
@@ -44,6 +55,339 @@ string JsonEscape(const string value)
    return escaped;
 }
 
+//+------------------------------------------------------------------+
+//| Sanitize text fields used in CSV                                 |
+//+------------------------------------------------------------------+
+string CleanCsvField(string value)
+{
+   StringReplace(value, ";", "_");
+   StringReplace(value, "\r", " ");
+   StringReplace(value, "\n", " ");
+   StringReplace(value, "\"", "'");
+
+   return value;
+}
+
+//+------------------------------------------------------------------+
+//| Acquire exclusive writer lock                                    |
+//+------------------------------------------------------------------+
+bool AcquireClockHistoryLock()
+{
+   FolderCreate(SESSION_FOLDER, FILE_COMMON);
+
+   ResetLastError();
+
+   g_clock_lock_handle = FileOpen(
+      SESSION_FOLDER + "\\" + CLOCK_LOCK_FILE,
+      FILE_WRITE | FILE_COMMON
+   );
+
+   if(g_clock_lock_handle == INVALID_HANDLE)
+   {
+      PrintFormat(
+         "Clock history writer lock unavailable. error=%d",
+         GetLastError()
+      );
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Release writer lock                                              |
+//+------------------------------------------------------------------+
+void ReleaseClockHistoryLock()
+{
+   if(g_clock_lock_handle != INVALID_HANDLE)
+   {
+      FileClose(g_clock_lock_handle);
+      g_clock_lock_handle = INVALID_HANDLE;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Expected CSV header                                              |
+//+------------------------------------------------------------------+
+string ClockHistoryHeader()
+{
+   return
+      "schema_version;run_id;sample_sequence;monotonic_ms;"
+      "time_gmt_epoch;time_trade_server_epoch;"
+      "time_current_quote_epoch;time_local_epoch;"
+      "server_utc_offset_seconds;clock_values_valid;"
+      "account_login;broker_server;symbol;"
+      "terminal_build;terminal_connected";
+}
+
+//+------------------------------------------------------------------+
+//| Validate existing CSV header                                     |
+//+------------------------------------------------------------------+
+bool ValidateClockHistoryHeader()
+{
+   string path = SESSION_FOLDER + "\\" + CLOCK_HISTORY_FILE;
+
+   if(!FileIsExist(path, FILE_COMMON))
+      return true;
+
+   ResetLastError();
+
+   int handle = FileOpen(
+      path,
+      FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON
+   );
+
+   if(handle == INVALID_HANDLE)
+   {
+      PrintFormat(
+         "Cannot read clock history header. error=%d",
+         GetLastError()
+      );
+      return false;
+   }
+
+   if(FileSize(handle) == 0)
+   {
+      FileClose(handle);
+      return true;
+   }
+
+   string header = FileReadString(handle);
+   FileClose(handle);
+
+   if(header != ClockHistoryHeader())
+   {
+      Print(
+         "Clock history header mismatch. "
+         "Existing file was preserved; append refused."
+      );
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Reject incomplete final CSV record                               |
+//+------------------------------------------------------------------+
+bool ValidateClockHistoryTail()
+{
+   string path = SESSION_FOLDER + "\\" + CLOCK_HISTORY_FILE;
+
+   if(!FileIsExist(path, FILE_COMMON))
+      return true;
+
+   ResetLastError();
+
+   int handle = FileOpen(
+      path,
+      FILE_READ | FILE_BIN | FILE_COMMON
+   );
+
+   if(handle == INVALID_HANDLE)
+   {
+      PrintFormat(
+         "Cannot inspect clock history tail. error=%d",
+         GetLastError()
+      );
+      return false;
+   }
+
+   long size = FileSize(handle);
+
+   if(size == 0)
+   {
+      FileClose(handle);
+      return true;
+   }
+
+   if(!FileSeek(handle, -1, SEEK_END))
+   {
+      Print("Cannot seek to clock history final byte.");
+      FileClose(handle);
+      return false;
+   }
+
+   uchar last_byte = (uchar)FileReadInteger(handle, CHAR_VALUE);
+   FileClose(handle);
+
+   if(last_byte != 10)
+   {
+      Print(
+         "Clock history has an incomplete final record. "
+         "No append was performed; existing evidence was preserved."
+      );
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Append one raw clock sample                                      |
+//+------------------------------------------------------------------+
+bool AppendClockHistorySample()
+{
+   if(g_clock_lock_handle == INVALID_HANDLE)
+   {
+      Print("Clock history lock is not held.");
+      return false;
+   }
+
+   if(!ValidateClockHistoryHeader())
+      return false;
+
+   if(!ValidateClockHistoryTail())
+      return false;
+
+   datetime gmt_now = TimeGMT();
+   datetime server_now = TimeTradeServer();
+   datetime quote_time = TimeCurrent();
+   datetime local_now = TimeLocal();
+
+   bool clock_values_valid =
+      (gmt_now > 0 && server_now > 0);
+
+   long offset_seconds = 0;
+
+   if(clock_values_valid)
+   {
+      offset_seconds =
+         (long)server_now - (long)gmt_now;
+   }
+
+   long account_login =
+      AccountInfoInteger(ACCOUNT_LOGIN);
+
+   string broker_server =
+      CleanCsvField(AccountInfoString(ACCOUNT_SERVER));
+
+   string symbol =
+      CleanCsvField(g_symbol);
+
+   int terminal_build =
+      (int)TerminalInfoInteger(TERMINAL_BUILD);
+
+   bool terminal_connected =
+      (bool)TerminalInfoInteger(TERMINAL_CONNECTED);
+
+   if(account_login <= 0 ||
+      StringLen(broker_server) == 0 ||
+      StringLen(symbol) == 0 ||
+      terminal_build <= 0)
+   {
+      Print(
+         "Clock sample identity is incomplete. "
+         "Sample rejected."
+      );
+      return false;
+   }
+
+   string path =
+      SESSION_FOLDER + "\\" + CLOCK_HISTORY_FILE;
+
+   ResetLastError();
+
+   int handle = FileOpen(
+      path,
+      FILE_READ | FILE_WRITE |
+      FILE_CSV | FILE_ANSI | FILE_COMMON,
+      ';'
+   );
+
+   if(handle == INVALID_HANDLE)
+   {
+      PrintFormat(
+         "Cannot open clock history for append. error=%d",
+         GetLastError()
+      );
+      return false;
+   }
+
+   if(FileSize(handle) == 0)
+   {
+      uint header_written = FileWrite(
+         handle,
+         "schema_version",
+         "run_id",
+         "sample_sequence",
+         "monotonic_ms",
+         "time_gmt_epoch",
+         "time_trade_server_epoch",
+         "time_current_quote_epoch",
+         "time_local_epoch",
+         "server_utc_offset_seconds",
+         "clock_values_valid",
+         "account_login",
+         "broker_server",
+         "symbol",
+         "terminal_build",
+         "terminal_connected"
+      );
+
+      if(header_written == 0)
+      {
+         Print("Clock history header write failed.");
+         FileClose(handle);
+         return false;
+      }
+
+      FileFlush(handle);
+   }
+
+   if(!FileSeek(handle, 0, SEEK_END))
+   {
+      Print("Clock history seek-to-end failed.");
+      FileClose(handle);
+      return false;
+   }
+
+   long next_sequence = g_sample_sequence + 1;
+
+   uint written = FileWrite(
+      handle,
+      CLOCK_SCHEMA_VERSION,
+      g_run_id,
+      next_sequence,
+      (long)GetTickCount(),
+      (long)gmt_now,
+      (long)server_now,
+      (long)quote_time,
+      (long)local_now,
+      offset_seconds,
+      clock_values_valid,
+      account_login,
+      broker_server,
+      symbol,
+      terminal_build,
+      terminal_connected
+   );
+
+   if(written == 0)
+   {
+      Print("Clock history sample write failed.");
+      FileClose(handle);
+      return false;
+   }
+
+   FileFlush(handle);
+   FileClose(handle);
+
+   g_sample_sequence = next_sequence;
+
+   PrintFormat(
+      "Clock sample appended: run=%s sequence=%I64d valid=%s",
+      g_run_id,
+      g_sample_sequence,
+      clock_values_valid ? "true" : "false"
+   );
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Append trading or quote sessions                                 |
+//+------------------------------------------------------------------+
 bool AppendSessionArray(
    string &json,
    const int day,
@@ -147,6 +491,9 @@ bool AppendSessionArray(
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| Build weekly schedule JSON                                       |
+//+------------------------------------------------------------------+
 bool BuildScheduleJson(string &json)
 {
    datetime server_now = TimeTradeServer();
@@ -197,6 +544,9 @@ bool BuildScheduleJson(string &json)
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| Publish schedule atomically                                      |
+//+------------------------------------------------------------------+
 bool PublishSchedule()
 {
    string json = "";
@@ -235,7 +585,10 @@ bool PublishSchedule()
 
    if(written != (uint)StringLen(json))
    {
-      Print("Incomplete schedule write. Existing published file was preserved.");
+      Print(
+         "Incomplete schedule write. "
+         "Existing published file was preserved."
+      );
       FileDelete(temp_path, FILE_COMMON);
       return false;
    }
@@ -266,6 +619,9 @@ bool PublishSchedule()
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| Initialization                                                   |
+//+------------------------------------------------------------------+
 int OnInit()
 {
    if(InpRefreshSeconds < 10 || InpRefreshSeconds > 3600)
@@ -291,9 +647,28 @@ int OnInit()
       return INIT_FAILED;
    }
 
+   if(!AcquireClockHistoryLock())
+      return INIT_FAILED;
+
+   g_run_id = StringFormat(
+      "%I64d_%u",
+      (long)TimeLocal(),
+      GetTickCount()
+   );
+
+   g_sample_sequence = 0;
+
    if(!PublishSchedule())
    {
       Print("Initial broker schedule export failed.");
+      ReleaseClockHistoryLock();
+      return INIT_FAILED;
+   }
+
+   if(!AppendClockHistorySample())
+   {
+      Print("Initial clock history sample failed.");
+      ReleaseClockHistoryLock();
       return INIT_FAILED;
    }
 
@@ -303,29 +678,43 @@ int OnInit()
          "Timer initialization failed. error=%d",
          GetLastError()
       );
+
+      ReleaseClockHistoryLock();
       return INIT_FAILED;
    }
 
    PrintFormat(
-      "GoldBot session bridge started for %s.",
-      g_symbol
+      "GoldBot session and clock bridge started for %s. run_id=%s",
+      g_symbol,
+      g_run_id
    );
 
    return INIT_SUCCEEDED;
 }
 
+//+------------------------------------------------------------------+
+//| Timer                                                            |
+//+------------------------------------------------------------------+
 void OnTimer()
 {
    if(!PublishSchedule())
       Print("Schedule refresh failed; previous file remains untouched.");
+
+   if(!AppendClockHistorySample())
+      Print("Clock history sample failed; existing history was preserved.");
 }
 
+//+------------------------------------------------------------------+
+//| Deinitialization                                                 |
+//+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
    EventKillTimer();
 
+   ReleaseClockHistoryLock();
+
    PrintFormat(
-      "GoldBot session bridge stopped. reason=%d",
+      "GoldBot session and clock bridge stopped. reason=%d",
       reason
    );
 }
