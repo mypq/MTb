@@ -48,67 +48,75 @@ def make_monitor(tmp_path, interval=0.01):
     )
 
 
-@pytest.mark.asyncio
-async def test_monitor_stops_cleanly(tmp_path):
-    monitor = make_monitor(tmp_path)
-    stop_event = asyncio.Event()
+def test_monitor_stops_cleanly(tmp_path):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
 
-    task = asyncio.create_task(monitor.run(stop_event))
+        task = asyncio.create_task(monitor.run(stop_event))
 
-    await asyncio.sleep(0.03)
-    stop_event.set()
-
-    await asyncio.wait_for(task, timeout=1.0)
-
-    assert monitor.is_running is False
-
-
-@pytest.mark.asyncio
-async def test_monitor_performs_initial_poll(tmp_path):
-    monitor = make_monitor(tmp_path)
-    stop_event = asyncio.Event()
-
-    task = asyncio.create_task(monitor.run(stop_event))
-
-    try:
-        for _ in range(100):
-            if monitor.snapshot().state == "ERROR":
-                break
-            await asyncio.sleep(0.01)
-
-        assert monitor.snapshot().state == "ERROR"
-        assert monitor.snapshot().error is not None
-    finally:
+        await asyncio.sleep(0.03)
         stop_event.set()
+
         await asyncio.wait_for(task, timeout=1.0)
 
+        assert monitor.is_running is False
 
-@pytest.mark.asyncio
-async def test_monitor_rejects_duplicate_run(tmp_path):
-    monitor = make_monitor(tmp_path)
-    stop_event = asyncio.Event()
-
-    first_task = asyncio.create_task(monitor.run(stop_event))
-
-    try:
-        for _ in range(100):
-            if monitor.is_running:
-                break
-            await asyncio.sleep(0.001)
-
-        with pytest.raises(RuntimeError):
-            await monitor.run(asyncio.Event())
-    finally:
-        stop_event.set()
-        await asyncio.wait_for(first_task, timeout=1.0)
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-async def test_monitor_rejects_invalid_stop_event(tmp_path):
-    monitor = make_monitor(tmp_path)
+def test_monitor_performs_initial_poll(tmp_path):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
 
-    with pytest.raises(TypeError):
-        await monitor.run(None)
+        task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            for _ in range(100):
+                if monitor.snapshot().state == "ERROR":
+                    break
+                await asyncio.sleep(0.01)
+
+            assert monitor.snapshot().state == "ERROR"
+            assert monitor.snapshot().error is not None
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(scenario())
+
+
+def test_monitor_rejects_duplicate_run(tmp_path):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
+
+        first_task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            for _ in range(100):
+                if monitor.is_running:
+                    break
+                await asyncio.sleep(0.001)
+
+            with pytest.raises(RuntimeError):
+                await monitor.run(asyncio.Event())
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(first_task, timeout=1.0)
+
+    asyncio.run(scenario())
+
+
+def test_monitor_rejects_invalid_stop_event(tmp_path):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+
+        with pytest.raises(TypeError):
+            await monitor.run(None)
+
+    asyncio.run(scenario())
 
 
 def test_monitor_rejects_invalid_interval(tmp_path):
