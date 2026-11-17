@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -24,6 +25,18 @@ from backend.market_data.session_calendar import (
 )
 from backend.market_data.validator import MarketDataValidator
 from backend.market_data.broker_clock import BrokerClockCalibrator
+from backend.market_data.broker_offset_detector import (
+    BrokerOffsetDetector,
+)
+from backend.market_data.broker_offset_monitor import (
+    BrokerOffsetEvidenceMonitor,
+)
+from backend.market_data.broker_offset_registry import (
+    BrokerOffsetRegistry,
+)
+from backend.market_data.broker_offset_service import (
+    BrokerOffsetEvidenceService,
+)
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
@@ -99,8 +112,59 @@ async def lifespan(app: FastAPI):
         maximum_offset_change_seconds=1.0,
     )
 
+    # Broker-offset evidence pipeline.
+    # This pipeline records candidates only. It does not authorize
+    # offsets for candle timestamps, market calendars, or trading.
+    broker_offset_service = None
+    broker_offset_monitor = None
+
+    clock_history_file = getattr(
+        settings,
+        "MT5_CLOCK_HISTORY_FILE",
+        None,
+    )
+
+    if clock_history_file:
+        broker_offset_detector = BrokerOffsetDetector(
+            ntp_verifier,
+        )
+
+        broker_offset_registry = BrokerOffsetRegistry(
+            settings.BROKER_OFFSET_REGISTRY_FILE,
+        )
+
+        broker_offset_service = BrokerOffsetEvidenceService(
+            clock_history_file,
+            broker_offset_detector,
+            broker_offset_registry,
+        )
+
+        broker_offset_monitor = BrokerOffsetEvidenceMonitor(
+            broker_offset_service,
+            interval_seconds=(
+                settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS
+            ),
+        )
+
+        logger.info(
+            "Broker offset evidence pipeline configured: "
+            "history_file=%s registry_file=%s "
+            "interval_seconds=%s authorization=DISABLED",
+            clock_history_file,
+            settings.BROKER_OFFSET_REGISTRY_FILE,
+            settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS,
+        )
+    else:
+        logger.warning(
+            "Broker offset evidence monitor is disabled: "
+            "MT5_CLOCK_HISTORY_FILE is not configured."
+        )
+
     ntp_stop_event = asyncio.Event()
     ntp_task = None
+
+    broker_offset_stop_event = asyncio.Event()
+    broker_offset_task = None
 
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
@@ -176,6 +240,8 @@ async def lifespan(app: FastAPI):
     app.state.chrony_status_service = chrony_service
     app.state.ntp_verification_monitor = ntp_verification_monitor
     app.state.broker_clock_calibrator = broker_clock_calibrator
+    app.state.broker_offset_service = broker_offset_service
+    app.state.broker_offset_monitor = broker_offset_monitor
     app.state.database = database
     app.state.database_backup_service = None
 
@@ -187,6 +253,16 @@ async def lifespan(app: FastAPI):
             ntp_verification_monitor.run(ntp_stop_event),
             name="independent-ntp-verification",
         )
+
+        # Start broker evidence collection only when its history
+        # source has explicitly been configured.
+        if broker_offset_monitor is not None:
+            broker_offset_task = asyncio.create_task(
+                broker_offset_monitor.run(
+                    broker_offset_stop_event
+                ),
+                name="broker-offset-evidence-monitor",
+            )
 
         backup_service = DatabaseBackupService(database)
         app.state.database_backup_service = backup_service
@@ -327,7 +403,16 @@ async def lifespan(app: FastAPI):
     finally:
         try:
             startup_stop_event.set()
+            broker_offset_stop_event.set()
             ntp_stop_event.set()
+
+            if broker_offset_task is not None:
+                try:
+                    await broker_offset_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop broker offset evidence monitor."
+                    )
 
             if ntp_task is not None:
                 try:
@@ -449,6 +534,12 @@ def create_app() -> FastAPI:
             None,
         )
 
+        broker_offset_monitor = getattr(
+            application.state,
+            "broker_offset_monitor",
+            None,
+        )
+
         connection = adapter.connection_status()
         chrony = chrony_service.snapshot()
 
@@ -472,6 +563,37 @@ def create_app() -> FastAPI:
                 "last_error": None,
             }
 
+        if broker_offset_monitor is not None:
+            offset_snapshot = broker_offset_monitor.snapshot()
+
+            broker_offset_status = {
+                "enabled": True,
+                "running": broker_offset_monitor.is_running,
+                "state": offset_snapshot.state,
+                "samples_processed": offset_snapshot.samples_processed,
+                "last_decision": (
+                    offset_snapshot.last_decision.status.value
+                    if offset_snapshot.last_decision is not None
+                    else None
+                ),
+                "last_error": offset_snapshot.error,
+                "candidate_recorded": (
+                    offset_snapshot.last_record is not None
+                ),
+                "authorization": "DISABLED",
+            }
+        else:
+            broker_offset_status = {
+                "enabled": False,
+                "running": False,
+                "state": "DISABLED",
+                "samples_processed": 0,
+                "last_decision": None,
+                "last_error": None,
+                "candidate_recorded": False,
+                "authorization": "DISABLED",
+            }
+
         return {
             "application": settings.APP_NAME,
             "version": __version__,
@@ -486,6 +608,7 @@ def create_app() -> FastAPI:
             "mt5_connection": connection.model_dump(mode="json"),
             "mt5_monitor_running": monitor.is_running,
             "broker_tick_monitor": broker_tick_status,
+            "broker_offset_evidence": broker_offset_status,
             "time_sync": {
                 "provider": "chrony",
                 "available": chrony.available,
