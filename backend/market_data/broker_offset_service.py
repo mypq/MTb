@@ -75,7 +75,7 @@ class BrokerOffsetEvidenceService:
         self._state = "NOT_STARTED"
 
     def poll_once(self) -> BrokerOffsetServiceSnapshot:
-        """Read the append-only history and process samples not yet seen."""
+        """Read history and process samples not previously processed."""
 
         with self._lock:
             try:
@@ -83,25 +83,16 @@ class BrokerOffsetEvidenceService:
                     self._clock_history_path
                 )
 
-                if not samples:
-                    raise ClockHistoryError(
-                        "Clock history contains no samples."
-                    )
-
-                latest = samples[-1]
-                latest_signature = (
-                    latest.run_id,
-                    latest.sample_sequence,
-                    latest.monotonic_ms,
-                )
+                latest_signature = self._signature(samples[-1])
 
                 history_was_replaced = (
                     self._processed_count > len(samples)
                     or (
-                        self._last_sample_signature is not None
-                        and self._processed_count == len(samples)
-                        and latest_signature
-                        != self._last_sample_signature
+                        self._processed_count > 0
+                        and len(samples) >= self._processed_count
+                        and self._signature(
+                            samples[self._processed_count - 1]
+                        ) != self._last_sample_signature
                     )
                 )
 
@@ -110,20 +101,12 @@ class BrokerOffsetEvidenceService:
                     self._processed_count = 0
                     self._last_sample_signature = None
 
-                    # On startup, evaluate only the latest three samples.
-                    # Old history must not be replayed against current NTP.
+                    # Do not replay old history against current NTP.
                     start_index = max(0, len(samples) - 3)
                 else:
                     start_index = self._processed_count
 
-                if start_index > len(samples):
-                    raise ClockHistoryError(
-                        "Clock history cursor is outside the file."
-                    )
-
-                new_samples = samples[start_index:]
-
-                for sample in new_samples:
+                for sample in samples[start_index:]:
                     self._process_sample(sample)
 
                 self._processed_count = len(samples)
@@ -138,24 +121,41 @@ class BrokerOffsetEvidenceService:
                     self._state = "COLLECTING"
 
             except Exception as exc:
+                # Do not continue from a partially processed batch.
+                self._detector.reset()
+                self._processed_count = 0
+                self._last_sample_signature = None
                 self._last_error = (
                     f"{type(exc).__name__}: {exc}"
                 )
                 self._state = "ERROR"
 
-            return self.snapshot()
+            return self._snapshot_unlocked()
 
     def snapshot(self) -> BrokerOffsetServiceSnapshot:
         """Return the latest service state."""
 
         with self._lock:
-            return BrokerOffsetServiceSnapshot(
-                state=self._state,
-                samples_processed=self._processed_count,
-                last_decision=self._last_decision,
-                last_record=self._last_record,
-                error=self._last_error,
-            )
+            return self._snapshot_unlocked()
+
+    def _snapshot_unlocked(self) -> BrokerOffsetServiceSnapshot:
+        return BrokerOffsetServiceSnapshot(
+            state=self._state,
+            samples_processed=self._processed_count,
+            last_decision=self._last_decision,
+            last_record=self._last_record,
+            error=self._last_error,
+        )
+
+    @staticmethod
+    def _signature(
+        sample: MT5ClockHistorySample,
+    ) -> tuple[str, int, int]:
+        return (
+            sample.run_id,
+            sample.sample_sequence,
+            sample.monotonic_ms,
+        )
 
     def _process_sample(
         self,
