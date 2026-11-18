@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -20,6 +19,8 @@ from backend.mt5 import MT5Adapter, MT5ConnectionState
 
 
 UTC = timezone.utc
+
+# Test fixture only. This is not a production clock setting.
 BROKER_OFFSET_SECONDS = 7200
 
 
@@ -47,7 +48,9 @@ def make_rate(timestamp: int) -> dict:
     }
 
 
-def make_mt5_module() -> Mock:
+def make_mt5_module(
+    raw_closed_timestamps: list[int],
+) -> Mock:
     mt5 = Mock()
 
     mt5.initialize.return_value = True
@@ -95,13 +98,16 @@ def make_mt5_module() -> Mock:
                 (int(now_epoch) // 300) * 300 - 300
             )
 
+            timestamps = [
+                latest_closed - 300 + BROKER_OFFSET_SECONDS,
+                latest_closed + BROKER_OFFSET_SECONDS,
+            ]
+
+            raw_closed_timestamps.extend(timestamps)
+
             return [
-                make_rate(
-                    latest_closed - 300 + BROKER_OFFSET_SECONDS
-                ),
-                make_rate(
-                    latest_closed + BROKER_OFFSET_SECONDS
-                ),
+                make_rate(timestamp)
+                for timestamp in timestamps
             ]
 
         raise AssertionError(
@@ -129,6 +135,7 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 
     ntp_result = verifier.verify()
     assert ntp_result.verified is True
+    assert ntp_result.sample_count == 3
 
     calibrator = BrokerCandleClockCalibrator(
         verifier,
@@ -138,7 +145,8 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
         maximum_sample_age_seconds=30.0,
     )
 
-    mt5 = make_mt5_module()
+    raw_closed_timestamps: list[int] = []
+    mt5 = make_mt5_module(raw_closed_timestamps)
 
     adapter = MT5Adapter(
         settings=make_settings(),
@@ -150,80 +158,95 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 
     base_monotonic = 1000.0
 
-    with patch(
-        "backend.market_data.broker_candle_clock.monotonic",
-        side_effect=(
-            base_monotonic,
-            base_monotonic + 0.3,
-            base_monotonic + 0.6,
-        ),
-    ):
-        snapshot = None
-
-        for _ in range(3):
-            sample = adapter.get_active_candle_clock_sample(
-                "XAUUSD"
-            )
-
-            snapshot = calibrator.observe(**sample)
-
-    assert snapshot is not None
-    assert snapshot.status == "VERIFIED"
-    assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
-
-    adapter.set_candle_clock_calibrator(calibrator)
-
-    database = Database(
-        f"sqlite:///{(tmp_path / 'candle_utc.db').as_posix()}"
-    )
-    database.initialize()
-    DatabaseBase.metadata.create_all(database.engine)
-
     try:
-        repository = MarketDataRepository(database)
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            side_effect=(
+                base_monotonic,
+                base_monotonic + 0.3,
+                base_monotonic + 0.6,
+            ),
+        ):
+            snapshot = None
 
-        service = MarketDataService(
-            source=adapter,
-            validator=MarketDataValidator(),
+            for _ in range(3):
+                sample = adapter.get_active_candle_clock_sample(
+                    "XAUUSD"
+                )
+
+                snapshot = calibrator.observe(**sample)
+
+        assert snapshot is not None
+        assert snapshot.status == "VERIFIED"
+        assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
+        assert snapshot.sample_count == 3
+
+        adapter.set_candle_clock_calibrator(calibrator)
+
+        database = Database(
+            f"sqlite:///{(tmp_path / 'candle_utc.db').as_posix()}"
         )
+        database.initialize()
+        DatabaseBase.metadata.create_all(database.engine)
 
-        collector = MarketDataCollector(
-            service=service,
-            repository=repository,
-            symbol="XAUUSD",
-            timeframe="M5",
-            count=2,
-        )
+        try:
+            repository = MarketDataRepository(database)
 
-        save_result = collector.collect_once()
-
-        assert save_result is not None
-        assert save_result.inserted_candles == 2
-
-        stored_candles = repository.get_history(
-            symbol="XAUUSD",
-            timeframe="M5",
-            count=2,
-        )
-
-        assert len(stored_candles) == 2
-
-        for candle in stored_candles:
-            assert candle.timestamp.tzinfo is not None
-            assert candle.timestamp.utcoffset().total_seconds() == 0
-
-            raw_broker_timestamp = int(
-                candle.timestamp.timestamp()
-                + BROKER_OFFSET_SECONDS
+            service = MarketDataService(
+                source=adapter,
+                validator=MarketDataValidator(),
             )
 
-            assert (
-                raw_broker_timestamp - BROKER_OFFSET_SECONDS
-                == int(candle.timestamp.timestamp())
+            collector = MarketDataCollector(
+                service=service,
+                repository=repository,
+                symbol="XAUUSD",
+                timeframe="M5",
+                count=2,
             )
 
-        assert stored_candles[0].timestamp < stored_candles[1].timestamp
+            save_result = collector.collect_once()
+
+            assert save_result is not None
+            assert save_result.inserted_candles == 2
+            assert save_result.duplicate_candles == 0
+
+            stored_candles = repository.get_history(
+                symbol="XAUUSD",
+                timeframe="M5",
+                count=2,
+            )
+
+            assert len(stored_candles) == 2
+            assert len(raw_closed_timestamps) == 2
+
+            expected_utc_epochs = sorted(
+                raw_timestamp - BROKER_OFFSET_SECONDS
+                for raw_timestamp in raw_closed_timestamps
+            )
+
+            stored_utc_epochs = []
+
+            for candle in stored_candles:
+                assert candle.timestamp.tzinfo is not None
+                assert candle.timestamp.utcoffset() == (
+                    datetime.now(UTC).utcoffset()
+                )
+
+                stored_utc_epochs.append(
+                    int(candle.timestamp.timestamp())
+                )
+
+            # Compare the original raw MT5 timestamps directly
+            # with the timestamps actually persisted in the database.
+            assert stored_utc_epochs == expected_utc_epochs
+
+            assert stored_candles[0].timestamp < (
+                stored_candles[1].timestamp
+            )
+
+        finally:
+            database.dispose()
 
     finally:
-        database.dispose()
         adapter.shutdown()
