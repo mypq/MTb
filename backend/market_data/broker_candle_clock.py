@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from collections import deque
@@ -338,18 +337,24 @@ class BrokerCandleClockCalibrator:
                 return snapshot, None
 
             evidence = self._ntp_evidence
+            current_evidence = self._ntp.last_verification()
 
             if (
                 evidence is None
+                or current_evidence is None
+                or evidence != current_evidence
                 or not evidence.verified
+                or evidence.checked_at_unix is None
                 or evidence.offset_seconds is None
                 or evidence.uncertainty_seconds is None
                 or evidence.sample_count < 3
+                or len(evidence.servers) < 3
+                or len(set(evidence.servers)) < 3
                 or not self._ntp.is_trusted()
             ):
                 invalid = self._invalidate(
                     "DEGRADED",
-                    "Trusted NTP evidence is unavailable or expired.",
+                    "Trusted NTP evidence is unavailable, changed, or expired.",
                 )
                 return invalid, None
 
