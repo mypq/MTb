@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -115,6 +114,63 @@ class MarketCandle(BaseModel):
         return self
 
 
+class MarketDataClockEvidence(BaseModel):
+    """Trusted clock evidence bound to one MT5 candle batch."""
+
+    model_config = ConfigDict(frozen=True)
+
+    verified: bool
+
+    account_login: int = Field(gt=0)
+    broker_server: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+    terminal_build: int = Field(gt=0)
+
+    checked_at: datetime
+    ntp_offset_seconds: float
+    ntp_uncertainty_seconds: float = Field(ge=0)
+    ntp_sample_count: int = Field(ge=3)
+    ntp_servers: tuple[str, ...] = Field(min_length=3)
+
+    candle_offset_seconds: float
+    candle_uncertainty_seconds: float = Field(ge=0)
+    calibration_sample_count: int = Field(ge=3)
+
+    @field_validator("checked_at")
+    @classmethod
+    def require_utc_checked_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Clock evidence time must be timezone-aware.")
+
+        if value.utcoffset().total_seconds() != 0:
+            raise ValueError("Clock evidence time must already be UTC.")
+
+        return value.astimezone(timezone.utc)
+
+    @field_validator("verified", mode="before")
+    @classmethod
+    def require_strict_verified_boolean(cls, value):
+        if not isinstance(value, bool):
+            raise ValueError("verified must be a boolean.")
+        return value
+
+    @field_validator("ntp_offset_seconds", "ntp_uncertainty_seconds",
+                     "candle_offset_seconds", "candle_uncertainty_seconds")
+    @classmethod
+    def require_finite_clock_values(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("Clock evidence values must be finite.")
+        return value
+
+    @field_validator("broker_server", "symbol")
+    @classmethod
+    def normalize_clock_identity(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Clock evidence identity cannot be empty.")
+        return normalized
+
+
 class CandleBatch(BaseModel):
     """Chronologically ordered candles for one symbol and timeframe."""
 
@@ -126,6 +182,7 @@ class CandleBatch(BaseModel):
 
     received_at: datetime
     source: str = Field(min_length=1)
+    clock_evidence: MarketDataClockEvidence | None = None
 
     @field_validator("received_at")
     @classmethod
