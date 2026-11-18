@@ -1584,3 +1584,42 @@ def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
     assert app.state._test_workers[0].stop_calls == 1
     assert "adapter.shutdown" not in events
     assert "database.dispose" in events
+
+def test_single_candle_clock_read_error_does_not_reset_calibration(
+    monkeypatch,
+):
+    stop_event = asyncio.Event()
+
+    class Calibrator:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset(self):
+            self.reset_calls += 1
+
+    calibrator = Calibrator()
+
+    class Adapter:
+        def get_active_candle_clock_sample(self, symbol):
+            raise RuntimeError("Simulated temporary MT5 read failure")
+
+    async def fail_one_read(function, *args):
+        stop_event.set()
+        raise RuntimeError("Simulated temporary MT5 read failure")
+
+    monkeypatch.setattr(
+        main.asyncio,
+        "to_thread",
+        fail_one_read,
+    )
+
+    asyncio.run(
+        main._candle_clock_calibration_loop(
+            Adapter(),
+            calibrator,
+            "XAUUSD",
+            stop_event,
+        )
+    )
+
+    assert calibrator.reset_calls == 0
