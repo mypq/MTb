@@ -1401,3 +1401,91 @@ def test_broker_time_sample_rejects_invalid_account_identity():
         adapter.get_broker_time_sample("XAUUSD")
 
     mt5.symbol_info_tick.assert_not_called()
+def test_closed_candles_are_blocked_after_ntp_trust_is_lost():
+    adapter, mt5 = make_connected_adapter()
+
+    try:
+        calibrator = adapter._candle_clock_calibrator
+        assert calibrator is not None
+
+        mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+        # Simulate loss of independent NTP verification.
+        calibrator._ntp.reset()
+
+        with pytest.raises(
+            MT5AdapterError,
+            match="Candle clock is not verified",
+        ):
+            adapter.get_closed_candles(
+                "XAUUSD",
+                "M5",
+                1,
+            )
+
+    finally:
+        adapter.shutdown()
+
+
+def test_closed_candles_are_blocked_when_calibration_is_stale():
+    adapter, mt5 = make_connected_adapter()
+
+    try:
+        mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+        # Simulate a calibration older than its configured maximum age.
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            return_value=time.monotonic() + 100.0,
+        ):
+            with pytest.raises(
+                MT5AdapterError,
+                match="Candle clock is not verified",
+            ):
+                adapter.get_closed_candles(
+                    "XAUUSD",
+                    "M5",
+                    1,
+                )
+
+    finally:
+        adapter.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("identity_field", "new_value"),
+    [
+        ("login", 987654),
+        ("server", "Different-Server"),
+    ],
+)
+def test_closed_candles_are_blocked_after_broker_identity_changes(
+    identity_field,
+    new_value,
+):
+    adapter, mt5 = make_connected_adapter()
+
+    try:
+        mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+        account = mt5.account_info.return_value
+        setattr(account, identity_field, new_value)
+
+        with pytest.raises(
+            MT5AdapterError,
+            match="Candle clock identity verification failed",
+        ):
+            adapter.get_closed_candles(
+                "XAUUSD",
+                "M5",
+                1,
+            )
+
+        # The old calibration must not remain usable.
+        snapshot = adapter._candle_clock_calibrator.snapshot()
+
+        assert snapshot.status == "UNVERIFIED"
+        assert snapshot.offset_seconds is None
+
+    finally:
+        adapter.shutdown()
