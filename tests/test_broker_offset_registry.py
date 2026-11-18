@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import (
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+)
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -89,6 +92,19 @@ def decision_with_run_id(
             for sample in decision.evidence_samples
         ),
     )
+
+
+def append_candidate_in_process(args):
+    path, decision, recorded_at = args
+
+    registry = BrokerOffsetRegistry(path)
+
+    record = registry.append_candidate(
+        decision,
+        recorded_at_utc=recorded_at,
+    )
+
+    return record.record_sequence, record.run_id
 
 
 def make_v1_record(sequence: int = 1) -> dict:
@@ -607,6 +623,56 @@ def test_concurrent_appends_keep_unique_sequences(tmp_path) -> None:
     assert len({item.run_id for item in records}) == 2
     assert records[0].event_type == "BASELINE"
     assert records[1].event_type == "CONFIRMATION"
+
+
+def test_multiprocess_appends_keep_unique_sequences(
+    tmp_path,
+) -> None:
+    path = str(tmp_path / "multiprocess_offsets.jsonl")
+
+    jobs = [
+        (
+            path,
+            decision_with_run_id(
+                make_decision(),
+                f"process-run-{index:03d}",
+            ),
+            BASE_TIME,
+        )
+        for index in range(1, 9)
+    ]
+
+    with ProcessPoolExecutor(max_workers=4) as executor:
+        results = list(
+            executor.map(
+                append_candidate_in_process,
+                jobs,
+            )
+        )
+
+    records = BrokerOffsetRegistry(path).load()
+
+    assert len(results) == 8
+    assert len(records) == 8
+
+    assert sorted(
+        sequence for sequence, _ in results
+    ) == list(range(1, 9))
+
+    assert [
+        record.record_sequence for record in records
+    ] == list(range(1, 9))
+
+    assert len({
+        record.run_id for record in records
+    }) == 8
+
+    assert records[0].event_type == "BASELINE"
+
+    assert all(
+        record.event_type == "CONFIRMATION"
+        for record in records[1:]
+    )
 
 
 def test_truncated_trailing_record_is_rejected(tmp_path) -> None:
