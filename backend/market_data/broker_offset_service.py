@@ -16,7 +16,6 @@ from backend.market_data.broker_offset_registry import (
     BrokerOffsetRegistry,
 )
 from backend.market_data.clock_history import (
-    ClockHistoryError,
     MT5ClockHistorySample,
     read_clock_history,
 )
@@ -32,9 +31,9 @@ class BrokerOffsetServiceSnapshot:
 
 
 class BrokerOffsetEvidenceService:
-    """Process new SessionBridge samples and persist valid offset candidates.
+    """Process new SessionBridge samples and persist offset transitions.
 
-    This service records candidates only. It does not authorize an offset
+    This service records evidence only. It does not authorize an offset
     for market-session calculations and never modifies candle timestamps.
     """
 
@@ -101,10 +100,14 @@ class BrokerOffsetEvidenceService:
                     self._processed_count = 0
                     self._last_sample_signature = None
 
-                    # Do not replay old history against current NTP.
+                    # Only the latest three samples are eligible after
+                    # startup or file replacement. Old evidence must not
+                    # be replayed against a new NTP verification.
                     start_index = max(0, len(samples) - 3)
                 else:
                     start_index = self._processed_count
+
+                self._state = "COLLECTING"
 
                 for sample in samples[start_index:]:
                     self._process_sample(sample)
@@ -113,15 +116,14 @@ class BrokerOffsetEvidenceService:
                 self._last_sample_signature = latest_signature
                 self._last_error = None
 
-                if self._last_record is not None:
-                    self._state = "CANDIDATE_RECORDED"
-                elif self._last_decision is not None:
-                    self._state = self._last_decision.status.value
-                else:
-                    self._state = "COLLECTING"
+                if not samples[start_index:]:
+                    if self._last_decision is not None:
+                        self._state = self._last_decision.status.value
+                    else:
+                        self._state = "COLLECTING"
 
             except Exception as exc:
-                # Do not continue from a partially processed batch.
+                # A partial batch must never be treated as fully processed.
                 self._detector.reset()
                 self._processed_count = 0
                 self._last_sample_signature = None
@@ -165,6 +167,7 @@ class BrokerOffsetEvidenceService:
         self._last_decision = decision
 
         if not decision.candidate_ready:
+            self._state = decision.status.value
             return
 
         if (
@@ -175,20 +178,27 @@ class BrokerOffsetEvidenceService:
             self._state = "INVALID_CANDIDATE"
             return
 
-        existing_records = self._registry.load()
-
-        duplicate = any(
-            record.run_id == decision.run_id
-            and record.identity == decision.identity
-            and record.offset_seconds == decision.offset_seconds
-            for record in existing_records
+        latest = self._registry.latest(
+            identity=decision.identity
         )
 
-        if duplicate:
+        # Compare only with the latest state for this identity.
+        # Searching the entire history would incorrectly suppress a
+        # legitimate return to an offset recorded in the past.
+        if (
+            latest is not None
+            and latest.offset_seconds == decision.offset_seconds
+        ):
             self._state = "CANDIDATE_ALREADY_RECORDED"
             return
 
         self._last_record = self._registry.append_candidate(
             decision
         )
-        self._state = "CANDIDATE_RECORDED"
+
+        if self._last_record.event_type == "BASELINE":
+            self._state = "BASELINE_RECORDED"
+        elif self._last_record.event_type == "OFFSET_CHANGE":
+            self._state = "OFFSET_CHANGE_RECORDED"
+        else:
+            self._state = "CANDIDATE_RECORDED"
