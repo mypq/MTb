@@ -1183,6 +1183,10 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
 
     mt5.symbol_info_tick.assert_called_once_with("XAUUSD")
 
+    # Reconnection requires a fresh, independently verified
+    # candle-clock calibration before candle reads are allowed.
+    configure_test_candle_clock(adapter)
+
     # Existing market-data reads must also work after recovery.
     timestamp = int(
         (
