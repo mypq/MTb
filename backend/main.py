@@ -673,8 +673,43 @@ def create_app() -> FastAPI:
             None,
         )
 
+        broker_candle_clock_calibrator = getattr(
+            application.state,
+            "broker_candle_clock_calibrator",
+            None,
+        )
+
         connection = adapter.connection_status()
         chrony = chrony_service.snapshot()
+
+        if broker_candle_clock_calibrator is not None:
+            candle_clock_snapshot = (
+                broker_candle_clock_calibrator.snapshot()
+            )
+
+            broker_candle_clock_status = {
+                "status": candle_clock_snapshot.status,
+                "symbol": candle_clock_snapshot.symbol,
+                "account_login": candle_clock_snapshot.account_login,
+                "broker_server": candle_clock_snapshot.broker_server,
+                "offset_seconds": candle_clock_snapshot.offset_seconds,
+                "uncertainty_seconds": (
+                    candle_clock_snapshot.uncertainty_seconds
+                ),
+                "sample_count": candle_clock_snapshot.sample_count,
+                "reason": candle_clock_snapshot.reason,
+            }
+        else:
+            broker_candle_clock_status = {
+                "status": "UNVERIFIED",
+                "symbol": None,
+                "account_login": None,
+                "broker_server": None,
+                "offset_seconds": None,
+                "uncertainty_seconds": None,
+                "sample_count": 0,
+                "reason": "Candle clock calibrator is unavailable.",
+            }
 
         if broker_tick_worker is not None:
             broker_tick_status = broker_tick_worker.status()
@@ -741,6 +776,9 @@ def create_app() -> FastAPI:
             "mt5_connection": connection.model_dump(mode="json"),
             "mt5_monitor_running": monitor.is_running,
             "broker_tick_monitor": broker_tick_status,
+            "broker_candle_clock_calibration": (
+                broker_candle_clock_status
+            ),
             "broker_offset_evidence": broker_offset_status,
             "time_sync": {
                 "provider": "chrony",
