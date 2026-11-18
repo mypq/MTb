@@ -1,4 +1,3 @@
-
 """Append-only broker offset registry with backward-compatible v1/v2/v3."""
 
 from __future__ import annotations
@@ -126,8 +125,16 @@ class BrokerOffsetRegistry:
                     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
     def load(self) -> tuple[BrokerOffsetRecord, ...]:
-        """Read and deeply validate the complete registry."""
-        return self._load_unlocked()
+        """Read and deeply validate the complete registry under a shared lock."""
+        try:
+            with self._exclusive_file_lock():
+                return self._load_unlocked()
+        except BrokerOffsetRegistryError:
+            raise
+        except OSError as exc:
+            raise BrokerOffsetRegistryError(
+                "Unable to read broker offset registry."
+            ) from exc
 
     def _load_unlocked(self) -> tuple[BrokerOffsetRecord, ...]:
         if not self.path.exists():
@@ -633,11 +640,6 @@ class BrokerOffsetRegistry:
                     "Evidence raw clock fields do not match server offset."
                 )
 
-            if sample["server_utc_offset_seconds"] != offset:
-                raise BrokerOffsetRegistryError(
-                    "Evidence server offset does not match candidate."
-                )
-
             calculated = cls._finite(
                 sample["calculated_offset_seconds"],
                 "calculated_offset_seconds",
@@ -657,6 +659,17 @@ class BrokerOffsetRegistry:
             if ntp_uncertainty < 0 or ntp_checked <= 0:
                 raise BrokerOffsetRegistryError(
                     "Evidence NTP values are invalid."
+                )
+
+            corrected_calculated = (
+                sample["time_trade_server_epoch"]
+                - sample["time_gmt_epoch"]
+                - ntp_offset
+            )
+
+            if abs(calculated - corrected_calculated) > 0.001:
+                raise BrokerOffsetRegistryError(
+                    "Evidence calculated offset conflicts with raw clocks and NTP."
                 )
 
             if abs(calculated - offset) > 1.5:
