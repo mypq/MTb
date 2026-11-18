@@ -16,6 +16,7 @@ class FakeAdapter:
         self.settings = settings
         self.events = events
         self.connect_error = connect_error
+        self.candle_clock_calibrator = None
 
     def connect(self):
         self.events.append("adapter.connect")
@@ -28,6 +29,9 @@ class FakeAdapter:
 
     def connection_status(self):
         return SimpleNamespace(model_dump=lambda mode: {}, state="CONNECTED")
+
+    def set_candle_clock_calibrator(self, calibrator):
+        self.candle_clock_calibrator = calibrator
 
 
 class FakeMonitor:
@@ -431,6 +435,7 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             self.settings = settings
             self.connect_calls = 0
             self.state = MT5ConnectionState.DISCONNECTED
+            self.candle_clock_calibrator = None
 
         def connect(self):
             with adapter_lock:
@@ -454,6 +459,9 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
 
         def shutdown(self):
             events.append("adapter.shutdown")
+
+        def set_candle_clock_calibrator(self, calibrator):
+            self.candle_clock_calibrator = calibrator
 
     class ControlledWorker:
         def __init__(
@@ -591,6 +599,7 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
             self.events = events
             self.connect_calls = 0
             self.state = "DISCONNECTED"
+            self.candle_clock_calibrator = None
 
         def connect(self):
             self.connect_calls += 1
@@ -611,6 +620,9 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
 
         def shutdown(self):
             self.events.append("adapter.shutdown")
+
+        def set_candle_clock_calibrator(self, calibrator):
+            self.candle_clock_calibrator = calibrator
 
     class RecoveringMonitor:
         def __init__(self, adapter, interval_seconds):
