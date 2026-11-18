@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -27,14 +26,16 @@ BASE_EPOCH = int(BASE_TIME.timestamp())
 IDENTITY = (337260380, "XMGlobal-MT5 9", "GOLD", 6316)
 
 
-def make_verifier() -> NtpTimeVerifier:
+def make_verifier(
+    ntp_offset_seconds: float = 0.0,
+) -> NtpTimeVerifier:
     verifier = NtpTimeVerifier(
         servers=("ntp-a", "ntp-b", "ntp-c"),
         wall_clock=lambda: float(BASE_EPOCH),
         monotonic_clock=lambda: 100.0,
         query=lambda server: NtpSample(
             server=server,
-            offset_seconds=0.0,
+            offset_seconds=ntp_offset_seconds,
             round_trip_seconds=0.02,
             root_dispersion_seconds=0.01,
         ),
@@ -63,8 +64,12 @@ def make_sample(sequence: int) -> MT5ClockHistorySample:
     )
 
 
-def make_decision() -> BrokerOffsetDecision:
-    detector = BrokerOffsetDetector(make_verifier())
+def make_decision(
+    ntp_offset_seconds: float = 0.0,
+) -> BrokerOffsetDecision:
+    detector = BrokerOffsetDetector(
+        make_verifier(ntp_offset_seconds)
+    )
     detector.observe(make_sample(1))
     detector.observe(make_sample(2))
     result = detector.observe(make_sample(3))
@@ -148,6 +153,37 @@ def test_append_and_load_v2_candidate(tmp_path) -> None:
     assert record.evidence_start_utc is not None
     assert record.evidence_end_utc is not None
     assert record.evidence_end_utc > record.evidence_start_utc
+
+
+def test_registry_accepts_nonzero_ntp_offset_correction(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(
+        tmp_path / "offsets.jsonl"
+    )
+
+    decision = make_decision(
+        ntp_offset_seconds=0.25
+    )
+
+    record = registry.append_candidate(
+        decision,
+        recorded_at_utc=BASE_TIME,
+    )
+
+    assert record.offset_seconds == 7200
+    assert record.ntp_evidence["offset_seconds"] == 0.25
+
+    assert len(record.evidence_samples) == 3
+
+    for sample in record.evidence_samples:
+        assert sample["ntp_offset_seconds"] == 0.25
+        assert sample["calculated_offset_seconds"] == 7199.75
+
+    loaded = registry.load()
+
+    assert len(loaded) == 1
+    assert loaded[0] == record
 
 
 def test_v1_history_remains_readable_and_unchanged(tmp_path) -> None:
