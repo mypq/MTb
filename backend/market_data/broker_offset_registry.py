@@ -1,5 +1,5 @@
 
-"""Append-only broker offset registry with backward-compatible schema v1/v2."""
+"""Append-only broker offset registry with backward-compatible v1/v2/v3."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from backend.market_data.broker_offset_detector import (
 )
 
 
-REGISTRY_SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = {1, 2}
+REGISTRY_SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
 
 
 class BrokerOffsetRegistryError(ValueError):
@@ -42,6 +42,10 @@ class BrokerOffsetRecord:
     ntp_evidence: dict[str, Any] | None = None
     evidence_start_utc: datetime | None = None
     evidence_end_utc: datetime | None = None
+    event_type: str | None = None
+    previous_offset_seconds: int | None = None
+    transition_start_utc: datetime | None = None
+    transition_end_utc: datetime | None = None
 
     @property
     def identity(self) -> tuple[int, str, str, int]:
@@ -70,6 +74,13 @@ class BrokerOffsetRegistry:
         "evidence_end_utc",
     }
 
+    _V3_FIELDS = _V2_FIELDS | {
+        "event_type",
+        "previous_offset_seconds",
+        "transition_start_utc",
+        "transition_end_utc",
+    }
+
     def __init__(self, path: str | Path) -> None:
         if not isinstance(path, (str, Path)):
             raise TypeError("path must be a string or Path.")
@@ -96,6 +107,7 @@ class BrokerOffsetRegistry:
                 raise BrokerOffsetRegistryError(
                     f"Empty registry line at record {expected}."
                 )
+
             try:
                 data = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -110,7 +122,10 @@ class BrokerOffsetRegistry:
                     "Registry sequence is missing, duplicated, or out of order."
                 )
 
-            if records and record.recorded_at_utc < records[-1].recorded_at_utc:
+            if (
+                records
+                and record.recorded_at_utc < records[-1].recorded_at_utc
+            ):
                 raise BrokerOffsetRegistryError(
                     "Registry timestamps must be chronological."
                 )
@@ -140,7 +155,7 @@ class BrokerOffsetRegistry:
 
         if len(decision.evidence_samples) != 3:
             raise BrokerOffsetRegistryError(
-                "Three complete evidence samples are required for schema v2."
+                "Three complete evidence samples are required."
             )
 
         if not decision.ntp_verified or decision.ntp_sample_count < 3:
@@ -174,9 +189,14 @@ class BrokerOffsetRegistry:
             or not math.isfinite(uncertainty)
             or uncertainty < 0
         ):
-            raise BrokerOffsetRegistryError("Candidate uncertainty is invalid.")
+            raise BrokerOffsetRegistryError(
+                "Candidate uncertainty is invalid."
+            )
 
-        if not isinstance(decision.run_id, str) or not decision.run_id.strip():
+        if (
+            not isinstance(decision.run_id, str)
+            or not decision.run_id.strip()
+        ):
             raise BrokerOffsetRegistryError("Candidate run_id is missing.")
 
         identity = decision.identity
@@ -184,55 +204,122 @@ class BrokerOffsetRegistry:
             raise BrokerOffsetRegistryError("Candidate identity is invalid.")
 
         account, server, symbol, build = identity
+
         if (
-            isinstance(account, bool) or not isinstance(account, int) or account <= 0
-            or not isinstance(server, str) or not server.strip()
-            or not isinstance(symbol, str) or not symbol.strip()
-            or isinstance(build, bool) or not isinstance(build, int) or build <= 0
+            isinstance(account, bool)
+            or not isinstance(account, int)
+            or account <= 0
+            or not isinstance(server, str)
+            or not server.strip()
+            or not isinstance(symbol, str)
+            or not symbol.strip()
+            or isinstance(build, bool)
+            or not isinstance(build, int)
+            or build <= 0
         ):
-            raise BrokerOffsetRegistryError("Candidate identity fields are invalid.")
+            raise BrokerOffsetRegistryError(
+                "Candidate identity fields are invalid."
+            )
 
         timestamp = recorded_at_utc or datetime.now(timezone.utc)
         timestamp = self._utc_datetime(timestamp, "recorded_at_utc")
 
-        samples = tuple(self._sample_dict(item) for item in decision.evidence_samples)
+        samples = tuple(
+            self._sample_dict(item)
+            for item in decision.evidence_samples
+        )
         self._validate_samples(samples, decision, identity, offset)
 
-        first_epoch = samples[0]["time_gmt_epoch"] + samples[0]["ntp_offset_seconds"]
-        last_epoch = samples[-1]["time_gmt_epoch"] + samples[-1]["ntp_offset_seconds"]
+        first_epoch = (
+            samples[0]["time_gmt_epoch"]
+            + samples[0]["ntp_offset_seconds"]
+        )
+        last_epoch = (
+            samples[-1]["time_gmt_epoch"]
+            + samples[-1]["ntp_offset_seconds"]
+        )
 
         start = datetime.fromtimestamp(first_epoch, timezone.utc)
         end = datetime.fromtimestamp(last_epoch, timezone.utc)
 
-        if end < start:
-            raise BrokerOffsetRegistryError("Evidence timestamps are not chronological.")
+        if end <= start:
+            raise BrokerOffsetRegistryError(
+                "Evidence timestamps must form a positive chronological interval."
+            )
 
         ntp_evidence = {
             "verified": True,
             "sample_count": decision.ntp_sample_count,
             "servers": list(decision.ntp_servers),
             "checked_at_unix": self._finite(
-                decision.ntp_checked_at_unix, "ntp_checked_at_unix"
+                decision.ntp_checked_at_unix,
+                "ntp_checked_at_unix",
             ),
             "offset_seconds": self._finite(
-                decision.ntp_offset_seconds, "ntp_offset_seconds"
+                decision.ntp_offset_seconds,
+                "ntp_offset_seconds",
             ),
             "uncertainty_seconds": self._finite(
-                decision.ntp_uncertainty_seconds, "ntp_uncertainty_seconds"
+                decision.ntp_uncertainty_seconds,
+                "ntp_uncertainty_seconds",
             ),
         }
 
         if ntp_evidence["uncertainty_seconds"] < 0:
-            raise BrokerOffsetRegistryError("NTP uncertainty cannot be negative.")
+            raise BrokerOffsetRegistryError(
+                "NTP uncertainty cannot be negative."
+            )
 
         existing = self.load()
+
         if existing and timestamp < existing[-1].recorded_at_utc:
             raise BrokerOffsetRegistryError(
                 "New registry timestamp cannot precede the latest record."
             )
 
+        previous = next(
+            (
+                record
+                for record in reversed(existing)
+                if record.identity == identity
+            ),
+            None,
+        )
+
+        if previous is None:
+            event_type = "BASELINE"
+            previous_offset = None
+            transition_start = None
+            transition_end = None
+
+        elif previous.offset_seconds == offset:
+            event_type = "CONFIRMATION"
+            previous_offset = previous.offset_seconds
+            transition_start = None
+            transition_end = None
+
+        else:
+            event_type = "OFFSET_CHANGE"
+            previous_offset = previous.offset_seconds
+
+            # The interval starts at the last recorded state and ends
+            # when the new three-sample evidence window is complete.
+            transition_start = previous.recorded_at_utc
+            transition_end = end
+
+            if transition_end <= transition_start:
+                raise BrokerOffsetRegistryError(
+                    "New evidence does not establish a chronological "
+                    "transition interval after the previous record."
+                )
+
+            if timestamp < transition_end:
+                raise BrokerOffsetRegistryError(
+                    "Record time cannot precede the transition evidence end."
+                )
+
         record = BrokerOffsetRecord(
-            schema_version=2,
+            schema_version=3,
             record_sequence=len(existing) + 1,
             recorded_at_utc=timestamp,
             offset_seconds=offset,
@@ -247,6 +334,10 @@ class BrokerOffsetRegistry:
             ntp_evidence=ntp_evidence,
             evidence_start_utc=start,
             evidence_end_utc=end,
+            event_type=event_type,
+            previous_offset_seconds=previous_offset,
+            transition_start_utc=transition_start,
+            transition_end_utc=transition_end,
         )
 
         payload = self._serialize_record(record)
@@ -278,12 +369,19 @@ class BrokerOffsetRegistry:
         identity: tuple[int, str, str, int] | None = None,
     ) -> BrokerOffsetRecord | None:
         records = self.load()
+
         if identity is None:
             return records[-1] if records else None
+
         if not isinstance(identity, tuple) or len(identity) != 4:
             raise TypeError("identity must be a four-item tuple.")
+
         return next(
-            (record for record in reversed(records) if record.identity == identity),
+            (
+                record
+                for record in reversed(records)
+                if record.identity == identity
+            ),
             None,
         )
 
@@ -306,7 +404,9 @@ class BrokerOffsetRegistry:
             or not isinstance(value, (int, float))
             or not math.isfinite(value)
         ):
-            raise BrokerOffsetRegistryError(f"{name} must be finite.")
+            raise BrokerOffsetRegistryError(
+                f"{name} must be finite."
+            )
         return float(value)
 
     @staticmethod
@@ -320,7 +420,10 @@ class BrokerOffsetRegistry:
             ) from exc
 
         if not isinstance(data, dict):
-            raise BrokerOffsetRegistryError("Evidence sample is invalid.")
+            raise BrokerOffsetRegistryError(
+                "Evidence sample is invalid."
+            )
+
         return data
 
     @staticmethod
@@ -341,23 +444,34 @@ class BrokerOffsetRegistry:
             "ntp_checked_at_unix",
         }
 
-        sequences = []
+        sequences: list[int] = []
+
         for sample in samples:
             if set(sample) != required:
                 raise BrokerOffsetRegistryError(
                     "Evidence sample has missing or unexpected fields."
                 )
+
             if sample["run_id"] != decision.run_id:
-                raise BrokerOffsetRegistryError("Evidence run IDs do not match.")
+                raise BrokerOffsetRegistryError(
+                    "Evidence run IDs do not match."
+                )
+
             if (
                 sample["account_login"],
                 sample["broker_server"],
                 sample["symbol"],
                 sample["terminal_build"],
             ) != identity:
-                raise BrokerOffsetRegistryError("Evidence identity mismatch.")
+                raise BrokerOffsetRegistryError(
+                    "Evidence identity mismatch."
+                )
+
             if sample["terminal_connected"] is not True:
-                raise BrokerOffsetRegistryError("Disconnected evidence is invalid.")
+                raise BrokerOffsetRegistryError(
+                    "Disconnected evidence is invalid."
+                )
+
             for key in (
                 "calculated_offset_seconds",
                 "ntp_offset_seconds",
@@ -365,17 +479,43 @@ class BrokerOffsetRegistry:
                 "ntp_checked_at_unix",
             ):
                 BrokerOffsetRegistry._finite(sample[key], key)
-            if abs(sample["calculated_offset_seconds"] - offset) > 1.5:
-                raise BrokerOffsetRegistryError("Evidence offset does not match candidate.")
-            sequences.append(sample["sample_sequence"])
 
-        if sequences != list(range(sequences[0], sequences[0] + 3)):
-            raise BrokerOffsetRegistryError("Evidence sequences are not consecutive.")
+            if sample["ntp_uncertainty_seconds"] < 0:
+                raise BrokerOffsetRegistryError(
+                    "Evidence NTP uncertainty cannot be negative."
+                )
+
+            if (
+                abs(sample["calculated_offset_seconds"] - offset)
+                > 1.5
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Evidence offset does not match candidate."
+                )
+
+            sequence = sample["sample_sequence"]
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, int)
+                or sequence <= 0
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Evidence sequence is invalid."
+                )
+
+            sequences.append(sequence)
+
+        if sequences != list(
+            range(sequences[0], sequences[0] + 3)
+        ):
+            raise BrokerOffsetRegistryError(
+                "Evidence sequences are not consecutive."
+            )
 
     @classmethod
     def _serialize_record(cls, record: BrokerOffsetRecord) -> bytes:
         data = {
-            "schema_version": 2,
+            "schema_version": 3,
             "record_sequence": record.record_sequence,
             "recorded_at_utc": record.recorded_at_utc.isoformat(),
             "offset_seconds": record.offset_seconds,
@@ -390,22 +530,46 @@ class BrokerOffsetRegistry:
             "ntp_evidence": record.ntp_evidence,
             "evidence_start_utc": record.evidence_start_utc.isoformat(),
             "evidence_end_utc": record.evidence_end_utc.isoformat(),
+            "event_type": record.event_type,
+            "previous_offset_seconds": record.previous_offset_seconds,
+            "transition_start_utc": (
+                record.transition_start_utc.isoformat()
+                if record.transition_start_utc is not None
+                else None
+            ),
+            "transition_end_utc": (
+                record.transition_end_utc.isoformat()
+                if record.transition_end_utc is not None
+                else None
+            ),
         }
+
         return (
             json.dumps(
-                data, sort_keys=True, separators=(",", ":"), allow_nan=False
-            ) + "\n"
+                data,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
         ).encode("utf-8")
 
     @classmethod
     def _parse_record(cls, data: object) -> BrokerOffsetRecord:
         if not isinstance(data, dict):
-            raise BrokerOffsetRegistryError("Registry record must be an object.")
+            raise BrokerOffsetRegistryError(
+                "Registry record must be an object."
+            )
 
         version = data.get("schema_version")
-        expected_fields = cls._V1_FIELDS if version == 1 else cls._V2_FIELDS
 
-        if version not in SUPPORTED_SCHEMA_VERSIONS or set(data) != expected_fields:
+        expected_fields = {
+            1: cls._V1_FIELDS,
+            2: cls._V2_FIELDS,
+            3: cls._V3_FIELDS,
+        }.get(version)
+
+        if expected_fields is None or set(data) != expected_fields:
             raise BrokerOffsetRegistryError(
                 "Registry record has unsupported schema or invalid fields."
             )
@@ -414,30 +578,57 @@ class BrokerOffsetRegistry:
             "schema_version", "record_sequence", "offset_seconds",
             "account_login", "terminal_build", "evidence_sample_count",
         )
+
         for name in integer_fields:
             value = data[name]
             if isinstance(value, bool) or not isinstance(value, int):
-                raise BrokerOffsetRegistryError(f"{name} must be an integer.")
+                raise BrokerOffsetRegistryError(
+                    f"{name} must be an integer."
+                )
 
         if data["record_sequence"] <= 0:
-            raise BrokerOffsetRegistryError("record_sequence must be positive.")
-        if abs(data["offset_seconds"]) > 14 * 60 * 60:
-            raise BrokerOffsetRegistryError("Stored offset is outside supported range.")
-        if data["evidence_sample_count"] != 3:
-            raise BrokerOffsetRegistryError("Stored evidence count must equal three.")
+            raise BrokerOffsetRegistryError(
+                "record_sequence must be positive."
+            )
 
-        uncertainty = cls._finite(data["uncertainty_seconds"], "uncertainty_seconds")
+        if abs(data["offset_seconds"]) > 14 * 60 * 60:
+            raise BrokerOffsetRegistryError(
+                "Stored offset is outside supported range."
+            )
+
+        if data["evidence_sample_count"] != 3:
+            raise BrokerOffsetRegistryError(
+                "Stored evidence count must equal three."
+            )
+
+        uncertainty = cls._finite(
+            data["uncertainty_seconds"],
+            "uncertainty_seconds",
+        )
+
         if uncertainty < 0:
-            raise BrokerOffsetRegistryError("Stored uncertainty cannot be negative.")
+            raise BrokerOffsetRegistryError(
+                "Stored uncertainty cannot be negative."
+            )
 
         for name in ("run_id", "broker_server", "symbol"):
-            if not isinstance(data[name], str) or not data[name].strip():
-                raise BrokerOffsetRegistryError(f"{name} is invalid.")
+            if (
+                not isinstance(data[name], str)
+                or not data[name].strip()
+            ):
+                raise BrokerOffsetRegistryError(
+                    f"{name} is invalid."
+                )
 
         if data["account_login"] <= 0 or data["terminal_build"] <= 0:
-            raise BrokerOffsetRegistryError("Stored identity is invalid.")
+            raise BrokerOffsetRegistryError(
+                "Stored identity is invalid."
+            )
 
-        recorded = cls._parse_timestamp(data["recorded_at_utc"], "recorded_at_utc")
+        recorded = cls._parse_timestamp(
+            data["recorded_at_utc"],
+            "recorded_at_utc",
+        )
 
         if version == 1:
             return BrokerOffsetRecord(
@@ -456,23 +647,38 @@ class BrokerOffsetRegistry:
 
         samples = data["evidence_samples"]
         ntp = data["ntp_evidence"]
+
         if (
-            not isinstance(samples, list) or len(samples) != 3
+            not isinstance(samples, list)
+            or len(samples) != 3
             or not all(isinstance(item, dict) for item in samples)
             or not isinstance(ntp, dict)
             or ntp.get("verified") is not True
             or not isinstance(ntp.get("servers"), list)
+            or isinstance(ntp.get("sample_count"), bool)
+            or not isinstance(ntp.get("sample_count"), int)
             or ntp.get("sample_count", 0) < 3
         ):
-            raise BrokerOffsetRegistryError("Stored v2 evidence is invalid.")
+            raise BrokerOffsetRegistryError(
+                "Stored evidence is invalid."
+            )
 
-        start = cls._parse_timestamp(data["evidence_start_utc"], "evidence_start_utc")
-        end = cls._parse_timestamp(data["evidence_end_utc"], "evidence_end_utc")
-        if end < start:
-            raise BrokerOffsetRegistryError("Evidence time range is invalid.")
+        start = cls._parse_timestamp(
+            data["evidence_start_utc"],
+            "evidence_start_utc",
+        )
+        end = cls._parse_timestamp(
+            data["evidence_end_utc"],
+            "evidence_end_utc",
+        )
 
-        return BrokerOffsetRecord(
-            schema_version=2,
+        if end <= start:
+            raise BrokerOffsetRegistryError(
+                "Evidence time range is invalid."
+            )
+
+        common = dict(
+            schema_version=version,
             record_sequence=data["record_sequence"],
             recorded_at_utc=recorded,
             offset_seconds=data["offset_seconds"],
@@ -489,14 +695,118 @@ class BrokerOffsetRegistry:
             evidence_end_utc=end,
         )
 
+        if version == 2:
+            return BrokerOffsetRecord(**common)
+
+        event_type = data["event_type"]
+        previous_offset = data["previous_offset_seconds"]
+
+        if event_type not in {
+            "BASELINE",
+            "CONFIRMATION",
+            "OFFSET_CHANGE",
+        }:
+            raise BrokerOffsetRegistryError(
+                "Stored event_type is invalid."
+            )
+
+        if previous_offset is not None:
+            if (
+                isinstance(previous_offset, bool)
+                or not isinstance(previous_offset, int)
+                or abs(previous_offset) > 14 * 60 * 60
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Stored previous offset is invalid."
+                )
+
+        transition_start_value = data["transition_start_utc"]
+        transition_end_value = data["transition_end_utc"]
+
+        if event_type == "BASELINE":
+            if (
+                previous_offset is not None
+                or transition_start_value is not None
+                or transition_end_value is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Baseline event cannot contain a previous offset or transition."
+                )
+
+        elif event_type == "CONFIRMATION":
+            if (
+                previous_offset != data["offset_seconds"]
+                or transition_start_value is not None
+                or transition_end_value is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Confirmation event fields are inconsistent."
+                )
+
+        else:
+            if (
+                previous_offset is None
+                or previous_offset == data["offset_seconds"]
+                or transition_start_value is None
+                or transition_end_value is None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Offset change event fields are incomplete."
+                )
+
+        transition_start = (
+            cls._parse_timestamp(
+                transition_start_value,
+                "transition_start_utc",
+            )
+            if transition_start_value is not None
+            else None
+        )
+        transition_end = (
+            cls._parse_timestamp(
+                transition_end_value,
+                "transition_end_utc",
+            )
+            if transition_end_value is not None
+            else None
+        )
+
+        if event_type == "OFFSET_CHANGE":
+            if (
+                transition_start is None
+                or transition_end is None
+                or transition_end <= transition_start
+                or transition_end > end
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Stored transition interval is invalid."
+                )
+
+        return BrokerOffsetRecord(
+            **common,
+            event_type=event_type,
+            previous_offset_seconds=previous_offset,
+            transition_start_utc=transition_start,
+            transition_end_utc=transition_end,
+        )
+
     @staticmethod
     def _parse_timestamp(value: object, name: str) -> datetime:
         if not isinstance(value, str):
-            raise BrokerOffsetRegistryError(f"{name} must be an ISO timestamp.")
+            raise BrokerOffsetRegistryError(
+                f"{name} must be an ISO timestamp."
+            )
+
         try:
             result = datetime.fromisoformat(value)
         except ValueError as exc:
-            raise BrokerOffsetRegistryError(f"{name} is invalid.") from exc
+            raise BrokerOffsetRegistryError(
+                f"{name} is invalid."
+            ) from exc
+
         if result.tzinfo is None or result.utcoffset() != timedelta(0):
-            raise BrokerOffsetRegistryError(f"{name} must be UTC.")
+            raise BrokerOffsetRegistryError(
+                f"{name} must be UTC."
+            )
+
         return result.astimezone(timezone.utc)
