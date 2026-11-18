@@ -1,4 +1,3 @@
-
 """Cross-process exclusive lock for MT5 clock-history access."""
 
 from __future__ import annotations
@@ -10,6 +9,10 @@ from pathlib import Path
 
 class ClockHistoryLockError(RuntimeError):
     """The clock-history lock could not be acquired safely."""
+
+
+class ClockHistoryLockBusyError(ClockHistoryLockError):
+    """The writer currently holds the clock-history lock."""
 
 
 class ClockHistoryFileLock:
@@ -56,7 +59,7 @@ class ClockHistoryFileLock:
                 return
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise ClockHistoryLockError(
+                    raise ClockHistoryLockBusyError(
                         "Timed out waiting for clock-history lock."
                     ) from None
                 time.sleep(self.retry_interval_seconds)
