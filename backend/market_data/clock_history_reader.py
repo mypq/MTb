@@ -253,6 +253,7 @@ class ClockHistoryIncrementalReader:
                         for run_id, value in checkpoint.last_by_run.items()
                     }
                     offset = checkpoint.offset
+                    handle.seek(checkpoint.offset)
                 else:
                     (
                         samples_processed,
