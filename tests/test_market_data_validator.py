@@ -6,6 +6,7 @@ from backend.market_data.models import (
     CandleBatch,
     CandleQuality,
     MarketCandle,
+    MarketDataClockEvidence,
     VolumeSource,
 )
 from backend.market_data.session_calendar import (
@@ -19,6 +20,24 @@ from backend.market_data.validator import (
 
 UTC = timezone.utc
 CHECKED_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def make_clock_evidence(received_at: datetime) -> MarketDataClockEvidence:
+    return MarketDataClockEvidence(
+        verified=True,
+        account_login=123456,
+        broker_server="Demo-Server",
+        symbol="XAUUSD",
+        terminal_build=6316,
+        checked_at=received_at - timedelta(seconds=1),
+        ntp_offset_seconds=0.05,
+        ntp_uncertainty_seconds=0.05,
+        ntp_sample_count=3,
+        ntp_servers=("ntp-a", "ntp-b", "ntp-c"),
+        candle_offset_seconds=7200.0,
+        candle_uncertainty_seconds=0.5,
+        calibration_sample_count=3,
+    )
 
 
 def make_candle(
@@ -55,6 +74,7 @@ def make_batch(
         candles=candles,
         received_at=received_at,
         source="MT5",
+        clock_evidence=make_clock_evidence(received_at),
     )
 
 
@@ -404,6 +424,7 @@ def test_future_expected_close_blocks_analysis():
         for issue in report.issues
     )
 
+
 @pytest.mark.parametrize(
     ("delay_seconds", "expected_eligible"),
     [
@@ -586,19 +607,25 @@ def test_known_volume_keeps_volume_data_available():
     )
 
 
-def test_freshness_verified_remains_false_without_trusted_verification():
-    candle = make_candle(
-        CHECKED_AT - timedelta(minutes=5)
-    )
+def test_missing_clock_evidence_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+
+    batch = make_batch((candle,))
+    batch = batch.model_copy(update={"clock_evidence": None})
 
     report = MarketDataValidator().validate(
-        make_batch((candle,)),
+        batch,
         300,
         CHECKED_AT,
     )
 
     assert report.freshness_eligible is True
     assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
 
 
 def test_report_has_no_issues_for_valid_single_candle_batch():
