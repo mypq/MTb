@@ -177,7 +177,8 @@ class ClockHistoryIncrementalReader:
 
             if not line or not line.endswith(b"\n"):
                 raise ClockHistoryFileChangedError(
-                    "Checkpoint ends inside an incomplete CSV line."
+                    "Previously processed clock history was modified "
+                    "or the checkpoint ends inside an incomplete CSV line."
                 )
 
             digest = _next_hash(digest, line)
