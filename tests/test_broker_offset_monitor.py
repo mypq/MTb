@@ -128,3 +128,45 @@ def test_monitor_rejects_invalid_interval(tmp_path):
 def test_monitor_rejects_invalid_service():
     with pytest.raises(TypeError):
         BrokerOffsetEvidenceMonitor(None)
+
+def test_unexpected_poll_failure_is_visible_in_monitor_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+
+        def fail_poll():
+            raise RuntimeError("Simulated unexpected poll failure.")
+
+        monkeypatch.setattr(
+            monitor._service,
+            "poll_once",
+            fail_poll,
+        )
+
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            for _ in range(100):
+                snapshot = monitor.snapshot()
+                if snapshot.state == "ERROR":
+                    break
+                await asyncio.sleep(0.01)
+
+            snapshot = monitor.snapshot()
+
+            assert snapshot.state == "ERROR"
+            assert snapshot.error == (
+                "RuntimeError: Simulated unexpected poll failure."
+            )
+            assert snapshot.last_decision is None
+            assert monitor.is_running is True
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        assert monitor.is_running is False
+
+    asyncio.run(scenario())
