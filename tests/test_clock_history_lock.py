@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pytest
@@ -14,7 +13,9 @@ def test_lock_creates_file_without_truncating_existing_content(tmp_path):
     path.write_bytes(b"preserve-this")
 
     with ClockHistoryFileLock(path):
-        assert path.read_bytes() == b"preserve-this"
+        assert path.exists()
+
+    assert path.read_bytes() == b"preserve-this"
 
 
 def test_lock_prevents_second_lock_until_release(tmp_path):
