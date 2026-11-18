@@ -610,6 +610,50 @@ class MT5Adapter:
         with self._lock:
             mt5 = self._require_connection()
 
+            # Verify the broker candle clock before requesting
+            # any closed candle data from MT5.
+            calibrator = self._candle_clock_calibrator
+
+            if calibrator is None:
+                raise MT5AdapterError(
+                    "Candle clock calibration is not configured. "
+                    "UTC conversion is blocked."
+                )
+
+            clock = calibrator.snapshot()
+
+            if (
+                clock.status != "VERIFIED"
+                or clock.offset_seconds is None
+                or clock.symbol != normalized_symbol
+            ):
+                raise MT5AdapterError(
+                    "Candle clock is not verified for this symbol: "
+                    f"{clock.reason}"
+                )
+
+            # Verify that the currently connected account is the
+            # same account and broker server used for calibration.
+            try:
+                account = mt5.account_info()
+
+                if account is None:
+                    raise ValueError("Account identity unavailable.")
+
+                if (
+                    index(account.login) != clock.account_login
+                    or str(account.server).strip() != clock.broker_server
+                ):
+                    calibrator.reset()
+                    raise ValueError("Broker identity changed.")
+
+            except Exception as exc:
+                raise MT5AdapterError(
+                    f"Candle clock identity verification failed: {exc}"
+                ) from exc
+
+            # Only retrieve closed candles after clock and identity
+            # verification have both succeeded.
             mt5_timeframe = resolve_mt5_timeframe(
                 mt5,
                 normalized_timeframe,
@@ -638,44 +682,6 @@ class MT5Adapter:
                 raise MT5AdapterError(
                     "MT5 returned an empty candle history."
                 )
-
-            calibrator = self._candle_clock_calibrator
-
-            if calibrator is None:
-                raise MT5AdapterError(
-                    "Candle clock calibration is not configured. "
-                    "UTC conversion is blocked."
-                )
-
-            clock = calibrator.snapshot()
-
-            if (
-                clock.status != "VERIFIED"
-                or clock.offset_seconds is None
-                or clock.symbol != normalized_symbol
-            ):
-                raise MT5AdapterError(
-                    "Candle clock is not verified for this symbol: "
-                    f"{clock.reason}"
-                )
-
-            try:
-                account = mt5.account_info()
-
-                if account is None:
-                    raise ValueError("Account identity unavailable.")
-
-                if (
-                    index(account.login) != clock.account_login
-                    or str(account.server).strip() != clock.broker_server
-                ):
-                    calibrator.reset()
-                    raise ValueError("Broker identity changed.")
-
-            except Exception as exc:
-                raise MT5AdapterError(
-                    f"Candle clock identity verification failed: {exc}"
-                ) from exc
 
             received_at = datetime.now(timezone.utc)
             candles: list[MarketCandle] = []
