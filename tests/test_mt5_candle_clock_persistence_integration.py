@@ -69,6 +69,7 @@ def make_mt5_module(
         {
             "connected": True,
             "trade_allowed": True,
+            "build": 6316,
         },
     )()
 
@@ -192,6 +193,30 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
         assert snapshot.sample_count == 3
 
         adapter.set_candle_clock_calibrator(calibrator)
+
+        # Require a valid independent broker-offset confirmation.
+        confirmation = SimpleNamespace(
+            event_type="CONFIRMATION",
+            offset_seconds=BROKER_OFFSET_SECONDS,
+            evidence_sample_count=3,
+            evidence_samples=({}, {}, {}),
+            ntp_evidence={
+                "verified": True,
+                "sample_count": 3,
+                "servers": [
+                    "ntp-a",
+                    "ntp-b",
+                    "ntp-c",
+                ],
+            },
+        )
+
+        registry = Mock()
+        registry.latest.return_value = confirmation
+
+        adapter.set_broker_offset_registry(registry)
+
+        registry.latest.assert_not_called()
 
         database = Database(
             f"sqlite:///{(tmp_path / 'candle_utc.db').as_posix()}"
