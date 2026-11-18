@@ -1,3 +1,4 @@
+
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,6 +7,10 @@ import pytest
 
 from backend.config import Settings
 from backend.market_data import VolumeSource
+from backend.market_data.broker_candle_clock import (
+    BrokerCandleClockCalibrator,
+)
+from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 from backend.mt5 import (
     MT5Adapter,
     MT5AdapterError,
@@ -69,6 +74,7 @@ def make_mt5_module(
     mt5.account_info.return_value = account
     mt5.symbol_info.return_value = symbol
     mt5.last_error.return_value = (1, "Test error")
+    mt5.TIMEFRAME_M1 = 1
     mt5.TIMEFRAME_M5 = 5
 
     return mt5
@@ -103,7 +109,11 @@ def make_rate(
     }
 
 
-def make_connected_adapter(mt5=None):
+def make_connected_adapter(
+    mt5=None,
+    *,
+    broker_offset_seconds=0,
+):
     module = mt5 or make_mt5_module()
 
     adapter = MT5Adapter(
@@ -113,6 +123,62 @@ def make_connected_adapter(mt5=None):
 
     status = adapter.connect()
     assert status.state == MT5ConnectionState.CONNECTED
+
+    # Use a deterministic, independently verified NTP source.
+    verifier = NtpTimeVerifier(
+        servers=(
+            "test-ntp-1",
+            "test-ntp-2",
+            "test-ntp-3",
+        ),
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.01,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+
+    verification = verifier.verify()
+    assert verification.verified is True
+
+    calibrator = BrokerCandleClockCalibrator(
+        verifier,
+        required_samples=3,
+        minimum_span_seconds=1e-9,
+        maximum_spread_seconds=0.5,
+        maximum_sample_age_seconds=30.0,
+    )
+
+    observed_at = datetime.now(timezone.utc)
+    observed_epoch = observed_at.timestamp()
+
+    m1_open = (
+        int(observed_epoch // 60) * 60
+        + broker_offset_seconds
+    )
+
+    m5_open = (
+        int(observed_epoch // 300) * 300
+        + broker_offset_seconds
+    )
+
+    snapshot = None
+
+    for _ in range(3):
+        snapshot = calibrator.observe(
+            symbol="XAUUSD",
+            account_login=123456,
+            broker_server="Demo-Server",
+            m1_active_open_epoch=m1_open,
+            m5_active_open_epoch=m5_open,
+            observed_at_utc=observed_at,
+        )
+
+    assert snapshot is not None
+    assert snapshot.status == "VERIFIED"
+
+    adapter.set_candle_clock_calibrator(calibrator)
 
     return adapter, module
 
@@ -270,6 +336,54 @@ def test_repeated_connect_does_not_initialize_twice():
     mt5.initialize.assert_called_once()
 
 
+def test_closed_candles_are_blocked_without_verified_clock():
+    adapter, mt5 = make_connected_adapter()
+
+    adapter._candle_clock_calibrator = None
+
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(),
+    ]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Candle clock calibration is not configured",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+def test_broker_candle_offset_is_subtracted_before_utc_conversion():
+    broker_offset_seconds = 7200
+
+    adapter, mt5 = make_connected_adapter(
+        broker_offset_seconds=broker_offset_seconds,
+    )
+
+    expected_utc = int(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
+    )
+
+    raw_broker_timestamp = (
+        expected_utc + broker_offset_seconds
+    )
+
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=raw_broker_timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    assert len(batch.candles) == 1
+
+    assert batch.candles[0].timestamp == datetime.fromtimestamp(
+        expected_utc,
+        tz=timezone.utc,
+    )
+
+
 def test_closed_candles_exclude_current_forming_candle():
     adapter, mt5 = make_connected_adapter()
 
@@ -302,8 +416,12 @@ def test_candle_timestamps_are_converted_to_utc():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=timestamp),
     ]
@@ -313,6 +431,7 @@ def test_candle_timestamps_are_converted_to_utc():
 
     assert candle.timestamp.tzinfo is not None
     assert candle.timestamp.utcoffset() == timedelta(0)
+
     assert candle.timestamp == datetime.fromtimestamp(
         timestamp,
         tz=timezone.utc,
@@ -323,8 +442,12 @@ def test_real_volume_and_tick_volume_remain_separate():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(
             timestamp=timestamp,
@@ -345,8 +468,12 @@ def test_zero_real_volume_is_not_misrepresented_as_real_volume():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(
             timestamp=timestamp,
@@ -384,8 +511,12 @@ def test_duplicate_candle_timestamps_are_rejected():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=timestamp),
         make_rate(timestamp=timestamp),
@@ -399,8 +530,12 @@ def test_future_candle_timestamp_is_rejected():
     adapter, mt5 = make_connected_adapter()
 
     future_timestamp = int(
-        (datetime.now(timezone.utc) + timedelta(hours=1)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            + timedelta(hours=1)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=future_timestamp),
     ]
@@ -429,8 +564,12 @@ def test_invalid_ohlc_data_is_rejected():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(
             timestamp=timestamp,
@@ -449,8 +588,12 @@ def test_negative_volume_is_rejected():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(
             timestamp=timestamp,
@@ -462,7 +605,10 @@ def test_negative_volume_is_rejected():
         adapter.get_closed_candles("XAUUSD", "M5", 1)
 
 
-@pytest.mark.parametrize("count", [0, -1, 10001, True, 1.5])
+@pytest.mark.parametrize(
+    "count",
+    [0, -1, 10001, True, 1.5],
+)
 def test_invalid_candle_count_is_rejected(count):
     adapter = MT5Adapter(
         settings=make_settings(),
@@ -513,6 +659,7 @@ def test_candle_retrieval_exception_is_wrapped_as_adapter_error():
         adapter.get_closed_candles("XAUUSD", "M5", 10)
 
     assert isinstance(error.value.__cause__, RuntimeError)
+
     mt5.copy_rates_from_pos.assert_called_once_with(
         "XAUUSD",
         5,
@@ -551,6 +698,7 @@ def test_connection_status_handles_missing_terminal_or_account_info(
 
 def test_connection_status_handles_terminal_exception():
     adapter, mt5 = make_connected_adapter()
+
     mt5.terminal_info.side_effect = RuntimeError(
         "Terminal status unavailable"
     )
@@ -602,8 +750,12 @@ def test_non_finite_candle_prices_are_rejected(field, value):
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     rate = make_rate(timestamp=timestamp)
     rate[field] = value
     mt5.copy_rates_from_pos.return_value = [rate]
@@ -616,19 +768,30 @@ def test_negative_real_volume_is_rejected():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
-        make_rate(timestamp=timestamp, real_volume=-1),
+        make_rate(
+            timestamp=timestamp,
+            real_volume=-1,
+        ),
     ]
 
     with pytest.raises(MT5AdapterError, match="negative volume"):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
 
 
-@pytest.mark.parametrize("timestamp", [0, -1])
+@pytest.mark.parametrize(
+    "timestamp",
+    [0, -1],
+)
 def test_non_positive_candle_timestamp_is_rejected(timestamp):
     adapter, mt5 = make_connected_adapter()
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=timestamp),
     ]
@@ -653,8 +816,12 @@ def test_missing_candle_field_is_rejected(missing_field):
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     rate = make_rate(timestamp=timestamp)
     del rate[missing_field]
     mt5.copy_rates_from_pos.return_value = [rate]
@@ -880,7 +1047,7 @@ def test_negative_account_margin_is_rejected():
 
 def test_negative_balance_equity_and_free_margin_are_preserved():
     adapter, mt5 = make_connected_adapter()
-    adapter.connect()
+
     mt5.account_info.return_value.balance = -10.0
     mt5.account_info.return_value.equity = -15.0
     mt5.account_info.return_value.margin_free = -20.0
@@ -921,8 +1088,12 @@ def test_integer_candle_timestamp_is_accepted():
     adapter, mt5 = make_connected_adapter()
 
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
+
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=timestamp),
     ]
@@ -930,6 +1101,7 @@ def test_integer_candle_timestamp_is_accepted():
     batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
 
     assert len(batch.candles) == 1
+
     assert batch.candles[0].timestamp == datetime.fromtimestamp(
         timestamp,
         tz=timezone.utc,
@@ -995,7 +1167,10 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
 
     # Existing market-data reads must also work after recovery.
     timestamp = int(
-        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+        (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=10)
+        ).timestamp()
     )
 
     mt5.copy_rates_from_pos.return_value = [
@@ -1013,6 +1188,7 @@ def test_monitor_recovers_after_active_mt5_connection_is_lost():
 
 def test_symbol_information_request_exception_is_wrapped():
     adapter, mt5 = make_connected_adapter()
+
     mt5.symbol_info.side_effect = RuntimeError(
         "Terminal communication failed"
     )
@@ -1035,7 +1211,9 @@ def make_tick(
     ask=4100.20,
 ):
     if time_msc is _DEFAULT_TICK_TIMESTAMP:
-        time_msc = int(datetime.now(timezone.utc).timestamp() * 1000)
+        time_msc = int(
+            datetime.now(timezone.utc).timestamp() * 1000
+        )
 
     return SimpleNamespace(
         time_msc=time_msc,
@@ -1046,7 +1224,9 @@ def make_tick(
 
 def test_broker_time_sample_maps_tick_and_account_identity():
     adapter, mt5 = make_connected_adapter()
+
     timestamp = 1794729600123
+
     mt5.symbol_info_tick.return_value = make_tick(
         time_msc=timestamp,
     )
@@ -1067,8 +1247,12 @@ def test_broker_time_sample_maps_tick_and_account_identity():
 
 def test_broker_time_sample_preserves_raw_millisecond_timestamp():
     adapter, mt5 = make_connected_adapter()
+
     timestamp = 1794729600123
-    mt5.symbol_info_tick.return_value = make_tick(time_msc=timestamp)
+
+    mt5.symbol_info_tick.return_value = make_tick(
+        time_msc=timestamp,
+    )
 
     sample = adapter.get_broker_time_sample("XAUUSD")
 
@@ -1077,6 +1261,7 @@ def test_broker_time_sample_preserves_raw_millisecond_timestamp():
 
 def test_broker_time_sample_normalizes_symbol_before_lookup():
     adapter, mt5 = make_connected_adapter()
+
     mt5.symbol_info_tick.return_value = make_tick()
 
     adapter.get_broker_time_sample(" XAUUSD ")
@@ -1095,6 +1280,7 @@ def test_broker_time_sample_rejects_empty_symbol():
 
 def test_broker_time_sample_rejects_missing_tick():
     adapter, mt5 = make_connected_adapter()
+
     mt5.symbol_info_tick.return_value = None
 
     with pytest.raises(MT5AdapterError, match="no tick"):
@@ -1107,9 +1293,15 @@ def test_broker_time_sample_rejects_missing_tick():
 )
 def test_broker_time_sample_rejects_invalid_tick_timestamp(timestamp):
     adapter, mt5 = make_connected_adapter()
-    mt5.symbol_info_tick.return_value = make_tick(time_msc=timestamp)
 
-    with pytest.raises(MT5AdapterError, match="tick data failed validation"):
+    mt5.symbol_info_tick.return_value = make_tick(
+        time_msc=timestamp,
+    )
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="tick data failed validation",
+    ):
         adapter.get_broker_time_sample("XAUUSD")
 
 
@@ -1125,17 +1317,22 @@ def test_broker_time_sample_rejects_invalid_tick_timestamp(timestamp):
 )
 def test_broker_time_sample_rejects_invalid_tick_prices(bid, ask):
     adapter, mt5 = make_connected_adapter()
+
     mt5.symbol_info_tick.return_value = make_tick(
         bid=bid,
         ask=ask,
     )
 
-    with pytest.raises(MT5AdapterError, match="tick data failed validation"):
+    with pytest.raises(
+        MT5AdapterError,
+        match="tick data failed validation",
+    ):
         adapter.get_broker_time_sample("XAUUSD")
 
 
 def test_broker_time_sample_rejects_missing_account_identity():
     adapter, mt5 = make_connected_adapter()
+
     mt5.account_info.return_value = None
 
     with pytest.raises(
@@ -1149,7 +1346,10 @@ def test_broker_time_sample_rejects_missing_account_identity():
 
 def test_broker_time_sample_wraps_tick_request_exception():
     adapter, mt5 = make_connected_adapter()
-    mt5.symbol_info_tick.side_effect = RuntimeError("Tick request failed")
+
+    mt5.symbol_info_tick.side_effect = RuntimeError(
+        "Tick request failed"
+    )
 
     with pytest.raises(
         MT5AdapterError,
@@ -1162,9 +1362,13 @@ def test_broker_time_sample_wraps_tick_request_exception():
 
 def test_broker_time_sample_rejects_invalid_account_identity():
     adapter, mt5 = make_connected_adapter()
+
     mt5.account_info.return_value.login = True
 
-    with pytest.raises(MT5AdapterError, match="malformed account identity"):
+    with pytest.raises(
+        MT5AdapterError,
+        match="malformed account identity",
+    ):
         adapter.get_broker_time_sample("XAUUSD")
 
     mt5.symbol_info_tick.assert_not_called()
