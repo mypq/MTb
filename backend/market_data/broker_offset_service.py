@@ -63,9 +63,9 @@ class BrokerOffsetEvidenceService:
 
         self._lock = Lock()
         self._processed_count = 0
-        self._last_sample_signature: tuple[
-            str, int, int
-        ] | None = None
+        self._processed_history: tuple[
+            MT5ClockHistorySample, ...
+        ] = ()
 
         self._last_decision: BrokerOffsetDecision | None = None
         self._last_record: BrokerOffsetRecord | None = None
@@ -81,23 +81,19 @@ class BrokerOffsetEvidenceService:
                     self._clock_history_path
                 )
 
-                latest_signature = self._signature(samples[-1])
-
                 history_was_replaced = (
                     self._processed_count > len(samples)
                     or (
                         self._processed_count > 0
-                        and len(samples) >= self._processed_count
-                        and self._signature(
-                            samples[self._processed_count - 1]
-                        ) != self._last_sample_signature
+                        and tuple(samples[:self._processed_count])
+                        != self._processed_history
                     )
                 )
 
                 if self._processed_count == 0 or history_was_replaced:
                     self._detector.reset()
                     self._processed_count = 0
-                    self._last_sample_signature = None
+                    self._processed_history = ()
                     self._last_decision = None
 
                     # Only the latest three samples are eligible after
@@ -113,7 +109,7 @@ class BrokerOffsetEvidenceService:
                     self._process_sample(sample)
 
                 self._processed_count = len(samples)
-                self._last_sample_signature = latest_signature
+                self._processed_history = tuple(samples)
                 self._last_error = None
 
                 if not samples[start_index:]:
@@ -126,7 +122,7 @@ class BrokerOffsetEvidenceService:
                 # A partial batch must never be treated as fully processed.
                 self._detector.reset()
                 self._processed_count = 0
-                self._last_sample_signature = None
+                self._processed_history = ()
                 self._last_decision = None
                 self._last_error = (
                     f"{type(exc).__name__}: {exc}"
