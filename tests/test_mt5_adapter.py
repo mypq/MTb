@@ -183,8 +183,8 @@ def configure_test_candle_clock(
         "backend.market_data.broker_candle_clock.monotonic",
         side_effect=(
             base_monotonic,
-            base_monotonic + 0.5,
-            base_monotonic + 1.0,
+            base_monotonic + 0.6,
+            base_monotonic + 1.2,
         ),
     ):
         snapshot = None
