@@ -409,21 +409,28 @@ class BrokerOffsetRegistry:
         try:
             view = memoryview(payload)
             total = 0
+
             while total < len(view):
                 written = os.write(descriptor, view[total:])
                 if written <= 0:
                     raise OSError("Registry append made no progress.")
                 total += written
+
             os.fsync(descriptor)
-        except OSError:
+
+        except OSError as write_error:
             try:
                 os.ftruncate(descriptor, original_size)
                 os.fsync(descriptor)
-            except OSError:
-                # Preserve the original write failure. A subsequent load
-                # will reject any incomplete trailing JSON record.
-                pass
-            raise
+
+            except OSError as rollback_error:
+                raise BrokerOffsetRegistryError(
+                    "Registry append failed and rollback also failed. "
+                    "Registry integrity is uncertain; manual recovery is required."
+                ) from rollback_error
+
+            raise write_error
+
         finally:
             os.close(descriptor)
 
