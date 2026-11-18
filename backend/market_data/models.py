@@ -170,6 +170,28 @@ class MarketDataClockEvidence(BaseModel):
             raise ValueError("Clock evidence identity cannot be empty.")
         return normalized
 
+    @field_validator("ntp_servers")
+    @classmethod
+    def normalize_ntp_servers(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        servers = tuple(
+            server.strip().lower()
+            for server in value
+            if isinstance(server, str) and server.strip()
+        )
+
+        if len(servers) < 3:
+            raise ValueError(
+                "At least three non-empty NTP servers are required."
+            )
+
+        if len(set(servers)) != len(servers):
+            raise ValueError("Duplicate NTP servers are not allowed.")
+
+        return servers
+
 
 class CandleBatch(BaseModel):
     """Chronologically ordered candles for one symbol and timeframe."""
