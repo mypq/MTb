@@ -389,7 +389,15 @@ def build_observations(source_rows, source_name):
                 row.get(status_field) or ""
             ).strip().upper()
 
-            if status != required_status:
+            # INITIAL is a valid first observation for streams whose
+            # normal update status is UPDATED.
+            allowed_statuses = (
+                {"UPDATED", "INITIAL"}
+                if required_status == "UPDATED"
+                else {required_status}
+            )
+
+            if status not in allowed_statuses:
                 skipped_status[status or "UNKNOWN"] = (
                     skipped_status.get(status or "UNKNOWN", 0) + 1
                 )
@@ -405,7 +413,12 @@ def build_observations(source_rows, source_name):
                 rejected_numeric += 1
                 continue
 
-            if not raw.is_integer() or not valid_unix_timestamp(raw):
+            # Tick timestamps may contain millisecond fractions.
+            # Candle-open timestamps must remain whole seconds.
+            if (
+                not valid_unix_timestamp(raw)
+                or (kind != "tick" and not raw.is_integer())
+            ):
                 rejected_numeric += 1
                 continue
 
@@ -425,7 +438,9 @@ def build_observations(source_rows, source_name):
                     row.get("symbol") or ""
                 ).strip(),
                 "evidence_kind": kind,
-                "raw_timestamp_epoch": str(int(raw)),
+                "raw_timestamp_epoch": str(
+                    row.get(raw_field) or ""
+                ).strip(),
                 "comparison_utc": comparison,
                 "observed_offset_seconds": str(difference),
                 "ntp_checked_at_unix": str(ntp_checked),
@@ -550,12 +565,12 @@ def main():
     print(f"History: {destination.resolve()}")
 
     print(
-        "IMPORTANT: observed_offset_seconds is a measured "
-        "comparison difference. Closed-candle values include "
-        "candle age. Active-candle values compare the active "
-        "candle open with its expected UTC boundary. None of "
-        "these measurements authorizes production timestamp "
-        "correction or proves a broker UTC offset."
+        "IMPORTANT: this archive is NOT a broker UTC offset. "
+        "observed_offset_seconds is a measured comparison "
+        "difference. Closed-candle values include candle age. "
+        "Active-candle values compare the active candle open "
+        "with its expected UTC boundary. None of these "
+        "measurements authorizes production timestamp correction."
     )
 
     return 0
