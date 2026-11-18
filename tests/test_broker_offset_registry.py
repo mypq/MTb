@@ -10,7 +10,6 @@ import pytest
 from backend.market_data.broker_offset_detector import (
     BrokerOffsetDecision,
     BrokerOffsetDetector,
-    BrokerOffsetStatus,
 )
 from backend.market_data.broker_offset_registry import (
     BrokerOffsetRegistry,
@@ -70,6 +69,21 @@ def make_decision() -> BrokerOffsetDecision:
     result = detector.observe(make_sample(3))
     assert result.candidate_ready
     return result
+
+
+def decision_with_run_id(
+    decision: BrokerOffsetDecision,
+    run_id: str,
+) -> BrokerOffsetDecision:
+    """Change the decision and all evidence samples to the same run ID."""
+    return replace(
+        decision,
+        run_id=run_id,
+        evidence_samples=tuple(
+            replace(sample, run_id=run_id)
+            for sample in decision.evidence_samples
+        ),
+    )
 
 
 def make_v1_record(sequence: int = 1) -> dict:
@@ -157,10 +171,9 @@ def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
         make_decision(),
         recorded_at_utc=BASE_TIME,
     )
-    second_decision = replace(
+    second_decision = decision_with_run_id(
         make_decision(),
-        offset_seconds=7200,
-        run_id="run-002",
+        "run-002",
     )
     second = registry.append_candidate(
         second_decision,
@@ -173,6 +186,11 @@ def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
     assert records[1] == second
     assert records[0].record_sequence == 1
     assert records[1].record_sequence == 2
+    assert records[1].run_id == "run-002"
+    assert all(
+        sample["run_id"] == "run-002"
+        for sample in records[1].evidence_samples
+    )
 
 
 def test_latest_returns_latest_record(tmp_path) -> None:
@@ -182,9 +200,10 @@ def test_latest_returns_latest_record(tmp_path) -> None:
         recorded_at_utc=BASE_TIME,
     )
     second = registry.append_candidate(
-        replace(make_decision(), run_id="run-002"),
+        decision_with_run_id(make_decision(), "run-002"),
         recorded_at_utc=BASE_TIME + timedelta(minutes=1),
     )
+
     assert registry.latest() == second
     assert registry.latest(identity=IDENTITY) == second
     assert first.record_sequence == 1
@@ -272,7 +291,7 @@ def test_timestamp_cannot_move_backwards(tmp_path) -> None:
 
     with pytest.raises(BrokerOffsetRegistryError):
         registry.append_candidate(
-            replace(make_decision(), run_id="run-002"),
+            decision_with_run_id(make_decision(), "run-002"),
             recorded_at_utc=BASE_TIME - timedelta(seconds=1),
         )
 
