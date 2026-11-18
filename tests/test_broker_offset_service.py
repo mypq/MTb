@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -713,41 +712,55 @@ def test_offset_change_is_tracked_independently_per_identity(
     first = service.poll_once()
     assert first.state == "BASELINE_RECORDED"
 
-    # A different symbol gets its own baseline at 10800 seconds.
+    # A different symbol gets its own baseline.
     second_identity_rows = []
+
     for sequence in range(1, 4):
         row = make_row(sequence, 10800)
         row["run_id"] = "second-identity-run"
         row["symbol"] = "EURUSD"
         row["monotonic_ms"] = str(5000 + sequence * 60000)
-        row["time_gmt_epoch"] = str(BASE_EPOCH + 300 + sequence * 60)
+        row["time_gmt_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60
+        )
         row["time_trade_server_epoch"] = str(
             BASE_EPOCH + 300 + sequence * 60 + 10800
         )
-        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        row["time_current_quote_epoch"] = row[
+            "time_trade_server_epoch"
+        ]
         second_identity_rows.append(row)
 
     append_rows(history_path, second_identity_rows)
+
     second = service.poll_once()
 
     assert second.state == "BASELINE_RECORDED"
     assert len(registry.load()) == 2
 
     # A new run for EURUSD reports a changed offset.
+    # Keep its evidence interval after the previous record
+    # and before the next registry recording timestamp.
     changed_rows = []
+
     for sequence in range(1, 4):
         row = make_row(sequence, 3600)
         row["run_id"] = "third-offset-run"
         row["symbol"] = "EURUSD"
         row["monotonic_ms"] = str(9000 + sequence * 60000)
-        row["time_gmt_epoch"] = str(BASE_EPOCH + 600 + sequence * 60)
-        row["time_trade_server_epoch"] = str(
-            BASE_EPOCH + 600 + sequence * 60 + 3600
+        row["time_gmt_epoch"] = str(
+            BASE_EPOCH + 360 + sequence * 30
         )
-        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 360 + sequence * 30 + 3600
+        )
+        row["time_current_quote_epoch"] = row[
+            "time_trade_server_epoch"
+        ]
         changed_rows.append(row)
 
     append_rows(history_path, changed_rows)
+
     third = service.poll_once()
     records = registry.load()
 
@@ -760,11 +773,15 @@ def test_offset_change_is_tracked_independently_per_identity(
     assert original_baseline.offset_seconds == 7200
     assert original_baseline.event_type == "BASELINE"
 
-    assert second_baseline.identity == (ACCOUNT, SERVER, "EURUSD", BUILD)
+    assert second_baseline.identity == (
+        ACCOUNT, SERVER, "EURUSD", BUILD
+    )
     assert second_baseline.offset_seconds == 10800
     assert second_baseline.event_type == "BASELINE"
 
-    assert offset_change.identity == (ACCOUNT, SERVER, "EURUSD", BUILD)
+    assert offset_change.identity == (
+        ACCOUNT, SERVER, "EURUSD", BUILD
+    )
     assert offset_change.offset_seconds == 3600
     assert offset_change.previous_offset_seconds == 10800
     assert offset_change.event_type == "OFFSET_CHANGE"
