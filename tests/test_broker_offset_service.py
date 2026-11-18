@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import csv
@@ -180,6 +181,73 @@ def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
     assert first.error is None
     assert second.error is None
     assert len(registry.load()) == 1
+
+
+def test_overlapping_same_offset_candidate_does_not_record_confirmation(
+    tmp_path,
+):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.error is None
+    assert len(registry.load()) == 1
+
+    # Sequence 4 creates a sliding candidate window of 2, 3, 4.
+    # It overlaps the baseline window 1, 2, 3 and must not be stored.
+    append_rows(history_path, [make_row(4, 7200)])
+
+    second = service.poll_once()
+    records = registry.load()
+
+    assert second.error is None
+    assert second.state == "WAITING_FOR_NEW_EVIDENCE"
+    assert len(records) == 1
+    assert records[0].event_type == "BASELINE"
+
+
+def test_three_independent_same_offset_samples_record_confirmation(
+    tmp_path,
+):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.error is None
+    assert len(registry.load()) == 1
+
+    # The next two samples complete the independent window 4, 5, 6.
+    append_rows(
+        history_path,
+        [
+            make_row(4, 7200),
+            make_row(5, 7200),
+            make_row(6, 7200),
+        ],
+    )
+
+    snapshot = service.poll_once()
+    records = registry.load()
+
+    assert snapshot.error is None
+    assert snapshot.state == "CONFIRMATION_RECORDED"
+    assert len(records) == 2
+
+    baseline, confirmation = records
+
+    assert baseline.event_type == "BASELINE"
+    assert baseline.offset_seconds == 7200
+
+    assert confirmation.event_type == "CONFIRMATION"
+    assert confirmation.offset_seconds == 7200
+    assert confirmation.previous_offset_seconds == 7200
+    assert confirmation.evidence_sample_count == 3
+
+    sequences = [
+        item["sample_sequence"]
+        for item in confirmation.evidence_samples
+    ]
+    assert sequences == [4, 5, 6]
 
 
 def test_three_new_samples_record_offset_change(tmp_path, monkeypatch):
