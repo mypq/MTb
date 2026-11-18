@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -154,32 +153,26 @@ def resolve_ntp_state(
     attempt_error: str | None = None,
 ) -> tuple[NtpVerification | None, bool, str]:
     """
-    Return the last successful NTP verification while it remains trusted.
+    Trust only the current successful NTP verification attempt.
 
-    A failed refresh must not replace a still-valid previous verification.
-    The latest refresh error is returned separately for CSV diagnostics.
+    Any failed or missing refresh immediately invalidates previous trust.
     """
-    if attempt_result is not None and attempt_result.verified:
-        candidate = attempt_result
-    else:
-        candidate = verifier.last_verification()
-
-    trusted = (
-        candidate is not None
-        and candidate.verified
+    if (
+        attempt_result is not None
+        and attempt_result.verified
         and verifier.is_trusted()
-    )
+    ):
+        return attempt_result, True, ""
 
-    if not trusted:
-        candidate = None
+    verifier.reset()
 
     error = attempt_error or (
         attempt_result.error
-        if attempt_result is not None and not attempt_result.verified
-        else ""
+        if attempt_result is not None
+        else "NTP verification did not complete."
     )
 
-    return candidate, trusted, error or ""
+    return None, False, error or "NTP verification failed."
 
 
 def read_stream(function):
