@@ -398,3 +398,43 @@ def test_corrupt_history_clears_stale_decision_but_preserves_record(
     # Historical registry data must remain intact.
     assert failed.last_record == first.last_record
     assert len(registry.load()) == 1
+
+def test_modified_old_history_sample_is_detected(tmp_path):
+    rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    assert len(registry.load()) == 1
+
+    # Change an old row while preserving its run ID,
+    # sequence and monotonic counter.
+    modified_rows = [dict(row) for row in rows]
+    modified_rows[0]["time_trade_server_epoch"] = str(
+        int(modified_rows[0]["time_gmt_epoch"]) + 10800
+    )
+    modified_rows[0]["time_current_quote_epoch"] = str(
+        int(modified_rows[0]["time_gmt_epoch"]) + 10800
+    )
+    modified_rows[0]["server_utc_offset_seconds"] = "10800"
+
+    write_history(history_path, modified_rows)
+
+    second = service.poll_once()
+
+    # The service must detect the modified historical row
+    # and reprocess the latest three samples.
+    assert second.state == "COLLECTING"
+    assert second.last_decision is not None
+    assert second.last_decision.sample_count == 2
+
+    # Replayed overlapping evidence must not create a new record.
+    assert len(registry.load()) == 1
+    assert second.last_record == first.last_record
