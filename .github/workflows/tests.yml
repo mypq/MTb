@@ -74,7 +74,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install NTP test dependencies
-        run: python -m pip install "pytest>=8.3,<10"
+        run: python -m pip install "pytest>=8.3,<10" "pydantic>=2.10,<3"
 
       - name: Run live NTP UDP 123 verification
         env:
