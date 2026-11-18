@@ -14,6 +14,9 @@ from backend.market_data import (
     MarketCandle,
     VolumeSource,
 )
+from backend.market_data.broker_candle_clock import (
+    BrokerCandleClockCalibrator,
+)
 from backend.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionState,
@@ -47,6 +50,108 @@ class MT5Adapter:
         self._mt5 = mt5_module
         self._initialized_by_client = False
         self._lock = RLock()
+        self._candle_clock_calibrator: BrokerCandleClockCalibrator | None = None
+
+    def set_candle_clock_calibrator(
+        self,
+        calibrator: BrokerCandleClockCalibrator,
+    ) -> None:
+        if not isinstance(calibrator, BrokerCandleClockCalibrator):
+            raise TypeError(
+                "calibrator must be a BrokerCandleClockCalibrator."
+            )
+
+        with self._lock:
+            self._candle_clock_calibrator = calibrator
+
+    def get_active_candle_clock_sample(self, symbol: str) -> dict:
+        """Read active M1/M5 candle boundaries and broker identity."""
+        normalized_symbol = symbol.strip()
+
+        if not normalized_symbol:
+            raise ValueError("Symbol name cannot be empty.")
+
+        with self._lock:
+            mt5 = self._require_connection()
+
+            try:
+                account = mt5.account_info()
+
+                if account is None:
+                    raise MT5AdapterError(
+                        "MT5 account identity is unavailable."
+                    )
+
+                account_login = index(account.login)
+                broker_server = str(account.server).strip()
+
+                if account_login <= 0 or not broker_server:
+                    raise MT5AdapterError(
+                        "MT5 returned invalid account identity."
+                    )
+
+                read_started = datetime.now(timezone.utc)
+
+                m1 = mt5.copy_rates_from_pos(
+                    normalized_symbol,
+                    mt5.TIMEFRAME_M1,
+                    0,
+                    1,
+                )
+
+                m5 = mt5.copy_rates_from_pos(
+                    normalized_symbol,
+                    mt5.TIMEFRAME_M5,
+                    0,
+                    1,
+                )
+
+                read_finished = datetime.now(timezone.utc)
+
+                if m1 is None or len(m1) != 1:
+                    raise MT5AdapterError(
+                        "MT5 did not return the active M1 candle."
+                    )
+
+                if m5 is None or len(m5) != 1:
+                    raise MT5AdapterError(
+                        "MT5 did not return the active M5 candle."
+                    )
+
+                m1_open = index(m1[0]["time"])
+                m5_open = index(m5[0]["time"])
+
+                if m1_open <= 0 or m5_open <= 0:
+                    raise MT5AdapterError(
+                        "MT5 returned invalid active candle timestamps."
+                    )
+
+                if (
+                    read_finished.timestamp()
+                    - read_started.timestamp()
+                    > 1.0
+                ):
+                    raise MT5AdapterError(
+                        "Active candle clock read took too long."
+                    )
+
+                return {
+                    "symbol": normalized_symbol,
+                    "account_login": account_login,
+                    "broker_server": broker_server,
+                    "m1_active_open_epoch": m1_open,
+                    "m5_active_open_epoch": m5_open,
+                    "observed_at_utc": read_started
+                    + (read_finished - read_started) / 2,
+                }
+
+            except MT5AdapterError:
+                raise
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "Active candle clock sampling failed: "
+                    f"{type(exc).__name__}."
+                ) from exc
 
     def connect(self) -> MT5ConnectionStatus:
         with self._lock:
@@ -534,6 +639,44 @@ class MT5Adapter:
                     "MT5 returned an empty candle history."
                 )
 
+            calibrator = self._candle_clock_calibrator
+
+            if calibrator is None:
+                raise MT5AdapterError(
+                    "Candle clock calibration is not configured. "
+                    "UTC conversion is blocked."
+                )
+
+            clock = calibrator.snapshot()
+
+            if (
+                clock.status != "VERIFIED"
+                or clock.offset_seconds is None
+                or clock.symbol != normalized_symbol
+            ):
+                raise MT5AdapterError(
+                    "Candle clock is not verified for this symbol: "
+                    f"{clock.reason}"
+                )
+
+            try:
+                account = mt5.account_info()
+
+                if account is None:
+                    raise ValueError("Account identity unavailable.")
+
+                if (
+                    index(account.login) != clock.account_login
+                    or str(account.server).strip() != clock.broker_server
+                ):
+                    calibrator.reset()
+                    raise ValueError("Broker identity changed.")
+
+            except Exception as exc:
+                raise MT5AdapterError(
+                    f"Candle clock identity verification failed: {exc}"
+                ) from exc
+
             received_at = datetime.now(timezone.utc)
             candles: list[MarketCandle] = []
 
@@ -559,7 +702,7 @@ class MT5Adapter:
                         )
 
                     candle_time = datetime.fromtimestamp(
-                        timestamp_value,
+                        timestamp_value - clock.offset_seconds,
                         tz=timezone.utc,
                     )
 
