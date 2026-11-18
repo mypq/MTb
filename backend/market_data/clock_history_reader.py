@@ -230,40 +230,15 @@ class ClockHistoryIncrementalReader:
                 ) = self._read_initial_header(handle)
                 initial_read = True
             else:
-                checkpoint = self._checkpoint
-
-                if self._checkpoint_verified:
-                    if self._stat_identity(initial_stat) != (
-                        checkpoint.file_device,
-                        checkpoint.file_inode,
-                    ):
-                        raise ClockHistoryFileChangedError(
-                            "Clock history file identity changed."
-                        )
-
-                    if initial_stat.st_size < checkpoint.offset:
-                        raise ClockHistoryFileChangedError(
-                            "Clock history file was truncated."
-                        )
-
-                    samples_processed = checkpoint.samples_processed
-                    digest = bytes.fromhex(checkpoint.prefix_sha256)
-                    previous_by_run = {
-                        run_id: _sample_from_checkpoint(value)
-                        for run_id, value in checkpoint.last_by_run.items()
-                    }
-                    offset = checkpoint.offset
-                    handle.seek(checkpoint.offset)
-                else:
-                    (
-                        samples_processed,
-                        digest,
-                        previous_by_run,
-                        offset,
-                    ) = self._verify_existing_checkpoint(
-                        handle,
-                        initial_stat,
-                    )
+                (
+                    samples_processed,
+                    digest,
+                    previous_by_run,
+                    offset,
+                ) = self._verify_existing_checkpoint(
+                    handle,
+                    initial_stat,
+                )
 
                 initial_read = False
 
