@@ -223,16 +223,10 @@ bool ValidateClockHistoryTail()
 }
 
 //+------------------------------------------------------------------+
-//| Append one raw clock sample                                      |
+//| Append one raw clock sample (Unlocked internal version)          |
 //+------------------------------------------------------------------+
-bool AppendClockHistorySample()
+bool AppendClockHistorySampleUnlocked()
 {
-   if(g_clock_lock_handle == INVALID_HANDLE)
-   {
-      Print("Clock history lock is not held.");
-      return false;
-   }
-
    if(!ValidateClockHistoryHeader())
       return false;
 
@@ -385,7 +379,22 @@ bool AppendClockHistorySample()
 }
 
 //+------------------------------------------------------------------+
-//| Append trading or quote sessions (Updated)                       |
+//| Append one sample under a short-lived exclusive lock              |
+//+------------------------------------------------------------------+
+bool AppendClockHistorySample()
+{
+   if(!AcquireClockHistoryLock())
+      return false;
+
+   bool result = AppendClockHistorySampleUnlocked();
+
+   ReleaseClockHistoryLock();
+
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| Append trading or quote sessions                                 |
 //+------------------------------------------------------------------+
 bool AppendSessionArray(
    string &json,
@@ -650,9 +659,6 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   if(!AcquireClockHistoryLock())
-      return INIT_FAILED;
-
    g_run_id = StringFormat(
       "%I64d_%u",
       (long)TimeLocal(),
@@ -664,14 +670,12 @@ int OnInit()
    if(!PublishSchedule())
    {
       Print("Initial broker schedule export failed.");
-      ReleaseClockHistoryLock();
       return INIT_FAILED;
    }
 
    if(!AppendClockHistorySample())
    {
       Print("Initial clock history sample failed.");
-      ReleaseClockHistoryLock();
       return INIT_FAILED;
    }
 
@@ -681,8 +685,6 @@ int OnInit()
          "Timer initialization failed. error=%d",
          GetLastError()
       );
-
-      ReleaseClockHistoryLock();
       return INIT_FAILED;
    }
 
@@ -713,8 +715,6 @@ void OnTimer()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-
-   ReleaseClockHistoryLock();
 
    PrintFormat(
       "GoldBot session and clock bridge stopped. reason=%d",
