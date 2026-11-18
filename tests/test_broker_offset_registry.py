@@ -942,3 +942,49 @@ def test_rollback_fsync_failure_reports_uncertain_integrity(
 
     # The current process can read the restored contents.
     assert registry.load() == (first,)
+
+def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    original_record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    legacy_data = read_json_lines(path)[0]
+    legacy_data["schema_version"] = 2
+
+    for field in (
+        "event_type",
+        "previous_offset_seconds",
+        "transition_start_utc",
+        "transition_end_utc",
+    ):
+        legacy_data.pop(field)
+
+    original_v2 = json.dumps(
+        legacy_data,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    path.write_text(original_v2 + "\n", encoding="utf-8")
+
+    new_record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+    )
+
+    records = registry.load()
+
+    assert len(records) == 2
+    assert records[0].schema_version == 2
+    assert records[0].offset_seconds == original_record.offset_seconds
+    assert records[1].schema_version == 3
+    assert records[1].event_type == "CONFIRMATION"
+    assert records[1].previous_offset_seconds == records[0].offset_seconds
+    assert records[1] == new_record
+
+    stored_lines = path.read_text(encoding="utf-8").splitlines()
+    assert stored_lines[0] == original_v2
