@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -115,10 +114,13 @@ async def _candle_clock_calibration_loop(
                 )
 
         except Exception as exc:
-            calibrator.reset()
-
+            # A single failed MT5 read is transient evidence, not proof
+            # that an already verified broker-clock calibration is wrong.
+            # Identity changes and invalid clock evidence are handled by
+            # the calibrator when a valid sample is received.
             logger.warning(
-                "Broker candle clock sample failed: %s: %s",
+                "Broker candle clock sample failed; "
+                "keeping the existing calibration: %s: %s",
                 type(exc).__name__,
                 exc,
             )
