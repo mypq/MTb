@@ -504,3 +504,67 @@ def test_new_mt5_account_identity_gets_independent_baseline(
         sample["account_login"] == ACCOUNT + 1
         for sample in new_record.evidence_samples
     )
+def test_new_broker_server_identity_gets_independent_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    original_rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        original_rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    assert len(registry.load()) == 1
+
+    new_server_rows = []
+
+    for sequence in range(1, 4):
+        row = make_row(sequence, 7200)
+        row["run_id"] = "different-server-run"
+        row["broker_server"] = "Different-Broker-Server"
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60
+        )
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 7200
+        )
+        row["time_current_quote_epoch"] = row[
+            "time_trade_server_epoch"
+        ]
+        new_server_rows.append(row)
+
+    append_rows(history_path, new_server_rows)
+
+    second = service.poll_once()
+    records = registry.load()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(records) == 2
+
+    old_record, new_record = records
+
+    assert old_record.identity == IDENTITY
+    assert old_record.event_type == "BASELINE"
+
+    assert new_record.identity == (
+        ACCOUNT,
+        "Different-Broker-Server",
+        SYMBOL,
+        BUILD,
+    )
+    assert new_record.event_type == "BASELINE"
+    assert new_record.run_id == "different-server-run"
+
+    assert all(
+        sample["broker_server"] == "Different-Broker-Server"
+        for sample in new_record.evidence_samples
+    )
