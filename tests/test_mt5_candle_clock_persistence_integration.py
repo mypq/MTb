@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from math import floor
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from fastapi import HTTPException
 import pytest
 
+import backend.main as main
 from backend.config import Settings
 from backend.database import Database
 from backend.database_models import DatabaseBase
@@ -128,6 +131,7 @@ def make_mt5_module(
 
 def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
     tmp_path,
+    monkeypatch,
 ):
     verifier = NtpTimeVerifier(
         servers=("ntp-a", "ntp-b", "ntp-c"),
@@ -273,6 +277,53 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             assert [
                 int(candle.timestamp.timestamp())
                 for candle in history_after_ntp_loss
+            ] == expected_utc_epochs
+
+            # The production API must also reject candle requests
+            # after independent NTP trust has been lost.
+            monkeypatch.setattr(
+                main,
+                "get_settings",
+                lambda: SimpleNamespace(
+                    APP_NAME="GOLD BOT",
+                    DEFAULT_TIMEFRAME="M5",
+                    MT5_SYMBOL="XAUUSD",
+                ),
+            )
+
+            application = main.create_app()
+            application.state.market_data_service = service
+            application.state.market_data_repository = repository
+
+            endpoint_route = next(
+                route
+                for route in application.routes
+                if getattr(route, "path", None)
+                == "/api/v1/market-data/candles"
+            )
+
+            with pytest.raises(HTTPException) as api_error:
+                endpoint_route.endpoint(
+                    symbol="XAUUSD",
+                    timeframe="M5",
+                    count=2,
+                )
+
+            assert api_error.value.status_code == 503
+
+            # The API must not persist anything after the clock
+            # verification has been invalidated.
+            history_after_api_rejection = repository.get_history(
+                symbol="XAUUSD",
+                timeframe="M5",
+                count=2,
+            )
+
+            assert len(history_after_api_rejection) == 2
+
+            assert [
+                int(candle.timestamp.timestamp())
+                for candle in history_after_api_rejection
             ] == expected_utc_epochs
 
         finally:
