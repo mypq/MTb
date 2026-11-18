@@ -51,10 +51,21 @@ class FakeBrokerTickWorker:
         return self._status
 
 
+class FakeBrokerCandleClockCalibrator:
+    def __init__(self, snapshot):
+        self._snapshot = snapshot
+        self.snapshot_calls = 0
+
+    def snapshot(self):
+        self.snapshot_calls += 1
+        return self._snapshot
+
+
 def create_status_endpoint(
     monkeypatch,
     chrony_status,
     broker_tick_worker=None,
+    broker_candle_clock_calibrator=None,
 ):
     settings = SimpleNamespace(
         APP_NAME="GOLD_BOT",
@@ -82,6 +93,9 @@ def create_status_endpoint(
         FakeNtpVerificationMonitor()
     )
     application.state.broker_tick_worker = broker_tick_worker
+    application.state.broker_candle_clock_calibrator = (
+        broker_candle_clock_calibrator
+    )
 
     route = next(
         route
@@ -323,3 +337,74 @@ def test_system_status_preserves_broker_tick_worker_errors(
         "UNVERIFIED"
     )
     assert worker.status_calls == 1
+
+
+def test_system_status_reports_candle_clock_calibration(
+    monkeypatch,
+):
+    chrony_status = make_chrony_status()
+
+    expected_snapshot = SimpleNamespace(
+        status="COLLECTING",
+        symbol="GOLD",
+        account_login=337260380,
+        broker_server="XMGlobal-MT5 9",
+        offset_seconds=None,
+        uncertainty_seconds=None,
+        sample_count=3,
+        reason="Collecting stable M1/M5 boundary samples.",
+    )
+
+    calibrator = FakeBrokerCandleClockCalibrator(
+        expected_snapshot
+    )
+
+    endpoint = create_status_endpoint(
+        monkeypatch,
+        chrony_status,
+        broker_candle_clock_calibrator=calibrator,
+    )
+
+    result = asyncio.run(endpoint())
+
+    assert result["broker_candle_clock_calibration"] == {
+        "status": "COLLECTING",
+        "symbol": "GOLD",
+        "account_login": 337260380,
+        "broker_server": "XMGlobal-MT5 9",
+        "offset_seconds": None,
+        "uncertainty_seconds": None,
+        "sample_count": 3,
+        "reason": "Collecting stable M1/M5 boundary samples.",
+    }
+
+    assert calibrator.snapshot_calls == 1
+
+    assert (
+        result["broker_tick_monitor"]["clock_verification"]
+        == "UNVERIFIED"
+    )
+
+    assert result["time_sync"]["broker_time_verified"] is False
+
+
+def test_system_status_reports_unavailable_candle_calibrator(
+    monkeypatch,
+):
+    endpoint = create_status_endpoint(
+        monkeypatch,
+        make_chrony_status(),
+    )
+
+    result = asyncio.run(endpoint())
+
+    assert result["broker_candle_clock_calibration"] == {
+        "status": "UNVERIFIED",
+        "symbol": None,
+        "account_login": None,
+        "broker_server": None,
+        "offset_seconds": None,
+        "uncertainty_seconds": None,
+        "sample_count": 0,
+        "reason": "Candle clock calibrator is unavailable.",
+    }
