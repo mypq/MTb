@@ -402,3 +402,44 @@ def test_manual_reset_clears_identity_and_calibration():
     assert snapshot.uncertainty_seconds is None
     assert snapshot.sample_count == 0
     assert snapshot.reason == "Calibration manually reset."
+
+def test_delayed_active_m1_update_near_minute_boundary_preserves_verified_calibration():
+    calibrator, _ = make_calibrator(required_samples=3)
+
+    verified = calibrate(calibrator)
+    assert verified.status == "VERIFIED"
+    assert verified.offset_seconds == BROKER_OFFSET
+
+    boundary_time = OBSERVED_AT.replace(minute=35, second=2)
+    delayed_observation = make_observation(
+        observed_at=boundary_time,
+    )
+
+    # MT5 has not yet received the first tick of the new M1 candle.
+    delayed_observation["m1_active_open_epoch"] -= 60
+
+    snapshot = calibrator.observe(**delayed_observation)
+
+    assert snapshot.status == "VERIFIED"
+    assert snapshot.offset_seconds == BROKER_OFFSET
+    assert snapshot.sample_count == verified.sample_count
+    assert "Ignored a delayed active-candle update" in snapshot.reason
+
+
+def test_real_offset_change_near_minute_boundary_is_not_ignored():
+    calibrator, _ = make_calibrator(required_samples=3)
+
+    verified = calibrate(calibrator)
+    assert verified.status == "VERIFIED"
+
+    boundary_time = OBSERVED_AT.replace(minute=35, second=2)
+    changed_observation = make_observation(
+        observed_at=boundary_time,
+        offset=BROKER_OFFSET + 60,
+    )
+
+    snapshot = calibrator.observe(**changed_observation)
+
+    assert snapshot.status == "DEGRADED"
+    assert snapshot.offset_seconds is None
+    assert snapshot.sample_count == 0
