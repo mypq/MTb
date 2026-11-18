@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -113,7 +112,11 @@ def test_append_and_load_v2_candidate(tmp_path) -> None:
 
     assert len(loaded) == 1
     assert loaded[0] == record
-    assert record.schema_version == 2
+    assert record.schema_version == 3
+    assert record.event_type == "BASELINE"
+    assert record.previous_offset_seconds is None
+    assert record.transition_start_utc is None
+    assert record.transition_end_utc is None
     assert record.record_sequence == 1
     assert record.offset_seconds == 7200
     assert record.evidence_sample_count == 3
@@ -139,7 +142,7 @@ def test_v1_history_remains_readable_and_unchanged(tmp_path) -> None:
     assert path.read_text(encoding="utf-8").strip() == original
 
 
-def test_v1_and_v2_records_can_coexist(tmp_path) -> None:
+def test_v1_and_v3_records_can_coexist(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
     legacy = make_v1_record()
     legacy["recorded_at_utc"] = (
@@ -159,7 +162,8 @@ def test_v1_and_v2_records_can_coexist(tmp_path) -> None:
     records = registry.load()
     assert len(records) == 2
     assert records[0].schema_version == 1
-    assert records[1].schema_version == 2
+    assert records[1].schema_version == 3
+    assert records[1].event_type == "CONFIRMATION"
     assert records[1] == new_record
 
 
