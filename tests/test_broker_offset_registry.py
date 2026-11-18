@@ -879,3 +879,66 @@ def test_rollback_failure_reports_uncertain_registry_integrity(
         registry.load()
 
     assert first.record_sequence == 1
+
+def test_rollback_fsync_failure_reports_uncertain_integrity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    original_content = path.read_bytes()
+    original_write = registry_module.os.write
+
+    def partial_then_fail(descriptor, data):
+        partial_size = max(1, len(data) // 2)
+
+        monkeypatch.setattr(
+            registry_module.os,
+            "write",
+            lambda *_args: (_ for _ in ()).throw(
+                OSError("Simulated write failure.")
+            ),
+        )
+
+        return original_write(
+            descriptor,
+            data[:partial_size],
+        )
+
+    def failing_fsync(_descriptor):
+        raise OSError("Simulated rollback fsync failure.")
+
+    monkeypatch.setattr(
+        registry_module.os,
+        "write",
+        partial_then_fail,
+    )
+    monkeypatch.setattr(
+        registry_module.os,
+        "fsync",
+        failing_fsync,
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="rollback also failed",
+    ):
+        registry.append_candidate(
+            decision_with_run_id(
+                make_decision(),
+                "rollback-fsync-failure",
+            ),
+            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        )
+
+    # The truncate succeeded, but its durability could not be confirmed.
+    assert path.read_bytes() == original_content
+
+    # The current process can read the restored contents.
+    assert registry.load() == (first,)
