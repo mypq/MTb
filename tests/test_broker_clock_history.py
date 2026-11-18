@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -37,9 +36,11 @@ def valid_source_row(**overrides):
         "broker_server": "XMGlobal-MT5 9",
         "symbol": "GOLD",
         "ntp_verified": "true",
-        "ntp_checked_at_unix": "1794861857.2580843",
+        "ntp_checked_at_unix": "1794861856.2580843",
         "ntp_offset_seconds": "0.0721954107",
         "ntp_uncertainty_seconds": "0.0469955205",
+        "ntp_sample_count": "3",
+        "ntp_age_seconds": "1.0",
         "tick_time_epoch_raw": "1794869056.659",
         "tick_update_status": "UPDATED",
         "tick_corrected_read_midpoint_utc": (
@@ -473,6 +474,8 @@ def test_preserves_old_rows_when_adding_new_session(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        ntp_checked_at_unix="1794948256.2580843",
+        ntp_age_seconds="1.0",
     )
     write_source_csv(source, [second])
 
@@ -588,6 +591,8 @@ def test_history_keeps_existing_rows_unchanged(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        ntp_checked_at_unix="1794948256.2580843",
+        ntp_age_seconds="1.0",
     )
     write_source_csv(source, [second])
 
