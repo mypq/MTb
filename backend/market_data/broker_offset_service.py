@@ -1,4 +1,3 @@
-
 """Runtime coordinator for incremental MT5 clock evidence processing."""
 
 from __future__ import annotations
@@ -18,6 +17,9 @@ from backend.market_data.broker_offset_registry import (
 from backend.market_data.clock_history import MT5ClockHistorySample
 from backend.market_data.clock_history_reader import (
     ClockHistoryIncrementalReader,
+)
+from backend.market_data.clock_history_lock import (
+    ClockHistoryLockBusyError,
 )
 
 
@@ -108,6 +110,12 @@ class BrokerOffsetEvidenceService:
                         self._state = "WAITING_FOR_NEW_EVIDENCE"
                     else:
                         self._state = "COLLECTING"
+
+            except ClockHistoryLockBusyError:
+                # Writer contention is temporary, not evidence corruption.
+                # Preserve detector state and resume from the same checkpoint.
+                self._state = "WAITING_FOR_WRITER"
+                self._last_error = None
 
             except Exception as exc:
                 # Discard the uncommitted reader batch. A new reader
