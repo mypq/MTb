@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -175,11 +176,17 @@ def configure_test_candle_clock(
         + broker_offset_seconds
     )
 
-    # Simulate three observations spanning one second.
-    # This keeps the real calibration span requirement enabled.
+    # Simulate three observations spanning one second while keeping
+    # monotonic timestamps aligned with the real system clock.
+    base_monotonic = time.monotonic()
+
     with patch(
         "backend.market_data.broker_candle_clock.monotonic",
-        side_effect=(100.0, 100.5, 101.0),
+        side_effect=(
+            base_monotonic,
+            base_monotonic + 0.5,
+            base_monotonic + 1.0,
+        ),
     ):
         snapshot = None
 
