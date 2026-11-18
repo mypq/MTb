@@ -25,6 +25,7 @@ class MarketDataIssueCode(str, Enum):
     SESSION_CALENDAR_SYMBOL_MISMATCH = "SESSION_CALENDAR_SYMBOL_MISMATCH"
     STALE_DATA = "STALE_DATA"
     FUTURE_EXPECTED_CLOSE = "FUTURE_EXPECTED_CLOSE"
+    CLOCK_EVIDENCE_INVALID = "CLOCK_EVIDENCE_INVALID"
 
 
 class MarketDataIssue(BaseModel):
@@ -79,9 +80,16 @@ class MarketDataValidator:
     A configured broker session calendar may classify missing candle
     intervals as confirmed market closures. Unclassified gaps remain
     blocking. The calendar never repairs or fabricates candle data.
+
+    Freshness verification requires trusted clock evidence attached
+    to the MT5 candle batch. Missing, stale, or inconsistent evidence
+    blocks analysis eligibility.
     """
 
     MAX_STALENESS_TIMEFRAME_MULTIPLIER = 2
+
+    # Must remain aligned with NtpTimeVerifier.max_age_seconds.
+    MAX_CLOCK_EVIDENCE_AGE_SECONDS = 6 * 60 * 60
 
     def __init__(
         self,
@@ -111,7 +119,22 @@ class MarketDataValidator:
         if timeframe_seconds <= 0:
             raise ValueError("timeframe_seconds must be greater than zero.")
 
-        validation_time = checked_at or datetime.now(timezone.utc)
+        clock_evidence = batch.clock_evidence
+
+        if checked_at is None:
+            if (
+                clock_evidence is not None
+                and clock_evidence.verified is True
+            ):
+                validation_time = datetime.fromtimestamp(
+                    datetime.now(timezone.utc).timestamp()
+                    + clock_evidence.ntp_offset_seconds,
+                    tz=timezone.utc,
+                )
+            else:
+                validation_time = datetime.now(timezone.utc)
+        else:
+            validation_time = checked_at
 
         if (
             validation_time.tzinfo is None
@@ -128,6 +151,60 @@ class MarketDataValidator:
         structurally_valid = True
         volume_data_available = True
         calendar_matches_symbol = False
+
+        # Validate the independent clock evidence.
+        clock_evidence_valid = False
+
+        if (
+            clock_evidence is not None
+            and clock_evidence.verified is True
+            and batch.source.strip().upper() == "MT5"
+            and clock_evidence.symbol.casefold()
+            == batch.symbol.casefold()
+            and clock_evidence.account_login > 0
+            and clock_evidence.terminal_build > 0
+            and bool(clock_evidence.broker_server.strip())
+            and clock_evidence.ntp_sample_count >= 3
+            and len(clock_evidence.ntp_servers) >= 3
+            and all(
+                isinstance(server, str) and server.strip()
+                for server in clock_evidence.ntp_servers
+            )
+            and len(
+                {
+                    server.strip().casefold()
+                    for server in clock_evidence.ntp_servers
+                }
+            ) >= 3
+            and clock_evidence.calibration_sample_count >= 3
+            and clock_evidence.ntp_uncertainty_seconds <= 1.0
+            and clock_evidence.candle_uncertainty_seconds <= 2.0
+        ):
+            evidence_age = (
+                validation_time - clock_evidence.checked_at
+            ).total_seconds()
+
+            receive_evidence_age = (
+                batch.received_at - clock_evidence.checked_at
+            ).total_seconds()
+
+            clock_evidence_valid = (
+                0 <= evidence_age
+                <= self.MAX_CLOCK_EVIDENCE_AGE_SECONDS
+                and 0 <= receive_evidence_age
+                <= self.MAX_CLOCK_EVIDENCE_AGE_SECONDS
+            )
+
+        if not clock_evidence_valid:
+            issues.append(
+                MarketDataIssue(
+                    code=MarketDataIssueCode.CLOCK_EVIDENCE_INVALID,
+                    message=(
+                        "Freshness cannot be verified because trusted "
+                        "clock evidence is missing, stale, or inconsistent."
+                    ),
+                )
+            )
 
         if self._session_calendar is not None:
             calendar_matches_symbol = (
@@ -348,6 +425,7 @@ class MarketDataValidator:
         analysis_eligible = (
             structurally_valid
             and freshness_eligible
+            and clock_evidence_valid
             and not has_unclassified_gaps
         )
 
@@ -366,7 +444,9 @@ class MarketDataValidator:
             ),
             data_age_seconds=data_age_seconds,
             freshness_eligible=freshness_eligible,
-            freshness_verified=False,
+            freshness_verified=(
+                clock_evidence_valid and freshness_eligible
+            ),
             issues=tuple(issues),
             gaps=tuple(gaps),
         )
