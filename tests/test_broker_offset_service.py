@@ -894,3 +894,61 @@ def test_service_restart_uses_incremental_checkpoint(
         item["sample_sequence"]
         for item in records[1].evidence_samples
     ] == [4, 5, 6]
+def test_registry_append_is_not_duplicated_when_checkpoint_save_fails(
+    tmp_path,
+    monkeypatch,
+):
+    rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        rows,
+    )
+
+    checkpoint_path = history_path.with_suffix(
+        ".checkpoint.json"
+    )
+
+    fail_once = True
+
+    def fail_checkpoint_save(checkpoint):
+        nonlocal fail_once
+
+        if fail_once:
+            fail_once = False
+            raise OSError(
+                "Simulated checkpoint persistence failure"
+            )
+
+    monkeypatch.setattr(
+        service._reader.store,
+        "save",
+        fail_checkpoint_save,
+    )
+
+    # Registry append succeeds, but checkpoint persistence fails.
+    first = service.poll_once()
+
+    assert first.state == "ERROR"
+    assert "checkpoint persistence failure" in first.error.lower()
+
+    records_after_failure = registry.load()
+
+    assert len(records_after_failure) == 1
+    assert records_after_failure[0].event_type == "BASELINE"
+    assert not checkpoint_path.exists()
+
+    # Retry must replay the samples without duplicating the event.
+    second = service.poll_once()
+
+    assert second.error is None
+    assert second.state == "WAITING_FOR_NEW_EVIDENCE"
+    assert second.samples_processed == 3
+    assert checkpoint_path.exists()
+
+    final_records = registry.load()
+
+    assert len(final_records) == 1
+    assert final_records[0] == records_after_failure[0]
