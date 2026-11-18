@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -32,7 +31,7 @@ IDENTITY = (ACCOUNT, SERVER, SYMBOL, BUILD)
 
 
 def install_chronological_registry_clock(monkeypatch):
-    """Give each registry append a deterministic, chronological timestamp."""
+    """Give each registry append a deterministic UTC timestamp."""
 
     class ControlledDateTime(REAL_DATETIME):
         calls = 0
@@ -42,10 +41,30 @@ def install_chronological_registry_clock(monkeypatch):
             cls.calls += 1
             value = BASE_TIME + timedelta(minutes=3 * cls.calls)
 
-            if tz is not None:
-                return value.astimezone(tz)
+            if tz is None:
+                return cls(
+                    value.year,
+                    value.month,
+                    value.day,
+                    value.hour,
+                    value.minute,
+                    value.second,
+                    value.microsecond,
+                )
 
-            return value.replace(tzinfo=None)
+            value = value.astimezone(tz)
+
+            return cls(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+                tzinfo=value.tzinfo,
+                fold=value.fold,
+            )
 
     monkeypatch.setattr(
         registry_module,
