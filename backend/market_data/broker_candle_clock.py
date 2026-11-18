@@ -9,7 +9,7 @@ from statistics import median
 from threading import RLock
 from time import monotonic
 
-from backend.market_data.ntp_time import NtpTimeVerifier
+from backend.market_data.ntp_time import NtpTimeVerifier, NtpVerification
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +81,7 @@ class BrokerCandleClockCalibrator:
         self._offset: float | None = None
         self._uncertainty: float | None = None
         self._last_sample_monotonic: float | None = None
+        self._ntp_evidence: NtpVerification | None = None
         self._status = "UNVERIFIED"
         self._reason = "No candle clock samples collected."
         self._lock = RLock()
@@ -207,6 +208,7 @@ class BrokerCandleClockCalibrator:
             now_mono = monotonic()
             self._samples.append((minute_aligned, now_mono))
             self._last_sample_monotonic = now_mono
+            self._ntp_evidence = ntp
             self._status = "COLLECTING"
             self._reason = "Collecting stable M1/M5 boundary samples."
 
@@ -326,6 +328,33 @@ class BrokerCandleClockCalibrator:
 
             return self._snapshot()
 
+    def trusted_evidence(
+        self,
+    ) -> tuple[BrokerCandleClockSnapshot, NtpVerification | None]:
+        with self._lock:
+            snapshot = self.snapshot()
+
+            if snapshot.status != "VERIFIED":
+                return snapshot, None
+
+            evidence = self._ntp_evidence
+
+            if (
+                evidence is None
+                or not evidence.verified
+                or evidence.offset_seconds is None
+                or evidence.uncertainty_seconds is None
+                or evidence.sample_count < 3
+                or not self._ntp.is_trusted()
+            ):
+                invalid = self._invalidate(
+                    "DEGRADED",
+                    "Trusted NTP evidence is unavailable or expired.",
+                )
+                return invalid, None
+
+            return snapshot, evidence
+
     def reset(self) -> None:
         with self._lock:
             self._reset()
@@ -338,6 +367,7 @@ class BrokerCandleClockCalibrator:
         self._offset = None
         self._uncertainty = None
         self._last_sample_monotonic = None
+        self._ntp_evidence = None
 
     def _invalidate(
         self,
