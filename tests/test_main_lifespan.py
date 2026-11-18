@@ -17,6 +17,7 @@ class FakeAdapter:
         self.events = events
         self.connect_error = connect_error
         self.candle_clock_calibrator = None
+        self.broker_offset_registry = None
 
     def connect(self):
         self.events.append("adapter.connect")
@@ -32,6 +33,9 @@ class FakeAdapter:
 
     def set_candle_clock_calibrator(self, calibrator):
         self.candle_clock_calibrator = calibrator
+
+    def set_broker_offset_registry(self, registry):
+        self.broker_offset_registry = registry
 
 
 class FakeMonitor:
@@ -471,6 +475,7 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             self.connect_calls = 0
             self.state = MT5ConnectionState.DISCONNECTED
             self.candle_clock_calibrator = None
+            self.broker_offset_registry = None
 
         def connect(self):
             with adapter_lock:
@@ -497,6 +502,9 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
 
         def set_candle_clock_calibrator(self, calibrator):
             self.candle_clock_calibrator = calibrator
+
+        def set_broker_offset_registry(self, registry):
+            self.broker_offset_registry = registry
 
     class ControlledWorker:
         def __init__(
@@ -635,6 +643,7 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
             self.connect_calls = 0
             self.state = "DISCONNECTED"
             self.candle_clock_calibrator = None
+            self.broker_offset_registry = None
 
         def connect(self):
             self.connect_calls += 1
@@ -658,6 +667,9 @@ def test_lifespan_recovers_initial_mt5_disconnect_before_starting_workers(
 
         def set_candle_clock_calibrator(self, calibrator):
             self.candle_clock_calibrator = calibrator
+
+        def set_broker_offset_registry(self, registry):
+            self.broker_offset_registry = registry
 
     class RecoveringMonitor:
         def __init__(self, adapter, interval_seconds):
@@ -1584,6 +1596,7 @@ def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
     assert app.state._test_workers[0].stop_calls == 1
     assert "adapter.shutdown" not in events
     assert "database.dispose" in events
+
 
 def test_single_candle_clock_read_error_does_not_reset_calibration(
     monkeypatch,
