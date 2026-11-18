@@ -1,194 +1,244 @@
 
-"""Runtime coordinator for MT5 clock evidence, offset detection and storage."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
+import csv
+from datetime import datetime, timedelta, timezone
 
 from backend.market_data.broker_offset_detector import (
-    BrokerOffsetDecision,
     BrokerOffsetDetector,
 )
 from backend.market_data.broker_offset_registry import (
-    BrokerOffsetRecord,
     BrokerOffsetRegistry,
 )
-from backend.market_data.clock_history import (
-    ClockHistoryError,
-    MT5ClockHistorySample,
-    read_clock_history,
+from backend.market_data.clock_history import CLOCK_HISTORY_COLUMNS
+from backend.market_data.broker_offset_service import (
+    BrokerOffsetEvidenceService,
 )
+from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 
 
-@dataclass(frozen=True, slots=True)
-class BrokerOffsetServiceSnapshot:
-    state: str
-    samples_processed: int
-    last_decision: BrokerOffsetDecision | None
-    last_record: BrokerOffsetRecord | None
-    error: str | None
+UTC = timezone.utc
+BASE_TIME = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
+BASE_EPOCH = int(BASE_TIME.timestamp())
+
+ACCOUNT = 337260380
+SERVER = "XMGlobal-MT5 9"
+SYMBOL = "GOLD"
+BUILD = 6316
+IDENTITY = (ACCOUNT, SERVER, SYMBOL, BUILD)
 
 
-class BrokerOffsetEvidenceService:
-    """Process new SessionBridge samples and persist valid offset candidates.
+def make_verifier() -> NtpTimeVerifier:
+    verifier = NtpTimeVerifier(
+        servers=("ntp-a", "ntp-b", "ntp-c"),
+        wall_clock=lambda: float(BASE_EPOCH),
+        monotonic_clock=lambda: 100.0,
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+    assert verifier.verify().verified
+    return verifier
 
-    This service records candidates only. It does not authorize an offset
-    for market-session calculations and never modifies candle timestamps.
-    """
 
-    def __init__(
-        self,
-        clock_history_path: str | Path,
-        detector: BrokerOffsetDetector,
-        registry: BrokerOffsetRegistry,
-    ) -> None:
-        if not isinstance(clock_history_path, (str, Path)):
-            raise TypeError(
-                "clock_history_path must be a string or Path."
-            )
+def make_row(sequence: int, offset: int) -> dict[str, str]:
+    gmt = BASE_EPOCH + (sequence - 1) * 60
 
-        if not isinstance(detector, BrokerOffsetDetector):
-            raise TypeError(
-                "detector must be a BrokerOffsetDetector."
-            )
+    return {
+        "schema_version": "1",
+        "run_id": "service-test-run",
+        "sample_sequence": str(sequence),
+        "monotonic_ms": str(1000 + (sequence - 1) * 60000),
+        "time_gmt_epoch": str(gmt),
+        "time_trade_server_epoch": str(gmt + offset),
+        "time_current_quote_epoch": str(gmt + offset),
+        "time_local_epoch": str(gmt),
+        "server_utc_offset_seconds": str(offset),
+        "clock_values_valid": "true",
+        "account_login": str(ACCOUNT),
+        "broker_server": SERVER,
+        "symbol": SYMBOL,
+        "terminal_build": str(BUILD),
+        "terminal_connected": "true",
+    }
 
-        if not isinstance(registry, BrokerOffsetRegistry):
-            raise TypeError(
-                "registry must be a BrokerOffsetRegistry."
-            )
 
-        self._clock_history_path = Path(clock_history_path)
-        self._detector = detector
-        self._registry = registry
-
-        self._lock = Lock()
-        self._processed_count = 0
-        self._last_sample_signature: tuple[
-            str, int, int
-        ] | None = None
-
-        self._last_decision: BrokerOffsetDecision | None = None
-        self._last_record: BrokerOffsetRecord | None = None
-        self._last_error: str | None = None
-        self._state = "NOT_STARTED"
-
-    def poll_once(self) -> BrokerOffsetServiceSnapshot:
-        """Read history and process samples not previously processed."""
-
-        with self._lock:
-            try:
-                samples = read_clock_history(
-                    self._clock_history_path
-                )
-
-                latest_signature = self._signature(samples[-1])
-
-                history_was_replaced = (
-                    self._processed_count > len(samples)
-                    or (
-                        self._processed_count > 0
-                        and len(samples) >= self._processed_count
-                        and self._signature(
-                            samples[self._processed_count - 1]
-                        ) != self._last_sample_signature
-                    )
-                )
-
-                if self._processed_count == 0 or history_was_replaced:
-                    self._detector.reset()
-                    self._processed_count = 0
-                    self._last_sample_signature = None
-
-                    # Do not replay old history against current NTP.
-                    start_index = max(0, len(samples) - 3)
-                else:
-                    start_index = self._processed_count
-
-                for sample in samples[start_index:]:
-                    self._process_sample(sample)
-
-                self._processed_count = len(samples)
-                self._last_sample_signature = latest_signature
-                self._last_error = None
-
-                if self._last_record is not None:
-                    self._state = "CANDIDATE_RECORDED"
-                elif self._last_decision is not None:
-                    self._state = self._last_decision.status.value
-                else:
-                    self._state = "COLLECTING"
-
-            except Exception as exc:
-                # Do not continue from a partially processed batch.
-                self._detector.reset()
-                self._processed_count = 0
-                self._last_sample_signature = None
-                self._last_error = (
-                    f"{type(exc).__name__}: {exc}"
-                )
-                self._state = "ERROR"
-
-            return self._snapshot_unlocked()
-
-    def snapshot(self) -> BrokerOffsetServiceSnapshot:
-        """Return the latest service state."""
-
-        with self._lock:
-            return self._snapshot_unlocked()
-
-    def _snapshot_unlocked(self) -> BrokerOffsetServiceSnapshot:
-        return BrokerOffsetServiceSnapshot(
-            state=self._state,
-            samples_processed=self._processed_count,
-            last_decision=self._last_decision,
-            last_record=self._last_record,
-            error=self._last_error,
+def write_history(path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=CLOCK_HISTORY_COLUMNS,
+            delimiter=";",
+            lineterminator="\n",
         )
+        writer.writeheader()
+        writer.writerows(rows)
 
-    @staticmethod
-    def _signature(
-        sample: MT5ClockHistorySample,
-    ) -> tuple[str, int, int]:
-        return (
-            sample.run_id,
-            sample.sample_sequence,
-            sample.monotonic_ms,
+
+def append_rows(path, rows: list[dict[str, str]]) -> None:
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=CLOCK_HISTORY_COLUMNS,
+            delimiter=";",
+            lineterminator="\n",
         )
+        writer.writerows(rows)
 
-    def _process_sample(
-        self,
-        sample: MT5ClockHistorySample,
-    ) -> None:
-        decision = self._detector.observe(sample)
-        self._last_decision = decision
 
-        if not decision.candidate_ready:
-            return
+def make_service(tmp_path, initial_rows):
+    history_path = tmp_path / "clock_history.csv"
+    registry_path = tmp_path / "offsets.jsonl"
 
-        if (
-            decision.offset_seconds is None
-            or decision.identity is None
-            or decision.run_id is None
-        ):
-            self._state = "INVALID_CANDIDATE"
-            return
+    write_history(history_path, initial_rows)
 
-        existing_records = self._registry.load()
+    detector = BrokerOffsetDetector(make_verifier())
+    registry = BrokerOffsetRegistry(registry_path)
 
-        duplicate = any(
-            record.run_id == decision.run_id
-            and record.identity == decision.identity
-            and record.offset_seconds == decision.offset_seconds
-            for record in existing_records
-        )
+    service = BrokerOffsetEvidenceService(
+        history_path,
+        detector,
+        registry,
+    )
 
-        if duplicate:
-            self._state = "CANDIDATE_ALREADY_RECORDED"
-            return
+    return service, registry, history_path
 
-        self._last_record = self._registry.append_candidate(
-            decision
-        )
-        self._state = "CANDIDATE_RECORDED"
+
+def test_first_three_supported_samples_record_baseline(tmp_path):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, _ = make_service(tmp_path, rows)
+
+    snapshot = service.poll_once()
+    records = registry.load()
+
+    assert snapshot.error is None
+    assert snapshot.samples_processed == 3
+    assert len(records) == 1
+    assert records[0].schema_version == 3
+    assert records[0].event_type == "BASELINE"
+    assert records[0].offset_seconds == 7200
+    assert records[0].previous_offset_seconds is None
+    assert records[0].evidence_sample_count == 3
+    assert records[0].ntp_evidence["verified"] is True
+
+
+def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, _ = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    second = service.poll_once()
+
+    assert first.error is None
+    assert second.error is None
+    assert len(registry.load()) == 1
+
+
+def test_three_new_samples_record_offset_change(tmp_path):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    service.poll_once()
+
+    append_rows(
+        history_path,
+        [make_row(sequence, 10800) for sequence in range(4, 7)],
+    )
+
+    snapshot = service.poll_once()
+    records = registry.load()
+
+    assert snapshot.error is None
+    assert len(records) == 2
+
+    baseline, change = records
+
+    assert baseline.event_type == "BASELINE"
+    assert baseline.offset_seconds == 7200
+
+    assert change.event_type == "OFFSET_CHANGE"
+    assert change.previous_offset_seconds == 7200
+    assert change.offset_seconds == 10800
+    assert change.transition_start_utc is not None
+    assert change.transition_end_utc is not None
+    assert change.transition_end_utc > change.transition_start_utc
+
+
+def test_return_to_previous_offset_is_recorded_as_new_change(tmp_path):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    service.poll_once()
+
+    append_rows(
+        history_path,
+        [make_row(sequence, 10800) for sequence in range(4, 7)],
+    )
+    service.poll_once()
+
+    append_rows(
+        history_path,
+        [make_row(sequence, 7200) for sequence in range(7, 10)],
+    )
+    snapshot = service.poll_once()
+
+    records = registry.load()
+
+    assert snapshot.error is None
+    assert len(records) == 3
+
+    baseline, first_change, return_change = records
+
+    assert baseline.event_type == "BASELINE"
+    assert baseline.offset_seconds == 7200
+
+    assert first_change.event_type == "OFFSET_CHANGE"
+    assert first_change.previous_offset_seconds == 7200
+    assert first_change.offset_seconds == 10800
+
+    assert return_change.event_type == "OFFSET_CHANGE"
+    assert return_change.previous_offset_seconds == 10800
+    assert return_change.offset_seconds == 7200
+
+    assert return_change.record_sequence == 3
+    assert return_change.transition_start_utc is not None
+    assert return_change.transition_end_utc is not None
+    assert (
+        return_change.transition_end_utc
+        > return_change.transition_start_utc
+    )
+
+
+def test_incomplete_history_does_not_create_candidate(tmp_path):
+    rows = [make_row(sequence, 7200) for sequence in range(1, 3)]
+    service, registry, _ = make_service(tmp_path, rows)
+
+    snapshot = service.poll_once()
+
+    assert snapshot.error is None
+    assert len(registry.load()) == 0
+
+
+def test_corrupt_history_reports_error_without_recording(tmp_path):
+    history_path = tmp_path / "clock_history.csv"
+    registry_path = tmp_path / "offsets.jsonl"
+
+    history_path.write_text(
+        "invalid;clock;history\nbroken\n",
+        encoding="utf-8",
+    )
+
+    service = BrokerOffsetEvidenceService(
+        history_path,
+        BrokerOffsetDetector(make_verifier()),
+        BrokerOffsetRegistry(registry_path),
+    )
+
+    snapshot = service.poll_once()
+
+    assert snapshot.state == "ERROR"
+    assert snapshot.error is not None
+    assert len(BrokerOffsetRegistry(registry_path).load()) == 0
