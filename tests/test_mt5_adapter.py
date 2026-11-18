@@ -316,7 +316,7 @@ def test_symbol_information_mapping():
 def test_empty_symbol_is_rejected():
     adapter = MT5Adapter(
         settings=make_settings(),
-        mt5_module=make_mt5_module(),
+        mt5_module=mt5_module(),
     )
 
     with pytest.raises(ValueError):
@@ -464,7 +464,9 @@ def test_broker_candle_offset_is_subtracted_before_utc_conversion():
 
 
 def test_closed_candle_batch_contains_verified_clock_evidence():
-    adapter, mt5 = make_connected_adapter()
+    adapter, mt5 = make_connected_adapter(
+        broker_offset_seconds=7200,
+    )
 
     timestamp = int(
         (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
@@ -479,7 +481,7 @@ def test_closed_candle_batch_contains_verified_clock_evidence():
     assert evidence is not None
     assert evidence.verified is True
     assert evidence.account_login == 123456
-    assert evidence.broker_server == "TestBroker"
+    assert evidence.broker_server == "Demo-Server"
     assert evidence.symbol == "XAUUSD"
     assert evidence.terminal_build > 0
     assert evidence.ntp_sample_count >= 3
