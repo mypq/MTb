@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pytest
@@ -80,12 +79,13 @@ def test_successful_verification_is_used():
     assert error == ""
 
 
-def test_failed_refresh_keeps_previous_success():
+def test_failed_refresh_immediately_invalidates_previous_success():
     clock = FakeClock()
     verifier = make_verifier(clock)
 
     first = verifier.verify()
     assert first.verified is True
+    assert verifier.is_trusted() is True
 
     clock.advance(60)
 
@@ -93,7 +93,6 @@ def test_failed_refresh_keeps_previous_success():
         raise OSError("UDP 123 unavailable")
 
     verifier._query = failed_query
-
     failed_attempt = verifier.verify()
 
     result, trusted, error = resolve_ntp_state(
@@ -101,17 +100,19 @@ def test_failed_refresh_keeps_previous_success():
     )
 
     assert failed_attempt.verified is False
-    assert trusted is True
-    assert result is first
-    assert result.offset_seconds == pytest.approx(0.05)
-    assert "Fewer than three valid NTP samples" in error
+    assert result is None
+    assert trusted is False
+    assert error
+    assert verifier.last_verification() is None
 
 
-def test_failed_refresh_does_not_refresh_verification_age():
+def test_failed_refresh_does_not_preserve_previous_verification():
     clock = FakeClock()
     verifier = make_verifier(clock)
 
     first = verifier.verify()
+    assert first.verified is True
+
     clock.advance(60)
 
     verifier._query = lambda server: (_ for _ in ()).throw(
@@ -124,8 +125,8 @@ def test_failed_refresh_does_not_refresh_verification_age():
         verifier, failed_attempt
     )
 
-    assert trusted is True
-    assert result is first
+    assert result is None
+    assert trusted is False
 
     clock.advance(6 * 60 * 60)
 
@@ -173,11 +174,13 @@ def test_expired_previous_verification_is_not_reused():
     assert trusted is False
 
 
-def test_refresh_exception_preserves_previous_success():
+def test_refresh_exception_invalidates_previous_success():
     clock = FakeClock()
     verifier = make_verifier(clock)
 
     first = verifier.verify()
+    assert first.verified is True
+
     clock.advance(60)
 
     result, trusted, error = resolve_ntp_state(
@@ -186,9 +189,10 @@ def test_refresh_exception_preserves_previous_success():
         "OSError: UDP 123 unavailable",
     )
 
-    assert trusted is True
-    assert result is first
+    assert result is None
+    assert trusted is False
     assert error == "OSError: UDP 123 unavailable"
+    assert verifier.last_verification() is None
 
 
 def test_successful_new_verification_replaces_previous_one():
