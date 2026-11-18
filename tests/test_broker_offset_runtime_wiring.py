@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -11,9 +10,14 @@ class FakeAdapter:
     def __init__(self, settings):
         self.settings = settings
         self.shutdown_called = False
+        self.calibrator = None
+        self.broker_offset_registry = None
 
     def set_candle_clock_calibrator(self, calibrator):
         self.calibrator = calibrator
+
+    def set_broker_offset_registry(self, registry):
+        self.broker_offset_registry = registry
 
     def shutdown(self):
         self.shutdown_called = True
@@ -262,6 +266,16 @@ def test_lifespan_starts_and_stops_configured_broker_offset_pipeline(
                 created["service"]
             )
             assert app.state.broker_offset_monitor is monitor
+
+            # التأكد من ربط السجل (Registry) بالـ Adapter والـ Service بشكل صحيح
+            assert (
+                app.state.mt5_adapter.broker_offset_registry
+                is created["registry"]
+            )
+            assert (
+                created["service"].registry
+                is created["registry"]
+            )
 
             assert created["service"].history_path == (
                 "runtime/clock_history.csv"
