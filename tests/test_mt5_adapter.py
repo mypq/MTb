@@ -38,6 +38,7 @@ def make_mt5_module(
     terminal = SimpleNamespace(
         connected=connected,
         trade_allowed=True,
+        build=6316,
     )
 
     account = SimpleNamespace(
@@ -176,8 +177,6 @@ def configure_test_candle_clock(
         + broker_offset_seconds
     )
 
-    # Simulate three observations spanning one second while keeping
-    # monotonic timestamps aligned with the real system clock.
     base_monotonic = time.monotonic()
 
     with patch(
@@ -204,6 +203,28 @@ def configure_test_candle_clock(
     assert snapshot.status == "VERIFIED"
 
     adapter.set_candle_clock_calibrator(calibrator)
+
+    # A valid CONFIRMATION record for this test identity.
+    confirmation = SimpleNamespace(
+        event_type="CONFIRMATION",
+        offset_seconds=broker_offset_seconds,
+        evidence_sample_count=3,
+        evidence_samples=({}, {}, {}),
+        ntp_evidence={
+            "verified": True,
+            "sample_count": 3,
+            "servers": [
+                "test-ntp-1",
+                "test-ntp-2",
+                "test-ntp-3",
+            ],
+        },
+    )
+
+    registry = Mock()
+    registry.latest.return_value = confirmation
+
+    adapter.set_broker_offset_registry(registry)
 
     return calibrator
 
