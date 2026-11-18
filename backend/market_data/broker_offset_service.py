@@ -1,4 +1,3 @@
-
 """Runtime coordinator for MT5 clock evidence, offset detection and storage."""
 
 from __future__ import annotations
@@ -99,6 +98,7 @@ class BrokerOffsetEvidenceService:
                     self._detector.reset()
                     self._processed_count = 0
                     self._last_sample_signature = None
+                    self._last_decision = None
 
                     # Only the latest three samples are eligible after
                     # startup or file replacement. Old evidence must not
@@ -127,6 +127,7 @@ class BrokerOffsetEvidenceService:
                 self._detector.reset()
                 self._processed_count = 0
                 self._last_sample_signature = None
+                self._last_decision = None
                 self._last_error = (
                     f"{type(exc).__name__}: {exc}"
                 )
