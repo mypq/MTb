@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -129,11 +128,12 @@ def test_fewer_than_three_samples_are_rejected():
     assert verifier.is_trusted() is False
 
 
-def test_failed_reverification_does_not_refresh_previous_success():
+def test_failed_reverification_immediately_invalidates_previous_trust():
     clock = FakeClock()
     verifier = make_verifier(clock)
 
     assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
 
     clock.advance(60)
 
@@ -145,7 +145,8 @@ def test_failed_reverification_does_not_refresh_previous_success():
     result = verifier.verify()
 
     assert result.verified is False
-    assert verifier.is_trusted() is True
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
 
 
 def test_verification_expires_after_six_hours():
@@ -211,3 +212,46 @@ def test_non_finite_sample_is_rejected():
     result = verifier.verify()
 
     assert result.verified is False
+
+
+def test_duplicate_ntp_servers_are_rejected():
+    with pytest.raises(ValueError):
+        NtpTimeVerifier(
+            servers=(
+                "time.google.com",
+                "TIME.GOOGLE.COM",
+                "pool.ntp.org",
+            )
+        )
+
+
+def test_inconsistent_ntp_server_offsets_are_rejected():
+    clock = FakeClock()
+
+    samples = {
+        "time.google.com": NtpSample(
+            server="time.google.com",
+            offset_seconds=0.0,
+            round_trip_seconds=0.05,
+            root_dispersion_seconds=0.01,
+        ),
+        "time.cloudflare.com": NtpSample(
+            server="time.cloudflare.com",
+            offset_seconds=0.1,
+            round_trip_seconds=0.05,
+            root_dispersion_seconds=0.01,
+        ),
+        "pool.ntp.org": NtpSample(
+            server="pool.ntp.org",
+            offset_seconds=0.9,
+            round_trip_seconds=0.05,
+            root_dispersion_seconds=0.01,
+        ),
+    }
+
+    verifier = make_verifier(clock, samples)
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert verifier.is_trusted() is False
