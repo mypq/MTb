@@ -20,6 +20,7 @@ from backend.market_data.broker_candle_clock import (
 from backend.market_data.broker_offset_registry import (
     BrokerOffsetRegistry,
 )
+from backend.market_data.models import MarketDataClockEvidence
 from backend.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionState,
@@ -633,7 +634,7 @@ class MT5Adapter:
                     "UTC conversion is blocked."
                 )
 
-            clock = calibrator.snapshot()
+            clock, live_ntp = calibrator.trusted_evidence()
 
             if (
                 clock.status != "VERIFIED"
@@ -643,6 +644,19 @@ class MT5Adapter:
                 raise MT5AdapterError(
                     "Candle clock is not verified for this symbol: "
                     f"{clock.reason}"
+                )
+
+            if (
+                live_ntp is None
+                or not live_ntp.verified
+                or live_ntp.offset_seconds is None
+                or live_ntp.uncertainty_seconds is None
+                or live_ntp.sample_count < 3
+                or len(live_ntp.servers) < 3
+            ):
+                raise MT5AdapterError(
+                    "Live trusted NTP evidence is unavailable. "
+                    "UTC candle conversion is blocked."
                 )
 
             # Verify that the currently connected account is the
@@ -780,7 +794,11 @@ class MT5Adapter:
                     "MT5 returned an empty candle history."
                 )
 
-            received_at = datetime.now(timezone.utc)
+            received_at = datetime.fromtimestamp(
+                datetime.now(timezone.utc).timestamp()
+                + live_ntp.offset_seconds,
+                tz=timezone.utc,
+            )
             candles: list[MarketCandle] = []
 
             try:
@@ -877,6 +895,21 @@ class MT5Adapter:
                     candles=tuple(candles),
                     received_at=received_at,
                     source="MT5",
+                    clock_evidence=MarketDataClockEvidence(
+                        verified=True,
+                        account_login=index(account.login),
+                        broker_server=str(account.server).strip(),
+                        symbol=normalized_symbol,
+                        terminal_build=terminal_build,
+                        checked_at=received_at,
+                        ntp_offset_seconds=live_ntp.offset_seconds,
+                        ntp_uncertainty_seconds=live_ntp.uncertainty_seconds,
+                        ntp_sample_count=live_ntp.sample_count,
+                        ntp_servers=tuple(live_ntp.servers),
+                        candle_offset_seconds=clock.offset_seconds,
+                        candle_uncertainty_seconds=clock.uncertainty_seconds,
+                        calibration_sample_count=clock.sample_count,
+                    ),
                 )
             except Exception as exc:
                 raise MT5AdapterError(
