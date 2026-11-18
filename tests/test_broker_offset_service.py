@@ -364,3 +364,37 @@ def test_corrupt_history_reports_error_without_recording(tmp_path):
     assert snapshot.state == "ERROR"
     assert snapshot.error is not None
     assert len(BrokerOffsetRegistry(registry_path).load()) == 0
+
+def test_corrupt_history_clears_stale_decision_but_preserves_record(
+    tmp_path,
+):
+    rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    assert first.last_decision is not None
+    assert first.last_record is not None
+    assert len(registry.load()) == 1
+
+    history_path.write_text(
+        "invalid;clock;history\nbroken\n",
+        encoding="utf-8",
+    )
+
+    failed = service.poll_once()
+
+    assert failed.state == "ERROR"
+    assert failed.error is not None
+    assert failed.last_decision is None
+
+    # Historical registry data must remain intact.
+    assert failed.last_record == first.last_record
+    assert len(registry.load()) == 1
