@@ -178,24 +178,14 @@ def valid_nonnegative_number(value):
 
 
 def observation_key(row):
-    kind = str(row.get("evidence_kind", "")).strip()
-
-    # An active candle is archived once per identity and candle,
-    # not once per polling cycle.
-    observed_at = (
-        ""
-        if kind in {"m1_active_candle", "m5_active_candle"}
-        else str(row.get("observed_at_local_utc", "")).strip()
-    )
-
     return tuple(
         str(value).strip()
         for value in (
             row.get("account_login", ""),
             row.get("broker_server", ""),
             row.get("symbol", ""),
-            observed_at,
-            kind,
+            row.get("observed_at_local_utc", ""),
+            row.get("evidence_kind", ""),
             row.get("raw_timestamp_epoch", ""),
         )
     )
@@ -358,9 +348,6 @@ def build_observations(source_rows, source_name):
     rejected_identity = 0
     skipped_untrusted_ntp = 0
     skipped_status = {}
-    skipped_duplicate_active = 0
-
-    seen_active = set()
 
     for row in source_rows:
         if not valid_identity(row):
@@ -387,7 +374,6 @@ def build_observations(source_rows, source_name):
         ntp_uncertainty = number(
             row.get("ntp_uncertainty_seconds")
         )
-        # السطر المُصحح هنا:
         ntp_checked = number(row.get("ntp_checked_at_unix"))
 
         for (
@@ -427,21 +413,6 @@ def build_observations(source_rows, source_name):
                 rejected_timestamps += 1
                 continue
 
-            identity = (
-                (row.get("account_login") or "").strip(),
-                (row.get("broker_server") or "").strip(),
-                (row.get("symbol") or "").strip(),
-                kind,
-                str(raw),
-            )
-
-            if kind in {"m1_active_candle", "m5_active_candle"}:
-                if identity in seen_active:
-                    skipped_duplicate_active += 1
-                    continue
-
-                seen_active.add(identity)
-
             observations.append({
                 "observed_at_local_utc": observed_at,
                 "account_login": (
@@ -469,7 +440,6 @@ def build_observations(source_rows, source_name):
         "rejected_identity": rejected_identity,
         "skipped_untrusted_ntp": skipped_untrusted_ntp,
         "skipped_status": skipped_status,
-        "skipped_duplicate_active": skipped_duplicate_active,
     }
 
     return observations, stats
@@ -549,10 +519,6 @@ def main():
         print(f"Rejected identity rows: {stats['rejected_identity']}")
         print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
         print(f"Skipped statuses: {stats['skipped_status']}")
-        print(
-            "Skipped duplicate active candles: "
-            f"{stats['skipped_duplicate_active']}"
-        )
         return 5
 
     try:
@@ -581,10 +547,6 @@ def main():
     print(f"Rejected identity rows: {stats['rejected_identity']}")
     print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
     print(f"Skipped statuses: {stats['skipped_status']}")
-    print(
-        "Skipped duplicate active candles: "
-        f"{stats['skipped_duplicate_active']}"
-    )
     print(f"History: {destination.resolve()}")
 
     print(
