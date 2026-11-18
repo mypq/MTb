@@ -10,13 +10,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from backend.market_data.broker_offset_detector import (
-    BrokerOffsetDecision,
-    BrokerOffsetDetector,
-)
+import backend.market_data.broker_offset_registry as registry_module
 from backend.market_data.broker_offset_registry import (
     BrokerOffsetRegistry,
     BrokerOffsetRegistryError,
+)
+from backend.market_data.broker_offset_detector import (
+    BrokerOffsetDecision,
+    BrokerOffsetDetector,
 )
 from backend.market_data.clock_history import MT5ClockHistorySample
 from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
@@ -721,3 +722,96 @@ def test_v2_history_remains_readable_and_unchanged(tmp_path) -> None:
     assert loaded[0].schema_version == 2
     assert loaded[0].offset_seconds == record.offset_seconds
     assert path.read_text(encoding="utf-8").strip() == original
+
+
+def test_partial_write_failure_restores_original_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    original_content = path.read_bytes()
+    original_write = registry_module.os.write
+    calls = 0
+
+    def failing_write(descriptor, data):
+        nonlocal calls
+        calls += 1
+
+        if calls == 1:
+            partial_size = max(1, len(data) // 2)
+            return original_write(
+                descriptor,
+                data[:partial_size],
+            )
+
+        raise OSError("Simulated partial write failure.")
+
+    monkeypatch.setattr(
+        registry_module.os,
+        "write",
+        failing_write,
+    )
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.append_candidate(
+            decision_with_run_id(
+                make_decision(),
+                "partial-write-failure",
+            ),
+            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        )
+
+    assert path.read_bytes() == original_content
+    assert registry.load() == (first,)
+
+
+def test_fsync_failure_restores_original_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    original_content = path.read_bytes()
+    original_fsync = registry_module.os.fsync
+    calls = 0
+
+    def failing_fsync(descriptor):
+        nonlocal calls
+        calls += 1
+
+        if calls == 1:
+            raise OSError("Simulated fsync failure.")
+
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(
+        registry_module.os,
+        "fsync",
+        failing_fsync,
+    )
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.append_candidate(
+            decision_with_run_id(
+                make_decision(),
+                "fsync-failure",
+            ),
+            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        )
+
+    assert calls == 2
+    assert path.read_bytes() == original_content
+    assert registry.load() == (first,)
