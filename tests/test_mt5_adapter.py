@@ -463,6 +463,31 @@ def test_broker_candle_offset_is_subtracted_before_utc_conversion():
     )
 
 
+def test_closed_candle_batch_contains_verified_clock_evidence():
+    adapter, mt5 = make_connected_adapter()
+
+    timestamp = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+    evidence = batch.clock_evidence
+
+    assert evidence is not None
+    assert evidence.verified is True
+    assert evidence.account_login == 123456
+    assert evidence.broker_server == "TestBroker"
+    assert evidence.symbol == "XAUUSD"
+    assert evidence.terminal_build > 0
+    assert evidence.ntp_sample_count >= 3
+    assert len(evidence.ntp_servers) >= 3
+    assert evidence.candle_offset_seconds == 7200
+    assert evidence.calibration_sample_count >= 3
+
+
 def test_closed_candles_exclude_current_forming_candle():
     adapter, mt5 = make_connected_adapter()
 
