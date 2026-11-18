@@ -25,6 +25,9 @@ from backend.market_data.session_calendar import (
 )
 from backend.market_data.validator import MarketDataValidator
 from backend.market_data.broker_clock import BrokerClockCalibrator
+from backend.market_data.broker_candle_clock import (
+    BrokerCandleClockCalibrator,
+)
 from backend.market_data.broker_offset_detector import (
     BrokerOffsetDetector,
 )
@@ -77,6 +80,84 @@ async def _database_backup_loop(
             continue
 
 
+async def _candle_clock_calibration_loop(
+    adapter: MT5Adapter,
+    calibrator: BrokerCandleClockCalibrator,
+    symbol: str,
+    stop_event: asyncio.Event,
+) -> None:
+    """Calibrate MT5 candle timestamps against independently verified UTC."""
+    while not stop_event.is_set():
+        try:
+            sample = await asyncio.to_thread(
+                adapter.get_active_candle_clock_sample,
+                symbol,
+            )
+
+            snapshot = calibrator.observe(**sample)
+
+            if snapshot.status == "VERIFIED":
+                logger.info(
+                    "Broker candle clock verified: symbol=%s "
+                    "server=%s offset_seconds=%s uncertainty_seconds=%s",
+                    snapshot.symbol,
+                    snapshot.broker_server,
+                    snapshot.offset_seconds,
+                    snapshot.uncertainty_seconds,
+                )
+            else:
+                logger.info(
+                    "Broker candle clock calibration: status=%s "
+                    "samples=%d reason=%s",
+                    snapshot.status,
+                    snapshot.sample_count,
+                    snapshot.reason,
+                )
+
+        except Exception as exc:
+            calibrator.reset()
+
+            logger.warning(
+                "Broker candle clock sample failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+
+async def _run_collector_after_clock_verification(
+    collector: MarketDataCollector,
+    calibrator: BrokerCandleClockCalibrator,
+    stop_event: asyncio.Event,
+) -> None:
+    """Do not start persistence until the candle clock is verified."""
+    while not stop_event.is_set():
+        snapshot = calibrator.snapshot()
+
+        if snapshot.status == "VERIFIED":
+            logger.info(
+                "Starting market-data collector after candle clock verification."
+            )
+
+            await collector.run(stop_event)
+            return
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=1.0,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -110,6 +191,18 @@ async def lifespan(app: FastAPI):
         minimum_span_seconds=3.0,
         maximum_spread_seconds=0.5,
         maximum_offset_change_seconds=1.0,
+    )
+
+    broker_candle_clock_calibrator = BrokerCandleClockCalibrator(
+        ntp_verifier,
+        required_samples=5,
+        minimum_span_seconds=3.0,
+        maximum_spread_seconds=0.5,
+        maximum_sample_age_seconds=30.0,
+    )
+
+    adapter.set_candle_clock_calibrator(
+        broker_candle_clock_calibrator
     )
 
     # Broker-offset evidence pipeline.
@@ -162,6 +255,9 @@ async def lifespan(app: FastAPI):
 
     ntp_stop_event = asyncio.Event()
     ntp_task = None
+
+    candle_clock_stop_event = asyncio.Event()
+    candle_clock_task = None
 
     broker_offset_stop_event = asyncio.Event()
     broker_offset_task = None
@@ -240,6 +336,9 @@ async def lifespan(app: FastAPI):
     app.state.chrony_status_service = chrony_service
     app.state.ntp_verification_monitor = ntp_verification_monitor
     app.state.broker_clock_calibrator = broker_clock_calibrator
+    app.state.broker_candle_clock_calibrator = (
+        broker_candle_clock_calibrator
+    )
     app.state.broker_offset_service = broker_offset_service
     app.state.broker_offset_monitor = broker_offset_monitor
     app.state.database = database
@@ -290,6 +389,7 @@ async def lifespan(app: FastAPI):
                     nonlocal broker_tick_worker
                     nonlocal collector
                     nonlocal collector_task
+                    nonlocal candle_clock_task
 
                     if broker_tick_worker is not None:
                         return
@@ -307,6 +407,16 @@ async def lifespan(app: FastAPI):
                     )
 
                     broker_tick_worker.start()
+
+                    candle_clock_task = asyncio.create_task(
+                        _candle_clock_calibration_loop(
+                            adapter,
+                            broker_candle_clock_calibrator,
+                            selected_symbol,
+                            candle_clock_stop_event,
+                        ),
+                        name="broker-candle-clock-calibration",
+                    )
 
                     logger.info(
                         "Broker tick monitoring enabled: "
@@ -326,8 +436,12 @@ async def lifespan(app: FastAPI):
                     app.state.market_data_collector = collector
 
                     collector_task = asyncio.create_task(
-                        collector.run(collector_stop_event),
-                        name="market-data-collector",
+                        _run_collector_after_clock_verification(
+                            collector,
+                            broker_candle_clock_calibrator,
+                            collector_stop_event,
+                        ),
+                        name="market-data-collector-after-clock-verification",
                     )
 
                     logger.info(
@@ -405,6 +519,7 @@ async def lifespan(app: FastAPI):
             startup_stop_event.set()
             broker_offset_stop_event.set()
             ntp_stop_event.set()
+            candle_clock_stop_event.set()
 
             if broker_offset_task is not None:
                 try:
@@ -428,6 +543,14 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     logger.exception(
                         "Failed to stop MT5 market-data startup coordinator."
+                    )
+
+            if candle_clock_task is not None:
+                try:
+                    await candle_clock_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop broker candle clock calibration."
                     )
 
             if collector_task is not None:
