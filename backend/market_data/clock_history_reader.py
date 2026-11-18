@@ -21,6 +21,7 @@ from .clock_history_checkpoint import (
     ClockHistoryCheckpointError,
     ClockHistoryCheckpointStore,
 )
+from .clock_history_lock import ClockHistoryFileLock
 
 
 class ClockHistoryFileChangedError(ClockHistoryError):
@@ -128,6 +129,13 @@ class ClockHistoryIncrementalReader:
             raise ValueError("max_samples_per_read must be positive.")
 
         self.history_path = Path(history_path)
+        self.file_lock = ClockHistoryFileLock(
+            self.history_path.with_name(
+                "clock_history.writer.lock"
+            ),
+            timeout_seconds=0.5,
+            retry_interval_seconds=0.05,
+        )
         self.store = ClockHistoryCheckpointStore(checkpoint_path)
         self.max_samples_per_read = max_samples_per_read
         self._checkpoint = self.store.load()
@@ -205,6 +213,11 @@ class ClockHistoryIncrementalReader:
         )
 
     def read_new(self) -> ClockHistoryReadBatch:
+        """Read clock history while holding the shared writer lock."""
+        with self.file_lock:
+            return self._read_new_unlocked()
+
+    def _read_new_unlocked(self) -> ClockHistoryReadBatch:
         """Read a batch. Call commit only after processing it successfully."""
 
         if self._pending is not None:
