@@ -41,7 +41,8 @@ class BrokerOffsetDetector:
         ntp_verifier: NtpTimeVerifier,
         *,
         required_samples: int = 3,
-        max_sample_ntp_distance_seconds: float = 6 * 60 * 60,
+        max_sample_ntp_distance_seconds: float = 90 * 60,
+        minimum_sample_interval_seconds: float = 3.0,
         max_candidate_spread_seconds: float = 1.5,
         max_integer_residual_seconds: float = 1.5,
     ) -> None:
@@ -59,6 +60,10 @@ class BrokerOffsetDetector:
             (
                 "max_sample_ntp_distance_seconds",
                 max_sample_ntp_distance_seconds,
+            ),
+            (
+                "minimum_sample_interval_seconds",
+                minimum_sample_interval_seconds,
             ),
             (
                 "max_candidate_spread_seconds",
@@ -81,6 +86,9 @@ class BrokerOffsetDetector:
         self._required_samples = required_samples
         self._max_sample_ntp_distance = float(
             max_sample_ntp_distance_seconds
+        )
+        self._minimum_sample_interval_ms = int(
+            round(minimum_sample_interval_seconds * 1000)
         )
         self._max_spread = float(max_candidate_spread_seconds)
         self._max_integer_residual = float(
@@ -164,7 +172,7 @@ class BrokerOffsetDetector:
                 same_run
                 and same_identity
                 and next_sequence
-                and tick_delta > 0
+                and tick_delta >= self._minimum_sample_interval_ms
             ):
                 self._window.clear()
             elif rounded_candidate != int(
@@ -193,7 +201,8 @@ class BrokerOffsetDetector:
         if len(self._window) < self._required_samples:
             return self._decision(
                 BrokerOffsetStatus.COLLECTING,
-                "Collecting consecutive, NTP-supported MT5 samples.",
+                "Collecting three consecutive, sufficiently separated, "
+                "NTP-supported MT5 samples.",
             )
 
         measured_offset = int(round(median(candidates)))
@@ -206,7 +215,8 @@ class BrokerOffsetDetector:
         return self._decision(
             BrokerOffsetStatus.CANDIDATE_READY,
             "Three consecutive samples from the same run and identity "
-            "agree. Candidate is ready for registry validation; "
+            "agree and satisfy the minimum time separation. "
+            "Candidate is ready for registry validation; "
             "it is not yet a persisted or historically verified offset.",
             offset_seconds=measured_offset,
             uncertainty_seconds=uncertainty,
@@ -234,11 +244,13 @@ class BrokerOffsetDetector:
         ):
             return None
 
+        checked_at = verification.checked_at_unix
         offset = verification.offset_seconds
         uncertainty = verification.uncertainty_seconds
 
         if (
-            not isfinite(offset)
+            not isfinite(checked_at)
+            or not isfinite(offset)
             or not isfinite(uncertainty)
             or uncertainty < 0
         ):
@@ -249,7 +261,8 @@ class BrokerOffsetDetector:
         )
 
         if (
-            abs(corrected_sample_gmt - verification.checked_at_unix)
+            not isfinite(corrected_sample_gmt)
+            or abs(corrected_sample_gmt - checked_at)
             > self._max_sample_ntp_distance
         ):
             return None
