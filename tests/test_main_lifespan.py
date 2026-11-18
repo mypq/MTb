@@ -225,6 +225,35 @@ class FakeNtpVerificationMonitor:
         }
 
 
+class FakeVerifiedBrokerCandleClockCalibrator:
+    """
+    Lifecycle-test double.
+
+    These tests verify application startup and shutdown ordering.
+    Real candle-clock verification is covered by dedicated tests.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.reset_calls = 0
+
+    def snapshot(self):
+        return SimpleNamespace(
+            status="VERIFIED",
+            symbol="XAUUSD",
+            broker_server="Test-Server",
+            offset_seconds=0.0,
+            uncertainty_seconds=0.05,
+            sample_count=5,
+            reason=None,
+        )
+
+    def observe(self, **sample):
+        return self.snapshot()
+
+    def reset(self):
+        self.reset_calls += 1
+
+
 def configure_lifecycle(
     monkeypatch,
     *,
@@ -412,6 +441,12 @@ def configure_lifecycle(
         main,
         "NtpVerificationMonitor",
         FakeNtpVerificationMonitor,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "BrokerCandleClockCalibrator",
+        FakeVerifiedBrokerCandleClockCalibrator,
     )
 
     return app, events
