@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
-import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import time
 
 import pytest
 
@@ -375,6 +375,39 @@ def test_closed_candles_are_blocked_without_verified_clock():
         match="Candle clock calibration is not configured",
     ):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
+
+
+def test_closed_candles_are_not_requested_for_wrong_symbol():
+    adapter, mt5 = make_connected_adapter()
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Candle clock is not verified",
+    ):
+        adapter.get_closed_candles("OTHER", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
+
+
+def test_closed_candles_are_not_requested_after_broker_identity_change():
+    adapter, mt5 = make_connected_adapter()
+
+    mt5.account_info.return_value.login = 999999
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Candle clock identity verification failed",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
+
+    assert (
+        adapter._candle_clock_calibrator.snapshot().status
+        != "VERIFIED"
+    )
 
 
 def test_broker_candle_offset_is_subtracted_before_utc_conversion():
@@ -1401,6 +1434,8 @@ def test_broker_time_sample_rejects_invalid_account_identity():
         adapter.get_broker_time_sample("XAUUSD")
 
     mt5.symbol_info_tick.assert_not_called()
+
+
 def test_closed_candles_are_blocked_after_ntp_trust_is_lost():
     adapter, mt5 = make_connected_adapter()
 
