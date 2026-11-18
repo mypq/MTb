@@ -5,7 +5,7 @@ from math import floor
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from fastapi import HTTPException
+from fastapi.testclient import TestClient
 import pytest
 
 import backend.main as main
@@ -295,21 +295,29 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             application.state.market_data_service = service
             application.state.market_data_repository = repository
 
-            endpoint_route = next(
-                route
-                for route in application.routes
-                if getattr(route, "path", None)
-                == "/api/v1/market-data/candles"
+            # Exercise the actual FastAPI HTTP request pipeline.
+            # Override authentication only for this isolated test.
+            application.dependency_overrides[
+                main.verify_api_token
+            ] = lambda: None
+
+            client = TestClient(application)
+
+            response = client.get(
+                "/api/v1/market-data/candles",
+                params={
+                    "symbol": "XAUUSD",
+                    "timeframe": "M5",
+                    "count": 2,
+                },
             )
 
-            with pytest.raises(HTTPException) as api_error:
-                endpoint_route.endpoint(
-                    symbol="XAUUSD",
-                    timeframe="M5",
-                    count=2,
-                )
+            assert response.status_code == 503
+            assert response.json()["detail"] == (
+                "Market data is currently unavailable."
+            )
 
-            assert api_error.value.status_code == 503
+            client.close()
 
             # The API must not persist anything after the clock
             # verification has been invalidated.
