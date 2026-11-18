@@ -1,10 +1,10 @@
 
-"""Detect a broker UTC offset from MT5 clock history and trusted NTP evidence."""
+"""Detect broker UTC offsets using consecutive MT5 samples and NTP evidence."""
 
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from math import isfinite
 from statistics import median
@@ -21,6 +21,57 @@ class BrokerOffsetStatus(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class BrokerOffsetEvidenceSample:
+    run_id: str
+    sample_sequence: int
+    monotonic_ms: int
+    time_gmt_epoch: int
+    time_trade_server_epoch: int
+    time_current_quote_epoch: int
+    time_local_epoch: int
+    server_utc_offset_seconds: int
+    account_login: int
+    broker_server: str
+    symbol: str
+    terminal_build: int
+    terminal_connected: bool
+    calculated_offset_seconds: float
+    ntp_offset_seconds: float
+    ntp_uncertainty_seconds: float
+    ntp_checked_at_unix: float
+
+    @classmethod
+    def from_sample(
+        cls,
+        sample: MT5ClockHistorySample,
+        *,
+        calculated_offset_seconds: float,
+        ntp_offset_seconds: float,
+        ntp_uncertainty_seconds: float,
+        ntp_checked_at_unix: float,
+    ) -> "BrokerOffsetEvidenceSample":
+        return cls(
+            run_id=sample.run_id,
+            sample_sequence=sample.sample_sequence,
+            monotonic_ms=sample.monotonic_ms,
+            time_gmt_epoch=sample.time_gmt_epoch,
+            time_trade_server_epoch=sample.time_trade_server_epoch,
+            time_current_quote_epoch=sample.time_current_quote_epoch,
+            time_local_epoch=sample.time_local_epoch,
+            server_utc_offset_seconds=sample.server_utc_offset_seconds,
+            account_login=sample.account_login,
+            broker_server=sample.broker_server,
+            symbol=sample.symbol,
+            terminal_build=sample.terminal_build,
+            terminal_connected=sample.terminal_connected,
+            calculated_offset_seconds=calculated_offset_seconds,
+            ntp_offset_seconds=ntp_offset_seconds,
+            ntp_uncertainty_seconds=ntp_uncertainty_seconds,
+            ntp_checked_at_unix=ntp_checked_at_unix,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class BrokerOffsetDecision:
     status: BrokerOffsetStatus
     candidate_ready: bool
@@ -31,10 +82,17 @@ class BrokerOffsetDecision:
     run_id: str | None
     identity: tuple[int, str, str, int] | None
     reason: str
+    evidence_samples: tuple[BrokerOffsetEvidenceSample, ...] = ()
+    ntp_verified: bool = False
+    ntp_sample_count: int = 0
+    ntp_servers: tuple[str, ...] = ()
+    ntp_checked_at_unix: float | None = None
+    ntp_offset_seconds: float | None = None
+    ntp_uncertainty_seconds: float | None = None
 
 
 class BrokerOffsetDetector:
-    """Build a three-sample broker-offset candidate using verified NTP time."""
+    """Build a candidate from exactly three consecutive supported samples."""
 
     def __init__(
         self,
@@ -57,22 +115,14 @@ class BrokerOffsetDetector:
             raise ValueError("required_samples must be exactly 3.")
 
         for name, value in (
-            (
-                "max_sample_ntp_distance_seconds",
-                max_sample_ntp_distance_seconds,
-            ),
-            (
-                "minimum_sample_interval_seconds",
-                minimum_sample_interval_seconds,
-            ),
-            (
-                "max_candidate_spread_seconds",
-                max_candidate_spread_seconds,
-            ),
-            (
-                "max_integer_residual_seconds",
-                max_integer_residual_seconds,
-            ),
+            ("max_sample_ntp_distance_seconds",
+             max_sample_ntp_distance_seconds),
+            ("minimum_sample_interval_seconds",
+             minimum_sample_interval_seconds),
+            ("max_candidate_spread_seconds",
+             max_candidate_spread_seconds),
+            ("max_integer_residual_seconds",
+             max_integer_residual_seconds),
         ):
             if (
                 isinstance(value, bool)
@@ -87,16 +137,21 @@ class BrokerOffsetDetector:
         self._max_sample_ntp_distance = float(
             max_sample_ntp_distance_seconds
         )
-        self._minimum_sample_interval_ms = int(
-            round(minimum_sample_interval_seconds * 1000)
+        self._minimum_sample_interval_ms = round(
+            minimum_sample_interval_seconds * 1000
         )
         self._max_spread = float(max_candidate_spread_seconds)
         self._max_integer_residual = float(
             max_integer_residual_seconds
         )
-
         self._window: deque[
-            tuple[MT5ClockHistorySample, float, float]
+            tuple[
+                MT5ClockHistorySample,
+                float,
+                float,
+                float,
+                float,
+            ]
         ] = deque(maxlen=required_samples)
 
     def observe(
@@ -104,9 +159,7 @@ class BrokerOffsetDetector:
         sample: MT5ClockHistorySample,
     ) -> BrokerOffsetDecision:
         if not isinstance(sample, MT5ClockHistorySample):
-            raise TypeError(
-                "sample must be an MT5ClockHistorySample."
-            )
+            raise TypeError("sample must be an MT5ClockHistorySample.")
 
         ntp = self._trusted_ntp_for(sample)
 
@@ -114,25 +167,20 @@ class BrokerOffsetDetector:
             self._window.clear()
             return self._decision(
                 BrokerOffsetStatus.WAITING_FOR_NTP,
-                "A fresh, trusted NTP verification is unavailable "
-                "or too far from this MT5 sample.",
+                "Fresh trusted NTP verification is unavailable.",
             )
 
-        ntp_offset, ntp_uncertainty = ntp
+        ntp_offset, ntp_uncertainty, checked_at = ntp
 
         if not sample.terminal_connected:
             self._window.clear()
             return self._decision(
                 BrokerOffsetStatus.DEGRADED,
-                "MT5 terminal was not connected for this sample.",
+                "MT5 terminal is disconnected.",
             )
 
-        corrected_gmt = (
-            float(sample.time_gmt_epoch) + ntp_offset
-        )
-        candidate = (
-            float(sample.time_trade_server_epoch) - corrected_gmt
-        )
+        corrected_gmt = sample.time_gmt_epoch + ntp_offset
+        candidate = sample.time_trade_server_epoch - corrected_gmt
 
         if not isfinite(candidate) or abs(candidate) > 14 * 60 * 60:
             self._window.clear()
@@ -141,85 +189,100 @@ class BrokerOffsetDetector:
                 "Calculated broker offset is outside the supported range.",
             )
 
-        rounded_candidate = int(round(candidate))
+        rounded = round(candidate)
 
-        if (
-            abs(candidate - rounded_candidate)
-            > self._max_integer_residual
-        ):
+        if abs(candidate - rounded) > self._max_integer_residual:
             self._window.clear()
             return self._decision(
                 BrokerOffsetStatus.DEGRADED,
-                "Calculated offset is not sufficiently close to "
-                "a whole-second broker offset.",
+                "Calculated offset is not close enough to whole seconds.",
             )
 
         if self._window:
             previous = self._window[-1][0]
-
-            same_run = sample.run_id == previous.run_id
-            same_identity = sample.identity == previous.identity
-            next_sequence = (
-                sample.sample_sequence
-                == previous.sample_sequence + 1
-            )
-
             tick_delta = (
                 sample.monotonic_ms - previous.monotonic_ms
             ) & 0xFFFFFFFF
 
-            if not (
-                same_run
-                and same_identity
-                and next_sequence
+            continuous = (
+                sample.run_id == previous.run_id
+                and sample.identity == previous.identity
+                and sample.sample_sequence == previous.sample_sequence + 1
                 and tick_delta >= self._minimum_sample_interval_ms
-            ):
+            )
+
+            if not continuous:
                 self._window.clear()
-            elif rounded_candidate != int(
-                round(self._window[-1][1])
-            ):
+            elif round(self._window[-1][1]) != rounded:
                 self._window.clear()
 
         self._window.append(
-            (sample, candidate, ntp_uncertainty)
+            (
+                sample,
+                candidate,
+                ntp_uncertainty,
+                ntp_offset,
+                checked_at,
+            )
         )
 
-        candidates = [item[1] for item in self._window]
+        candidates = [entry[1] for entry in self._window]
         spread = max(candidates) - min(candidates)
 
         if spread > self._max_spread:
             self._window.clear()
             self._window.append(
-                (sample, candidate, ntp_uncertainty)
+                (
+                    sample,
+                    candidate,
+                    ntp_uncertainty,
+                    ntp_offset,
+                    checked_at,
+                )
             )
             return self._decision(
                 BrokerOffsetStatus.COLLECTING,
-                "Offset samples were inconsistent; a new sequence "
-                "has started with the latest sample.",
+                "Inconsistent samples; collection restarted.",
             )
 
-        if len(self._window) < self._required_samples:
+        if len(self._window) != self._required_samples:
             return self._decision(
                 BrokerOffsetStatus.COLLECTING,
-                "Collecting three consecutive, sufficiently separated, "
-                "NTP-supported MT5 samples.",
+                "Collecting three consecutive NTP-supported samples.",
             )
 
-        measured_offset = int(round(median(candidates)))
+        offset = int(round(median(candidates)))
         uncertainty = (
-            max(item[2] for item in self._window)
+            max(entry[2] for entry in self._window)
             + 1.0
             + spread / 2.0
         )
 
+        evidence = tuple(
+            BrokerOffsetEvidenceSample.from_sample(
+                entry[0],
+                calculated_offset_seconds=entry[1],
+                ntp_uncertainty_seconds=entry[2],
+                ntp_offset_seconds=entry[3],
+                ntp_checked_at_unix=entry[4],
+            )
+            for entry in self._window
+        )
+
+        verification = self._ntp.last_verification()
+
         return self._decision(
             BrokerOffsetStatus.CANDIDATE_READY,
-            "Three consecutive samples from the same run and identity "
-            "agree and satisfy the minimum time separation. "
-            "Candidate is ready for registry validation; "
-            "it is not yet a persisted or historically verified offset.",
-            offset_seconds=measured_offset,
+            "Three consecutive samples agree and are ready for registry validation.",
+            offset_seconds=offset,
             uncertainty_seconds=uncertainty,
+            evidence_samples=evidence,
+            ntp_verified=True,
+            ntp_sample_count=verification.sample_count,
+            ntp_servers=verification.servers,
+            ntp_checked_at_unix=verification.checked_at_unix,
+            ntp_offset_seconds=verification.offset_seconds,
+            ntp_uncertainty_seconds=verification.uncertainty_seconds,
         )
 
     def reset(self) -> None:
@@ -228,7 +291,7 @@ class BrokerOffsetDetector:
     def _trusted_ntp_for(
         self,
         sample: MT5ClockHistorySample,
-    ) -> tuple[float, float] | None:
+    ) -> tuple[float, float, float] | None:
         if not self._ntp.is_trusted():
             return None
 
@@ -248,26 +311,21 @@ class BrokerOffsetDetector:
         offset = verification.offset_seconds
         uncertainty = verification.uncertainty_seconds
 
-        if (
-            not isfinite(checked_at)
-            or not isfinite(offset)
-            or not isfinite(uncertainty)
-            or uncertainty < 0
-        ):
+        if not all(isfinite(value) for value in (
+            checked_at, offset, uncertainty
+        )) or uncertainty < 0:
             return None
 
-        corrected_sample_gmt = (
-            float(sample.time_gmt_epoch) + float(offset)
-        )
+        corrected_gmt = sample.time_gmt_epoch + offset
 
         if (
-            not isfinite(corrected_sample_gmt)
-            or abs(corrected_sample_gmt - checked_at)
+            not isfinite(corrected_gmt)
+            or abs(corrected_gmt - checked_at)
             > self._max_sample_ntp_distance
         ):
             return None
 
-        return float(offset), float(uncertainty)
+        return float(offset), float(uncertainty), float(checked_at)
 
     def _decision(
         self,
@@ -276,19 +334,31 @@ class BrokerOffsetDetector:
         *,
         offset_seconds: int | None = None,
         uncertainty_seconds: float | None = None,
+        evidence_samples: tuple[BrokerOffsetEvidenceSample, ...] = (),
+        ntp_verified: bool = False,
+        ntp_sample_count: int = 0,
+        ntp_servers: tuple[str, ...] = (),
+        ntp_checked_at_unix: float | None = None,
+        ntp_offset_seconds: float | None = None,
+        ntp_uncertainty_seconds: float | None = None,
     ) -> BrokerOffsetDecision:
-        last_sample = self._window[-1][0] if self._window else None
+        last = self._window[-1][0] if self._window else None
 
         return BrokerOffsetDecision(
             status=status,
-            candidate_ready=(
-                status == BrokerOffsetStatus.CANDIDATE_READY
-            ),
+            candidate_ready=status == BrokerOffsetStatus.CANDIDATE_READY,
             offset_seconds=offset_seconds,
             uncertainty_seconds=uncertainty_seconds,
             sample_count=len(self._window),
             required_samples=self._required_samples,
-            run_id=last_sample.run_id if last_sample else None,
-            identity=last_sample.identity if last_sample else None,
+            run_id=last.run_id if last else None,
+            identity=last.identity if last else None,
             reason=reason,
+            evidence_samples=evidence_samples,
+            ntp_verified=ntp_verified,
+            ntp_sample_count=ntp_sample_count,
+            ntp_servers=ntp_servers,
+            ntp_checked_at_unix=ntp_checked_at_unix,
+            ntp_offset_seconds=ntp_offset_seconds,
+            ntp_uncertainty_seconds=ntp_uncertainty_seconds,
         )
