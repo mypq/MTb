@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from math import floor
 from unittest.mock import Mock, patch
 
+import pytest
+
 from backend.config import Settings
 from backend.database import Database
 from backend.database_models import DatabaseBase
@@ -15,7 +17,11 @@ from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 from backend.market_data.repository import MarketDataRepository
 from backend.market_data.service import MarketDataService
 from backend.market_data.validator import MarketDataValidator
-from backend.mt5 import MT5Adapter, MT5ConnectionState
+from backend.mt5 import (
+    MT5Adapter,
+    MT5AdapterError,
+    MT5ConnectionState,
+)
 
 
 UTC = timezone.utc
@@ -244,6 +250,30 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             assert stored_candles[0].timestamp < (
                 stored_candles[1].timestamp
             )
+
+            # Losing independent NTP trust must block further
+            # candle collection and prevent additional persistence.
+            verifier.reset()
+
+            with pytest.raises(
+                MT5AdapterError,
+                match="Candle clock is not verified",
+            ):
+                collector.collect_once()
+
+            # Previously persisted candles must remain unchanged.
+            history_after_ntp_loss = repository.get_history(
+                symbol="XAUUSD",
+                timeframe="M5",
+                count=2,
+            )
+
+            assert len(history_after_ntp_loss) == 2
+
+            assert [
+                int(candle.timestamp.timestamp())
+                for candle in history_after_ntp_loss
+            ] == expected_utc_epochs
 
         finally:
             database.dispose()
