@@ -1,6 +1,8 @@
+
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -74,7 +76,6 @@ def decision_with_run_id(
     decision: BrokerOffsetDecision,
     run_id: str,
 ) -> BrokerOffsetDecision:
-    """Change the decision and all evidence samples to the same run ID."""
     return replace(
         decision,
         run_id=run_id,
@@ -99,6 +100,27 @@ def make_v1_record(sequence: int = 1) -> dict:
         "terminal_build": IDENTITY[3],
         "evidence_sample_count": 3,
     }
+
+
+def read_json_lines(path):
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+
+
+def write_json_lines(path, records):
+    path.write_text(
+        "".join(
+            json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+            for item in records
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_append_and_load_v2_candidate(tmp_path) -> None:
@@ -130,7 +152,11 @@ def test_append_and_load_v2_candidate(tmp_path) -> None:
 
 def test_v1_history_remains_readable_and_unchanged(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
-    original = json.dumps(make_v1_record(), sort_keys=True, separators=(",", ":"))
+    original = json.dumps(
+        make_v1_record(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     path.write_text(original + "\n", encoding="utf-8")
 
     registry = BrokerOffsetRegistry(path)
@@ -361,3 +387,235 @@ def test_v2_missing_evidence_fields_is_rejected(tmp_path) -> None:
 
     with pytest.raises(BrokerOffsetRegistryError):
         BrokerOffsetRegistry(path).load()
+
+
+def test_tampered_sample_identity_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["evidence_samples"][1]["account_login"] = 12345
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_tampered_sample_sequence_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["evidence_samples"][1]["sample_sequence"] = 99
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_tampered_raw_clock_offset_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["evidence_samples"][0]["time_trade_server_epoch"] += 1
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_duplicate_ntp_servers_are_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["ntp_evidence"]["servers"] = [
+        "ntp-a",
+        "NTP-A",
+        "ntp-c",
+    ]
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_negative_ntp_uncertainty_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["ntp_evidence"]["uncertainty_seconds"] = -1.0
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_nan_ntp_offset_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["ntp_evidence"]["offset_seconds"] = float("nan")
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_tampered_evidence_time_range_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["evidence_end_utc"] = (
+        BASE_TIME + timedelta(days=1)
+    ).isoformat()
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_invalid_v3_event_sequence_is_rejected_on_load(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["event_type"] = "CONFIRMATION"
+    records[0]["previous_offset_seconds"] = 7200
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_confirmation_must_match_previous_identity_offset(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+    registry.append_candidate(
+        decision_with_run_id(make_decision(), "run-002"),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+    )
+
+    records = read_json_lines(path)
+    records[1]["previous_offset_seconds"] = 3600
+    write_json_lines(path, records)
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_concurrent_appends_keep_unique_sequences(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+
+    decisions = [
+        decision_with_run_id(make_decision(), "concurrent-001"),
+        decision_with_run_id(make_decision(), "concurrent-002"),
+    ]
+
+    def append_one(decision):
+        registry = BrokerOffsetRegistry(path)
+        return registry.append_candidate(
+            decision,
+            recorded_at_utc=BASE_TIME,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(append_one, decisions))
+
+    records = BrokerOffsetRegistry(path).load()
+
+    assert len(results) == 2
+    assert len(records) == 2
+    assert [item.record_sequence for item in records] == [1, 2]
+    assert len({item.run_id for item in records}) == 2
+    assert records[0].event_type == "BASELINE"
+    assert records[1].event_type == "CONFIRMATION"
+
+
+def test_truncated_trailing_record_is_rejected(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    with path.open("ab") as handle:
+        handle.write(b'{"schema_version":3')
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.load()
+
+
+def test_v2_history_remains_readable_and_unchanged(tmp_path) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+    record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    data = read_json_lines(path)[0]
+    data["schema_version"] = 2
+    for field in (
+        "event_type",
+        "previous_offset_seconds",
+        "transition_start_utc",
+        "transition_end_utc",
+    ):
+        data.pop(field)
+
+    original = json.dumps(
+        data,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    path.write_text(original + "\n", encoding="utf-8")
+
+    loaded = registry.load()
+
+    assert len(loaded) == 1
+    assert loaded[0].schema_version == 2
+    assert loaded[0].offset_seconds == record.offset_seconds
+    assert path.read_text(encoding="utf-8").strip() == original
