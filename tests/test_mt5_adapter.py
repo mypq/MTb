@@ -1,7 +1,6 @@
-
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -124,7 +123,20 @@ def make_connected_adapter(
     status = adapter.connect()
     assert status.state == MT5ConnectionState.CONNECTED
 
-    # Use a deterministic, independently verified NTP source.
+    configure_test_candle_clock(
+        adapter,
+        broker_offset_seconds=broker_offset_seconds,
+    )
+
+    return adapter, module
+
+
+def configure_test_candle_clock(
+    adapter,
+    *,
+    broker_offset_seconds=0,
+):
+    # Independent, deterministic NTP verification for unit tests.
     verifier = NtpTimeVerifier(
         servers=(
             "test-ntp-1",
@@ -145,7 +157,7 @@ def make_connected_adapter(
     calibrator = BrokerCandleClockCalibrator(
         verifier,
         required_samples=3,
-        minimum_span_seconds=1e-9,
+        minimum_span_seconds=1.0,
         maximum_spread_seconds=0.5,
         maximum_sample_age_seconds=30.0,
     )
@@ -163,24 +175,30 @@ def make_connected_adapter(
         + broker_offset_seconds
     )
 
-    snapshot = None
+    # Simulate three observations spanning one second.
+    # This keeps the real calibration span requirement enabled.
+    with patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        side_effect=(100.0, 100.5, 101.0),
+    ):
+        snapshot = None
 
-    for _ in range(3):
-        snapshot = calibrator.observe(
-            symbol="XAUUSD",
-            account_login=123456,
-            broker_server="Demo-Server",
-            m1_active_open_epoch=m1_open,
-            m5_active_open_epoch=m5_open,
-            observed_at_utc=observed_at,
-        )
+        for _ in range(3):
+            snapshot = calibrator.observe(
+                symbol="XAUUSD",
+                account_login=123456,
+                broker_server="Demo-Server",
+                m1_active_open_epoch=m1_open,
+                m5_active_open_epoch=m5_open,
+                observed_at_utc=observed_at,
+            )
 
     assert snapshot is not None
     assert snapshot.status == "VERIFIED"
 
     adapter.set_candle_clock_calibrator(calibrator)
 
-    return adapter, module
+    return calibrator
 
 
 def test_disabled_mt5_does_not_initialize():
