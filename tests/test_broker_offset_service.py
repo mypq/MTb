@@ -16,6 +16,9 @@ from backend.market_data.broker_offset_service import (
     BrokerOffsetEvidenceService,
 )
 from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
+from backend.market_data.clock_history_lock import (
+    ClockHistoryFileLock,
+)
 
 
 UTC = timezone.utc
@@ -894,6 +897,8 @@ def test_service_restart_uses_incremental_checkpoint(
         item["sample_sequence"]
         for item in records[1].evidence_samples
     ] == [4, 5, 6]
+
+
 def test_registry_append_is_not_duplicated_when_checkpoint_save_fails(
     tmp_path,
     monkeypatch,
@@ -952,3 +957,53 @@ def test_registry_append_is_not_duplicated_when_checkpoint_save_fails(
 
     assert len(final_records) == 1
     assert final_records[0] == records_after_failure[0]
+
+
+def test_writer_lock_contention_preserves_detector_and_resumes(
+    tmp_path,
+):
+    rows = [
+        make_row(1, 7200),
+        make_row(2, 7200),
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "COLLECTING"
+    assert first.samples_processed == 2
+    assert first.last_decision is not None
+    assert len(registry.load()) == 0
+
+    writer_lock = ClockHistoryFileLock(
+        history_path.with_name("clock_history.writer.lock"),
+        timeout_seconds=0,
+    )
+    writer_lock.acquire()
+
+    try:
+        append_rows(
+            history_path,
+            [make_row(3, 7200)],
+        )
+
+        waiting = service.poll_once()
+
+        assert waiting.state == "WAITING_FOR_WRITER"
+        assert waiting.error is None
+        assert waiting.samples_processed == 2
+        assert waiting.last_decision == first.last_decision
+        assert len(registry.load()) == 0
+    finally:
+        writer_lock.release()
+
+    resumed = service.poll_once()
+
+    assert resumed.state == "BASELINE_RECORDED"
+    assert resumed.error is None
+    assert resumed.samples_processed == 3
+    assert len(registry.load()) == 1
+    assert registry.load()[0].event_type == "BASELINE"
