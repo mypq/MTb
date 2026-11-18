@@ -438,3 +438,69 @@ def test_modified_old_history_sample_is_detected(tmp_path):
     # Replayed overlapping evidence must not create a new record.
     assert len(registry.load()) == 1
     assert second.last_record == first.last_record
+
+def test_new_mt5_account_identity_gets_independent_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    original_rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        original_rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    assert len(registry.load()) == 1
+
+    # Simulate a new EA run connected to a different MT5 account.
+    new_account_rows = []
+
+    for sequence in range(1, 4):
+        row = make_row(sequence, 7200)
+        row["run_id"] = "different-account-run"
+        row["account_login"] = str(ACCOUNT + 1)
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60
+        )
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 7200
+        )
+        row["time_current_quote_epoch"] = row[
+            "time_trade_server_epoch"
+        ]
+        new_account_rows.append(row)
+
+    append_rows(history_path, new_account_rows)
+
+    second = service.poll_once()
+    records = registry.load()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(records) == 2
+
+    old_record, new_record = records
+
+    assert old_record.event_type == "BASELINE"
+    assert old_record.identity == IDENTITY
+
+    assert new_record.event_type == "BASELINE"
+    assert new_record.identity == (
+        ACCOUNT + 1,
+        SERVER,
+        SYMBOL,
+        BUILD,
+    )
+
+    assert new_record.run_id == "different-account-run"
+    assert all(
+        sample["account_login"] == ACCOUNT + 1
+        for sample in new_record.evidence_samples
+    )
