@@ -17,6 +17,9 @@ from backend.market_data import (
 from backend.market_data.broker_candle_clock import (
     BrokerCandleClockCalibrator,
 )
+from backend.market_data.broker_offset_registry import (
+    BrokerOffsetRegistry,
+)
 from backend.mt5.models import (
     MT5AccountInfo,
     MT5ConnectionState,
@@ -51,6 +54,7 @@ class MT5Adapter:
         self._initialized_by_client = False
         self._lock = RLock()
         self._candle_clock_calibrator: BrokerCandleClockCalibrator | None = None
+        self._broker_offset_registry = None
 
     def set_candle_clock_calibrator(
         self,
@@ -63,6 +67,15 @@ class MT5Adapter:
 
         with self._lock:
             self._candle_clock_calibrator = calibrator
+
+    def set_broker_offset_registry(self, registry) -> None:
+        if not callable(getattr(registry, "latest", None)):
+            raise TypeError(
+                "registry must provide a callable latest method."
+            )
+
+        with self._lock:
+            self._broker_offset_registry = registry
 
     def get_active_candle_clock_sample(self, symbol: str) -> dict:
         """Read active M1/M5 candle boundaries and broker identity."""
@@ -651,6 +664,90 @@ class MT5Adapter:
                 raise MT5AdapterError(
                     f"Candle clock identity verification failed: {exc}"
                 ) from exc
+
+            # Require a confirmed registry event for the exact
+            # account, broker, symbol and terminal build.
+            registry = self._broker_offset_registry
+
+            if registry is None:
+                raise MT5AdapterError(
+                    "Broker offset confirmation registry is not "
+                    "configured. UTC conversion is blocked."
+                )
+
+            try:
+                terminal = mt5.terminal_info()
+
+                if terminal is None:
+                    raise ValueError(
+                        "MT5 terminal information is unavailable."
+                    )
+
+                raw_build = terminal.build
+
+                if isinstance(raw_build, bool):
+                    raise ValueError(
+                        "Invalid MT5 terminal build."
+                    )
+
+                terminal_build = index(raw_build)
+
+                if terminal_build <= 0:
+                    raise ValueError(
+                        "Invalid MT5 terminal build."
+                    )
+
+                identity = (
+                    index(account.login),
+                    str(account.server).strip(),
+                    normalized_symbol,
+                    terminal_build,
+                )
+
+                confirmation = registry.latest(
+                    identity=identity
+                )
+
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "Broker offset confirmation lookup failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+
+            if (
+                confirmation is None
+                or confirmation.event_type != "CONFIRMATION"
+            ):
+                raise MT5AdapterError(
+                    "A confirmed broker offset is required "
+                    "before UTC candle conversion."
+                )
+
+            ntp_evidence = confirmation.ntp_evidence
+
+            if (
+                confirmation.evidence_sample_count != 3
+                or len(confirmation.evidence_samples) != 3
+                or not isinstance(ntp_evidence, dict)
+                or ntp_evidence.get("verified") is not True
+                or ntp_evidence.get("sample_count", 0) < 3
+            ):
+                raise MT5AdapterError(
+                    "Broker offset confirmation evidence is incomplete."
+                )
+
+            if (
+                abs(
+                    float(clock.offset_seconds)
+                    - float(confirmation.offset_seconds)
+                ) > 0.000001
+            ):
+                calibrator.reset()
+
+                raise MT5AdapterError(
+                    "Broker registry offset does not match "
+                    "the independently calibrated candle clock."
+                )
 
             # Only retrieve closed candles after clock and identity
             # verification have both succeeded.
