@@ -4,6 +4,8 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timedelta, timezone
 
+import backend.market_data.broker_offset_registry as registry_module
+
 from backend.market_data.broker_offset_detector import (
     BrokerOffsetDetector,
 )
@@ -18,6 +20,7 @@ from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 
 
 UTC = timezone.utc
+REAL_DATETIME = datetime
 BASE_TIME = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
 BASE_EPOCH = int(BASE_TIME.timestamp())
 
@@ -26,6 +29,29 @@ SERVER = "XMGlobal-MT5 9"
 SYMBOL = "GOLD"
 BUILD = 6316
 IDENTITY = (ACCOUNT, SERVER, SYMBOL, BUILD)
+
+
+def install_chronological_registry_clock(monkeypatch):
+    """Give each registry append a deterministic, chronological timestamp."""
+
+    class ControlledDateTime(REAL_DATETIME):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            value = BASE_TIME + timedelta(minutes=3 * cls.calls)
+
+            if tz is not None:
+                return value.astimezone(tz)
+
+            return value.replace(tzinfo=None)
+
+    monkeypatch.setattr(
+        registry_module,
+        "datetime",
+        ControlledDateTime,
+    )
 
 
 def make_verifier() -> NtpTimeVerifier:
@@ -137,11 +163,14 @@ def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
     assert len(registry.load()) == 1
 
 
-def test_three_new_samples_record_offset_change(tmp_path):
+def test_three_new_samples_record_offset_change(tmp_path, monkeypatch):
+    install_chronological_registry_clock(monkeypatch)
+
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
     service, registry, history_path = make_service(tmp_path, rows)
 
-    service.poll_once()
+    first_snapshot = service.poll_once()
+    assert first_snapshot.error is None
 
     append_rows(
         history_path,
@@ -162,22 +191,30 @@ def test_three_new_samples_record_offset_change(tmp_path):
     assert change.event_type == "OFFSET_CHANGE"
     assert change.previous_offset_seconds == 7200
     assert change.offset_seconds == 10800
-    assert change.transition_start_utc is not None
+    assert change.transition_start_utc == baseline.recorded_at_utc
     assert change.transition_end_utc is not None
     assert change.transition_end_utc > change.transition_start_utc
+    assert change.recorded_at_utc >= change.transition_end_utc
 
 
-def test_return_to_previous_offset_is_recorded_as_new_change(tmp_path):
+def test_return_to_previous_offset_is_recorded_as_new_change(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
     service, registry, history_path = make_service(tmp_path, rows)
 
-    service.poll_once()
+    first_snapshot = service.poll_once()
+    assert first_snapshot.error is None
 
     append_rows(
         history_path,
         [make_row(sequence, 10800) for sequence in range(4, 7)],
     )
-    service.poll_once()
+    second_snapshot = service.poll_once()
+    assert second_snapshot.error is None
 
     append_rows(
         history_path,
@@ -204,12 +241,10 @@ def test_return_to_previous_offset_is_recorded_as_new_change(tmp_path):
     assert return_change.offset_seconds == 7200
 
     assert return_change.record_sequence == 3
-    assert return_change.transition_start_utc is not None
+    assert return_change.transition_start_utc == first_change.recorded_at_utc
     assert return_change.transition_end_utc is not None
-    assert (
-        return_change.transition_end_utc
-        > return_change.transition_start_utc
-    )
+    assert return_change.transition_end_utc > return_change.transition_start_utc
+    assert return_change.recorded_at_utc >= return_change.transition_end_utc
 
 
 def test_incomplete_history_does_not_create_candidate(tmp_path):
