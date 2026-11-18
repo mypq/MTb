@@ -1,4 +1,5 @@
-"""Runtime coordinator for MT5 clock evidence, offset detection and storage."""
+
+"""Runtime coordinator for incremental MT5 clock evidence processing."""
 
 from __future__ import annotations
 
@@ -14,9 +15,9 @@ from backend.market_data.broker_offset_registry import (
     BrokerOffsetRecord,
     BrokerOffsetRegistry,
 )
-from backend.market_data.clock_history import (
-    MT5ClockHistorySample,
-    read_clock_history,
+from backend.market_data.clock_history import MT5ClockHistorySample
+from backend.market_data.clock_history_reader import (
+    ClockHistoryIncrementalReader,
 )
 
 
@@ -30,11 +31,7 @@ class BrokerOffsetServiceSnapshot:
 
 
 class BrokerOffsetEvidenceService:
-    """Process new SessionBridge samples and persist offset transitions.
-
-    This service records evidence only. It does not authorize an offset
-    for market-session calculations and never modifies candle timestamps.
-    """
+    """Process appended SessionBridge evidence and persist offset events."""
 
     def __init__(
         self,
@@ -58,82 +55,79 @@ class BrokerOffsetEvidenceService:
             )
 
         self._clock_history_path = Path(clock_history_path)
+        self._checkpoint_path = (
+            self._clock_history_path.with_suffix(
+                ".checkpoint.json"
+            )
+        )
+
         self._detector = detector
         self._registry = registry
+        self._reader = self._create_reader()
 
         self._lock = Lock()
         self._processed_count = 0
-        self._processed_history: tuple[
-            MT5ClockHistorySample, ...
-        ] = ()
-
         self._last_decision: BrokerOffsetDecision | None = None
         self._last_record: BrokerOffsetRecord | None = None
         self._last_error: str | None = None
         self._state = "NOT_STARTED"
 
+    def _create_reader(self) -> ClockHistoryIncrementalReader:
+        return ClockHistoryIncrementalReader(
+            self._clock_history_path,
+            self._checkpoint_path,
+        )
+
     def poll_once(self) -> BrokerOffsetServiceSnapshot:
-        """Read history and process samples not previously processed."""
+        """Read, process, and commit one incremental evidence batch."""
 
         with self._lock:
             try:
-                samples = read_clock_history(
-                    self._clock_history_path
-                )
-
-                history_was_replaced = (
-                    self._processed_count > len(samples)
-                    or (
-                        self._processed_count > 0
-                        and tuple(samples[:self._processed_count])
-                        != self._processed_history
-                    )
-                )
-
-                if self._processed_count == 0 or history_was_replaced:
-                    self._detector.reset()
-                    self._processed_count = 0
-                    self._processed_history = ()
-                    self._last_decision = None
-
-                    # Only the latest three samples are eligible after
-                    # startup or file replacement. Old evidence must not
-                    # be replayed against a new NTP verification.
-                    start_index = max(0, len(samples) - 3)
-                else:
-                    start_index = self._processed_count
+                batch = self._reader.read_new()
 
                 self._state = "COLLECTING"
 
-                for sample in samples[start_index:]:
+                for sample in batch.samples:
                     self._process_sample(sample)
 
-                self._processed_count = len(samples)
-                self._processed_history = tuple(samples)
+                # Commit only after every sample was processed successfully.
+                self._reader.commit(batch)
+
+                self._processed_count = (
+                    batch.checkpoint.samples_processed
+                )
                 self._last_error = None
 
-                if not samples[start_index:]:
-                    if self._last_decision is not None:
-                        self._state = self._last_decision.status.value
+                if not batch.samples:
+                    if self._last_record is None:
+                        records = self._registry.load()
+                        if records:
+                            self._last_record = records[-1]
+
+                    if self._last_record is not None:
+                        self._state = "WAITING_FOR_NEW_EVIDENCE"
                     else:
                         self._state = "COLLECTING"
 
             except Exception as exc:
-                # A partial batch must never be treated as fully processed.
+                # Discard the uncommitted reader batch. A new reader
+                # resumes from the last durable checkpoint.
                 self._detector.reset()
-                self._processed_count = 0
-                self._processed_history = ()
                 self._last_decision = None
                 self._last_error = (
                     f"{type(exc).__name__}: {exc}"
                 )
                 self._state = "ERROR"
 
+                try:
+                    self._reader = self._create_reader()
+                except Exception:
+                    # Preserve the original processing error.
+                    pass
+
             return self._snapshot_unlocked()
 
     def snapshot(self) -> BrokerOffsetServiceSnapshot:
-        """Return the latest service state."""
-
         with self._lock:
             return self._snapshot_unlocked()
 
@@ -147,31 +141,14 @@ class BrokerOffsetEvidenceService:
         )
 
     @staticmethod
-    def _signature(
-        sample: MT5ClockHistorySample,
-    ) -> tuple[str, int, int]:
-        return (
-            sample.run_id,
-            sample.sample_sequence,
-            sample.monotonic_ms,
-        )
-
-    @staticmethod
     def _has_new_independent_evidence(
         decision: BrokerOffsetDecision,
         latest: BrokerOffsetRecord,
     ) -> bool:
-        """Reject evidence windows that overlap the latest stored window.
-
-        Three consecutive samples are required for every registry event.
-        A later candidate must use a completely new group of samples,
-        rather than reusing two samples from the previous event.
-        """
+        """Reject candidate windows overlapping a stored evidence window."""
 
         previous_samples = latest.evidence_samples
 
-        # Legacy v1 records do not contain sample-level evidence.
-        # Their exact sample window cannot be compared.
         if not previous_samples:
             return True
 
@@ -180,12 +157,7 @@ class BrokerOffsetEvidenceService:
         if len(candidate_samples) != 3:
             return False
 
-        previous_run_id = latest.run_id
-        candidate_run_id = decision.run_id
-
-        # A new EA run has a new sequence space. Its samples are
-        # independent of the previous run's sequence numbers.
-        if candidate_run_id != previous_run_id:
+        if decision.run_id != latest.run_id:
             return True
 
         try:
@@ -212,8 +184,6 @@ class BrokerOffsetEvidenceService:
         ):
             return False
 
-        # The first candidate sample must come after the final sample
-        # used by the previous registry event.
         return min(candidate_sequences) > max(previous_sequences)
 
     def _process_sample(
