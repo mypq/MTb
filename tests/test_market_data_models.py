@@ -1,4 +1,3 @@
-
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -10,8 +9,29 @@ from backend.market_data import (
     MarketCandle,
     VolumeSource,
 )
+from backend.market_data.models import MarketDataClockEvidence
 
 NOW = datetime.now(timezone.utc)
+
+
+def make_clock_evidence(**overrides):
+    values = {
+        "verified": True,
+        "account_login": 123456,
+        "broker_server": "Demo-Server",
+        "symbol": "XAUUSD",
+        "terminal_build": 6316,
+        "checked_at": NOW,
+        "ntp_offset_seconds": 0.05,
+        "ntp_uncertainty_seconds": 0.01,
+        "ntp_sample_count": 3,
+        "ntp_servers": ("NTP-A", "NTP-B", "NTP-C"),
+        "candle_offset_seconds": 7200.0,
+        "candle_uncertainty_seconds": 0.5,
+        "calibration_sample_count": 3,
+    }
+    values.update(overrides)
+    return MarketDataClockEvidence(**values)
 
 
 def make_candle(
@@ -266,6 +286,8 @@ def test_batch_rejects_non_utc_received_at():
 
     with pytest.raises(ValidationError):
         make_batch(received_at=non_utc)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -304,6 +326,8 @@ def test_boolean_real_volume_is_rejected():
             volume_source=VolumeSource.REAL,
             real_volume=True,
         )
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -333,6 +357,8 @@ def test_invalid_is_closed_values_are_rejected(value):
 
     with pytest.raises(ValidationError):
         MarketCandle(**values)
+
+
 def test_candle_symbol_and_timeframe_are_normalized():
     candle = make_candle(
         symbol="  XAUUSD  ",
@@ -396,3 +422,58 @@ def test_unknown_volume_source_preserves_available_real_volume():
     )
 
     assert candle.real_volume == 250
+
+
+def test_valid_clock_evidence_is_accepted():
+    evidence = make_clock_evidence()
+
+    assert evidence.verified is True
+    assert evidence.account_login == 123456
+    assert evidence.ntp_sample_count == 3
+
+
+def test_ntp_servers_are_normalized():
+    evidence = make_clock_evidence(
+        ntp_servers=(" NTP-A ", "NTP-B", "NTP-C")
+    )
+
+    assert evidence.ntp_servers == ("ntp-a", "ntp-b", "ntp-c")
+
+
+@pytest.mark.parametrize(
+    "servers",
+    [
+        ("ntp-a", "ntp-a", "ntp-c"),
+        ("ntp-a", "ntp-b", " "),
+        ("ntp-a", "ntp-b"),
+    ],
+)
+def test_clock_evidence_rejects_invalid_ntp_servers(servers):
+    with pytest.raises(ValidationError):
+        make_clock_evidence(ntp_servers=servers)
+
+
+def test_clock_evidence_rejects_non_utc_checked_at():
+    with pytest.raises(ValidationError):
+        make_clock_evidence(
+            checked_at=datetime(
+                2026,
+                1,
+                1,
+                10,
+                0,
+                tzinfo=timezone(timedelta(hours=3)),
+            )
+        )
+
+
+def test_clock_evidence_rejects_non_finite_offsets():
+    with pytest.raises(ValidationError):
+        make_clock_evidence(ntp_offset_seconds=float("nan"))
+
+
+def test_clock_evidence_is_immutable():
+    evidence = make_clock_evidence()
+
+    with pytest.raises(ValidationError):
+        evidence.verified = False
