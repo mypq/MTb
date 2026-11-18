@@ -568,3 +568,249 @@ def test_new_broker_server_identity_gets_independent_baseline(
         sample["broker_server"] == "Different-Broker-Server"
         for sample in new_record.evidence_samples
     )
+
+def test_new_symbol_identity_gets_independent_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    rows = [make_row(i, 7200) for i in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.state == "BASELINE_RECORDED"
+
+    new_rows = []
+    for sequence in range(1, 4):
+        row = make_row(sequence, 7200)
+        row["run_id"] = "different-symbol-run"
+        row["symbol"] = "EURUSD"
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(BASE_EPOCH + 300 + sequence * 60)
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 7200
+        )
+        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        new_rows.append(row)
+
+    append_rows(history_path, new_rows)
+    second = service.poll_once()
+    records = registry.load()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(records) == 2
+    assert records[0].identity == IDENTITY
+    assert records[1].identity == (ACCOUNT, SERVER, "EURUSD", BUILD)
+    assert records[1].event_type == "BASELINE"
+    assert all(s["symbol"] == "EURUSD" for s in records[1].evidence_samples)
+
+
+def test_new_terminal_build_identity_gets_independent_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    rows = [make_row(i, 7200) for i in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.state == "BASELINE_RECORDED"
+
+    new_rows = []
+    for sequence in range(1, 4):
+        row = make_row(sequence, 7200)
+        row["run_id"] = "different-build-run"
+        row["terminal_build"] = "6400"
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(BASE_EPOCH + 300 + sequence * 60)
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 7200
+        )
+        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        new_rows.append(row)
+
+    append_rows(history_path, new_rows)
+    second = service.poll_once()
+    records = registry.load()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(records) == 2
+    assert records[0].identity == IDENTITY
+    assert records[1].identity == (ACCOUNT, SERVER, SYMBOL, 6400)
+    assert records[1].event_type == "BASELINE"
+    assert all(
+        s["terminal_build"] == 6400
+        for s in records[1].evidence_samples
+    )
+
+
+def test_completely_changed_identity_gets_independent_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    rows = [make_row(i, 7200) for i in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.state == "BASELINE_RECORDED"
+
+    new_rows = []
+    for sequence in range(1, 4):
+        row = make_row(sequence, 7200)
+        row["run_id"] = "completely-new-identity"
+        row["account_login"] = str(ACCOUNT + 1)
+        row["broker_server"] = "Another-Broker"
+        row["symbol"] = "EURUSD"
+        row["terminal_build"] = "6400"
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(BASE_EPOCH + 300 + sequence * 60)
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 7200
+        )
+        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        new_rows.append(row)
+
+    append_rows(history_path, new_rows)
+    second = service.poll_once()
+    records = registry.load()
+
+    expected_identity = (
+        ACCOUNT + 1,
+        "Another-Broker",
+        "EURUSD",
+        6400,
+    )
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(records) == 2
+    assert records[0].identity == IDENTITY
+    assert records[1].identity == expected_identity
+    assert records[1].event_type == "BASELINE"
+    assert all(
+        (
+            s["account_login"],
+            s["broker_server"],
+            s["symbol"],
+            s["terminal_build"],
+        ) == expected_identity
+        for s in records[1].evidence_samples
+    )
+
+
+def test_offset_change_is_tracked_independently_per_identity(
+    tmp_path,
+    monkeypatch,
+):
+    install_chronological_registry_clock(monkeypatch)
+
+    rows = [make_row(i, 7200) for i in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+    assert first.state == "BASELINE_RECORDED"
+
+    # A different symbol gets its own baseline at 10800 seconds.
+    second_identity_rows = []
+    for sequence in range(1, 4):
+        row = make_row(sequence, 10800)
+        row["run_id"] = "second-identity-run"
+        row["symbol"] = "EURUSD"
+        row["monotonic_ms"] = str(5000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(BASE_EPOCH + 300 + sequence * 60)
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 300 + sequence * 60 + 10800
+        )
+        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        second_identity_rows.append(row)
+
+    append_rows(history_path, second_identity_rows)
+    second = service.poll_once()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert len(registry.load()) == 2
+
+    # A new run for EURUSD reports a changed offset.
+    changed_rows = []
+    for sequence in range(1, 4):
+        row = make_row(sequence, 3600)
+        row["run_id"] = "third-offset-run"
+        row["symbol"] = "EURUSD"
+        row["monotonic_ms"] = str(9000 + sequence * 60000)
+        row["time_gmt_epoch"] = str(BASE_EPOCH + 600 + sequence * 60)
+        row["time_trade_server_epoch"] = str(
+            BASE_EPOCH + 600 + sequence * 60 + 3600
+        )
+        row["time_current_quote_epoch"] = row["time_trade_server_epoch"]
+        changed_rows.append(row)
+
+    append_rows(history_path, changed_rows)
+    third = service.poll_once()
+    records = registry.load()
+
+    assert third.state == "OFFSET_CHANGE_RECORDED"
+    assert len(records) == 3
+
+    original_baseline, second_baseline, offset_change = records
+
+    assert original_baseline.identity == IDENTITY
+    assert original_baseline.offset_seconds == 7200
+    assert original_baseline.event_type == "BASELINE"
+
+    assert second_baseline.identity == (ACCOUNT, SERVER, "EURUSD", BUILD)
+    assert second_baseline.offset_seconds == 10800
+    assert second_baseline.event_type == "BASELINE"
+
+    assert offset_change.identity == (ACCOUNT, SERVER, "EURUSD", BUILD)
+    assert offset_change.offset_seconds == 3600
+    assert offset_change.previous_offset_seconds == 10800
+    assert offset_change.event_type == "OFFSET_CHANGE"
+
+
+def test_service_restart_preserves_registry_and_requires_new_evidence(
+    tmp_path,
+):
+    rows = [make_row(i, 7200) for i in range(1, 4)]
+    service, registry, history_path = make_service(tmp_path, rows)
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    original_records = registry.load()
+    assert len(original_records) == 1
+
+    # Recreate the service as if the backend process restarted.
+    restarted_service = BrokerOffsetEvidenceService(
+        history_path,
+        BrokerOffsetDetector(make_verifier()),
+        BrokerOffsetRegistry(registry.path),
+    )
+
+    after_restart = restarted_service.poll_once()
+
+    # Previously stored evidence must not be recorded again.
+    assert after_restart.state == "WAITING_FOR_NEW_EVIDENCE"
+    assert len(registry.load()) == 1
+    assert registry.load()[0] == original_records[0]
+
+    # Supply three genuinely new samples after restart.
+    append_rows(
+        history_path,
+        [make_row(i, 7200) for i in range(4, 7)],
+    )
+
+    after_new_evidence = restarted_service.poll_once()
+    records = registry.load()
+
+    assert after_new_evidence.state == "CONFIRMATION_RECORDED"
+    assert len(records) == 2
+    assert records[0] == original_records[0]
+    assert records[1].event_type == "CONFIRMATION"
+    assert records[1].offset_seconds == 7200
+    assert [
+        sample["sample_sequence"]
+        for sample in records[1].evidence_samples
+    ] == [4, 5, 6]
