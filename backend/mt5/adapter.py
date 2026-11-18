@@ -1,4 +1,4 @@
-from __future__ import annotations
+From __future__ import annotations
 
 from datetime import datetime, timezone
 from math import isfinite
@@ -649,15 +649,22 @@ class MT5Adapter:
             if (
                 live_ntp is None
                 or not live_ntp.verified
+                or live_ntp.checked_at_unix is None
                 or live_ntp.offset_seconds is None
                 or live_ntp.uncertainty_seconds is None
                 or live_ntp.sample_count < 3
                 or len(live_ntp.servers) < 3
+                or len(set(live_ntp.servers)) < 3
             ):
                 raise MT5AdapterError(
                     "Live trusted NTP evidence is unavailable. "
                     "UTC candle conversion is blocked."
                 )
+
+            ntp_checked_at = datetime.fromtimestamp(
+                live_ntp.checked_at_unix + live_ntp.offset_seconds,
+                tz=timezone.utc,
+            )
 
             # Verify that the currently connected account is the
             # same account and broker server used for calibration.
@@ -901,7 +908,7 @@ class MT5Adapter:
                         broker_server=str(account.server).strip(),
                         symbol=normalized_symbol,
                         terminal_build=terminal_build,
-                        checked_at=received_at,
+                        checked_at=ntp_checked_at,
                         ntp_offset_seconds=live_ntp.offset_seconds,
                         ntp_uncertainty_seconds=live_ntp.uncertainty_seconds,
                         ntp_sample_count=live_ntp.sample_count,
