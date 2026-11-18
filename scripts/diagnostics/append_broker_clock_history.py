@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-# The update-status columns are mandatory. An old evidence file without
-# these columns cannot prove whether a stream was updated or unchanged.
+MAX_NTP_AGE_SECONDS = 6 * 60 * 60
+MIN_NTP_SAMPLES = 3
+MAX_NTP_OFFSET_SECONDS = 1.0
+MAX_NTP_UNCERTAINTY_SECONDS = 1.0
+
 SOURCE_FIELDS = {
     "cycle_end_local_utc",
     "account_login",
@@ -23,6 +26,8 @@ SOURCE_FIELDS = {
     "ntp_checked_at_unix",
     "ntp_offset_seconds",
     "ntp_uncertainty_seconds",
+    "ntp_sample_count",
+    "ntp_age_seconds",
     "tick_time_epoch_raw",
     "tick_update_status",
     "tick_corrected_read_midpoint_utc",
@@ -35,10 +40,18 @@ SOURCE_FIELDS = {
     "m5_update_status",
     "m5_corrected_read_midpoint_utc",
     "m5_latest_closed_open_minus_corrected_utc_seconds",
+    "m1_active_open_raw",
+    "m1_active_read_status",
+    "m1_active_corrected_read_midpoint_utc",
+    "m1_active_open_minus_expected_utc_boundary_seconds",
+    "m5_active_open_raw",
+    "m5_active_read_status",
+    "m5_active_corrected_read_midpoint_utc",
+    "m5_active_open_minus_expected_utc_boundary_seconds",
     "read_error",
 }
 
-# Keep the existing archive schema so existing history files remain readable.
+# Preserve the existing archive format.
 HISTORY_FIELDS = [
     "observed_at_local_utc",
     "account_login",
@@ -57,8 +70,6 @@ HISTORY_FIELDS = [
 LOCK_TIMEOUT_SECONDS = 30.0
 LOCK_RETRY_SECONDS = 0.1
 
-ACCEPTED_UPDATE_STATUSES = {"INITIAL", "UPDATED"}
-
 STREAM_DEFINITIONS = (
     (
         "tick",
@@ -66,6 +77,7 @@ STREAM_DEFINITIONS = (
         "tick_update_status",
         "tick_corrected_read_midpoint_utc",
         "tick_minus_corrected_utc_seconds",
+        "UPDATED",
     ),
     (
         "m1_closed_candle",
@@ -73,6 +85,7 @@ STREAM_DEFINITIONS = (
         "m1_update_status",
         "m1_corrected_read_midpoint_utc",
         "m1_latest_closed_open_minus_corrected_utc_seconds",
+        "UPDATED",
     ),
     (
         "m5_closed_candle",
@@ -80,6 +93,23 @@ STREAM_DEFINITIONS = (
         "m5_update_status",
         "m5_corrected_read_midpoint_utc",
         "m5_latest_closed_open_minus_corrected_utc_seconds",
+        "UPDATED",
+    ),
+    (
+        "m1_active_candle",
+        "m1_active_open_raw",
+        "m1_active_read_status",
+        "m1_active_corrected_read_midpoint_utc",
+        "m1_active_open_minus_expected_utc_boundary_seconds",
+        "OK",
+    ),
+    (
+        "m5_active_candle",
+        "m5_active_open_raw",
+        "m5_active_read_status",
+        "m5_active_corrected_read_midpoint_utc",
+        "m5_active_open_minus_expected_utc_boundary_seconds",
+        "OK",
     ),
 )
 
@@ -120,6 +150,15 @@ def valid_iso_datetime(value):
     return parsed.tzinfo is not None and parsed.utcoffset() is not None
 
 
+def iso_epoch(value):
+    try:
+        return datetime.fromisoformat(
+            str(value).strip()
+        ).timestamp()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def valid_unix_timestamp(value):
     parsed = number(value)
 
@@ -140,15 +179,25 @@ def valid_nonnegative_number(value):
 
 
 def observation_key(row):
+    kind = str(row.get("evidence_kind", "")).strip()
+
+    # An active candle is archived once per identity and candle,
+    # not once per polling cycle.
+    observed_at = (
+        ""
+        if kind in {"m1_active_candle", "m5_active_candle"}
+        else str(row.get("observed_at_local_utc", "")).strip()
+    )
+
     return tuple(
-        str(row.get(field, "")).strip()
-        for field in (
-            "account_login",
-            "broker_server",
-            "symbol",
-            "observed_at_local_utc",
-            "evidence_kind",
-            "raw_timestamp_epoch",
+        str(value).strip()
+        for value in (
+            row.get("account_login", ""),
+            row.get("broker_server", ""),
+            row.get("symbol", ""),
+            observed_at,
+            kind,
+            row.get("raw_timestamp_epoch", ""),
         )
     )
 
@@ -239,16 +288,68 @@ def valid_ntp_metadata(row):
         return False
 
     ntp_offset = number(row.get("ntp_offset_seconds"))
-    ntp_checked = number(row.get("ntp_checked_at_unix"))
-
-    return (
-        ntp_offset is not None
-        and valid_nonnegative_number(
-            row.get("ntp_uncertainty_seconds")
-        )
-        and ntp_checked is not None
-        and valid_unix_timestamp(ntp_checked)
+    ntp_uncertainty = number(
+        row.get("ntp_uncertainty_seconds")
     )
+    ntp_checked = number(row.get("ntp_checked_at_unix))
+    sample_count = number(row.get("ntp_sample_count"))
+    reported_age = number(row.get("ntp_age_seconds"))
+
+    if (
+        ntp_offset is None
+        or ntp_uncertainty is None
+        or ntp_checked is None
+        or sample_count is None
+        or reported_age is None
+    ):
+        return False
+
+    if not valid_unix_timestamp(ntp_checked):
+        return False
+
+    if sample_count < MIN_NTP_SAMPLES:
+        return False
+
+    if not sample_count.is_integer():
+        return False
+
+    if abs(ntp_offset) >= MAX_NTP_OFFSET_SECONDS:
+        return False
+
+    if not 0 <= ntp_uncertainty <= MAX_NTP_UNCERTAINTY_SECONDS:
+        return False
+
+    if not 0 <= reported_age <= MAX_NTP_AGE_SECONDS:
+        return False
+
+    return True
+
+
+def valid_ntp_at_observation(row, observed_at):
+    checked = number(row.get("ntp_checked_at_unix"))
+    observed_epoch = iso_epoch(observed_at)
+
+    if checked is None or observed_epoch is None:
+        return False
+
+    actual_age = observed_epoch - checked
+
+    if actual_age < 0:
+        return False
+
+    if actual_age > MAX_NTP_AGE_SECONDS:
+        return False
+
+    reported_age = number(row.get("ntp_age_seconds"))
+
+    if reported_age is None:
+        return False
+
+    # Detect inconsistent NTP age metadata.
+    if abs(actual_age - reported_age) > 5.0:
+        return False
+
+    return True
 
 
 def build_observations(source_rows, source_name):
@@ -257,57 +358,68 @@ def build_observations(source_rows, source_name):
     rejected_numeric = 0
     rejected_identity = 0
     skipped_untrusted_ntp = 0
-    skipped_status = {
-        "INITIAL": 0,
-        "UPDATED": 0,
-        "UNCHANGED": 0,
-        "NO_DATA": 0,
-        "READ_ERROR": 0,
-        "UNKNOWN": 0,
-    }
+    skipped_status = {}
+    skipped_duplicate_active = 0
+
+    seen_active = set()
 
     for row in source_rows:
         if not valid_identity(row):
             rejected_identity += 1
             continue
 
-        if not valid_ntp_metadata(row):
-            skipped_untrusted_ntp += 1
-            continue
-
-        observed_at = (row.get("cycle_end_local_utc") or "").strip()
+        observed_at = (
+            row.get("cycle_end_local_utc") or ""
+        ).strip()
 
         if not valid_iso_datetime(observed_at):
             rejected_timestamps += 1
             continue
 
+        if not valid_ntp_metadata(row):
+            skipped_untrusted_ntp += 1
+            continue
+
+        if not valid_ntp_at_observation(row, observed_at):
+            skipped_untrusted_ntp += 1
+            continue
+
         ntp_offset = number(row.get("ntp_offset_seconds"))
-        ntp_uncertainty = number(row.get("ntp_uncertainty_seconds"))
+        ntp_uncertainty = number(
+            row.get("ntp_uncertainty_seconds")
+        )
         ntp_checked = number(row.get("ntp_checked_at_unix"))
 
-        # A global read_error is diagnostic only. Each stream has its own
-        # update status, so one failed stream must not discard other streams.
-        for kind, raw_field, status_field, utc_field, difference_field in (
-            STREAM_DEFINITIONS
-        ):
-            status = (row.get(status_field) or "").strip().upper()
+        for (
+            kind,
+            raw_field,
+            status_field,
+            utc_field,
+            difference_field,
+            required_status,
+        ) in STREAM_DEFINITIONS:
 
-            if status not in ACCEPTED_UPDATE_STATUSES:
-                if status in skipped_status:
-                    skipped_status[status] += 1
-                else:
-                    skipped_status["UNKNOWN"] += 1
+            status = (
+                row.get(status_field) or ""
+            ).strip().upper()
+
+            if status != required_status:
+                skipped_status[status or "UNKNOWN"] = (
+                    skipped_status.get(status or "UNKNOWN", 0) + 1
+                )
                 continue
 
             raw = number(row.get(raw_field))
             difference = number(row.get(difference_field))
-            comparison = (row.get(utc_field) or "").strip()
+            comparison = (
+                row.get(utc_field) or ""
+            ).strip()
 
             if raw is None or difference is None:
                 rejected_numeric += 1
                 continue
 
-            if not valid_unix_timestamp(raw):
+            if not raw.is_integer() or not valid_unix_timestamp(raw):
                 rejected_numeric += 1
                 continue
 
@@ -315,13 +427,34 @@ def build_observations(source_rows, source_name):
                 rejected_timestamps += 1
                 continue
 
+            identity = (
+                (row.get("account_login") or "").strip(),
+                (row.get("broker_server") or "").strip(),
+                (row.get("symbol") or "").strip(),
+                kind,
+                str(raw),
+            )
+
+            if kind in {"m1_active_candle", "m5_active_candle"}:
+                if identity in seen_active:
+                    skipped_duplicate_active += 1
+                    continue
+
+                seen_active.add(identity)
+
             observations.append({
                 "observed_at_local_utc": observed_at,
-                "account_login": (row.get("account_login") or "").strip(),
-                "broker_server": (row.get("broker_server") or "").strip(),
-                "symbol": (row.get("symbol") or "").strip(),
+                "account_login": (
+                    row.get("account_login") or ""
+                ).strip(),
+                "broker_server": (
+                    row.get("broker_server") or ""
+                ).strip(),
+                "symbol": (
+                    row.get("symbol") or ""
+                ).strip(),
                 "evidence_kind": kind,
-                "raw_timestamp_epoch": str(raw),
+                "raw_timestamp_epoch": str(int(raw)),
                 "comparison_utc": comparison,
                 "observed_offset_seconds": str(difference),
                 "ntp_checked_at_unix": str(ntp_checked),
@@ -336,6 +469,7 @@ def build_observations(source_rows, source_name):
         "rejected_identity": rejected_identity,
         "skipped_untrusted_ntp": skipped_untrusted_ntp,
         "skipped_status": skipped_status,
+        "skipped_duplicate_active": skipped_duplicate_active,
     }
 
     return observations, stats
@@ -409,16 +543,23 @@ def main():
     )
 
     if not observations:
-        print("ERROR: no eligible NTP-trusted updated observations found.")
+        print("ERROR: no eligible trusted observations found.")
         print(f"Rejected timestamps: {stats['rejected_timestamps']}")
         print(f"Rejected numeric values: {stats['rejected_numeric']}")
         print(f"Rejected identity rows: {stats['rejected_identity']}")
         print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
         print(f"Skipped statuses: {stats['skipped_status']}")
+        print(
+            "Skipped duplicate active candles: "
+            f"{stats['skipped_duplicate_active']}"
+        )
         return 5
 
     try:
-        new_rows = append_observations(destination, observations)
+        new_rows = append_observations(
+            destination,
+            observations,
+        )
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 6
@@ -440,13 +581,19 @@ def main():
     print(f"Rejected identity rows: {stats['rejected_identity']}")
     print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
     print(f"Skipped statuses: {stats['skipped_status']}")
+    print(
+        "Skipped duplicate active candles: "
+        f"{stats['skipped_duplicate_active']}"
+    )
     print(f"History: {destination.resolve()}")
 
     print(
-        "IMPORTANT: observed_offset_seconds stores the observed "
-        "difference against comparison_utc. For M1/M5 it includes "
-        "candle age and is NOT a broker UTC offset. No archived "
-        "measurement is authorization to correct production timestamps."
+        "IMPORTANT: observed_offset_seconds is a measured "
+        "comparison difference. Closed-candle values include "
+        "candle age. Active-candle values compare the active "
+        "candle open with its expected UTC boundary. None of "
+        "these measurements authorizes production timestamp "
+        "correction or proves a broker UTC offset."
     )
 
     return 0
