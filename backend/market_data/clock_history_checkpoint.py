@@ -1,4 +1,3 @@
-
 """Durable checkpoint for incremental MT5 clock-history reading."""
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ class ClockHistoryCheckpoint:
     file_mtime_ns: int
     samples_processed: int
     last_by_run: dict[str, dict[str, Any]]
+    prefix_sha256: str = ""
 
     def __post_init__(self) -> None:
         if min(
@@ -97,6 +97,7 @@ class ClockHistoryCheckpointStore:
                 file_mtime_ns=raw["file_mtime_ns"],
                 samples_processed=raw["samples_processed"],
                 last_by_run=raw["last_by_run"],
+                prefix_sha256=raw.get("prefix_sha256", ""),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ClockHistoryCheckpointError(
