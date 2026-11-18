@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -291,7 +290,7 @@ def valid_ntp_metadata(row):
     ntp_uncertainty = number(
         row.get("ntp_uncertainty_seconds")
     )
-    ntp_checked = number(row.get("ntp_checked_at_unix))
+    ntp_checked = number(row.get("ntp_checked_at_unix"))
     sample_count = number(row.get("ntp_sample_count"))
     reported_age = number(row.get("ntp_age_seconds"))
 
@@ -388,6 +387,7 @@ def build_observations(source_rows, source_name):
         ntp_uncertainty = number(
             row.get("ntp_uncertainty_seconds")
         )
+        # السطر المُصحح هنا:
         ntp_checked = number(row.get("ntp_checked_at_unix"))
 
         for (
