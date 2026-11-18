@@ -166,6 +166,18 @@ async def lifespan(app: FastAPI):
 
     adapter = MT5Adapter(settings=settings)
 
+    broker_offset_registry = BrokerOffsetRegistry(
+        getattr(
+            settings,
+            "BROKER_OFFSET_REGISTRY_FILE",
+            "data/broker_offsets.jsonl",
+        )
+    )
+
+    adapter.set_broker_offset_registry(
+        broker_offset_registry
+    )
+
     monitor = MT5ConnectionMonitor(
         adapter=adapter,
         interval_seconds=10.0,
@@ -222,10 +234,6 @@ async def lifespan(app: FastAPI):
     if clock_history_file:
         broker_offset_detector = BrokerOffsetDetector(
             ntp_verifier,
-        )
-
-        broker_offset_registry = BrokerOffsetRegistry(
-            settings.BROKER_OFFSET_REGISTRY_FILE,
         )
 
         broker_offset_service = BrokerOffsetEvidenceService(
