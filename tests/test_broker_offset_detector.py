@@ -283,3 +283,115 @@ def test_invalid_required_sample_count_is_rejected() -> None:
 def test_invalid_ntp_verifier_is_rejected() -> None:
     with pytest.raises(TypeError):
         BrokerOffsetDetector(None)  # type: ignore[arg-type]
+
+from dataclasses import replace
+
+
+def test_sample_older_than_ntp_freshness_window_is_rejected() -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+
+    sample = make_sample(sequence=1)
+    stale_sample = replace(
+        sample,
+        time_gmt_epoch=BASE_EPOCH - (90 * 60) - 1,
+        time_trade_server_epoch=(
+            BASE_EPOCH - (90 * 60) - 1 + 7200
+        ),
+        time_current_quote_epoch=(
+            BASE_EPOCH - (90 * 60) - 1 + 7200
+        ),
+    )
+
+    result = detector.observe(stale_sample)
+
+    assert result.status == BrokerOffsetStatus.WAITING_FOR_NTP
+    assert result.candidate_ready is False
+    assert result.sample_count == 0
+
+
+def test_sample_at_ntp_freshness_boundary_is_accepted() -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+
+    sample = make_sample(sequence=1)
+    boundary_sample = replace(
+        sample,
+        time_gmt_epoch=BASE_EPOCH - (90 * 60),
+        time_trade_server_epoch=(
+            BASE_EPOCH - (90 * 60) + 7200
+        ),
+        time_current_quote_epoch=(
+            BASE_EPOCH - (90 * 60) + 7200
+        ),
+    )
+
+    result = detector.observe(boundary_sample)
+
+    assert result.status == BrokerOffsetStatus.COLLECTING
+    assert result.sample_count == 1
+
+
+def test_samples_too_close_together_restart_collection() -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+
+    first = detector.observe(
+        make_sample(sequence=1, monotonic_ms=1000)
+    )
+
+    second = detector.observe(
+        make_sample(sequence=2, monotonic_ms=3000)
+    )
+
+    assert first.sample_count == 1
+    assert second.status == BrokerOffsetStatus.COLLECTING
+    assert second.sample_count == 1
+    assert second.candidate_ready is False
+
+
+def test_samples_at_minimum_interval_can_form_candidate() -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+
+    detector.observe(
+        make_sample(sequence=1, monotonic_ms=1000)
+    )
+
+    detector.observe(
+        make_sample(sequence=2, monotonic_ms=4000)
+    )
+
+    result = detector.observe(
+        make_sample(sequence=3, monotonic_ms=7000)
+    )
+
+    assert result.status == BrokerOffsetStatus.CANDIDATE_READY
+    assert result.candidate_ready is True
+    assert result.offset_seconds == 7200
+    assert result.sample_count == 3
+
+
+def test_non_finite_ntp_verification_time_is_rejected() -> None:
+    verifier = make_verifier()
+    verification = verifier.last_verification()
+
+    assert verification is not None
+
+    verifier._last_verification = replace(
+        verification,
+        checked_at_unix=float("nan"),
+    )
+
+    detector = BrokerOffsetDetector(verifier)
+    result = detector.observe(make_sample())
+
+    assert result.status == BrokerOffsetStatus.WAITING_FOR_NTP
+    assert result.candidate_ready is False
+    assert result.sample_count == 0
+
+
+def test_invalid_minimum_sample_interval_is_rejected() -> None:
+    verifier = make_verifier()
+
+    with pytest.raises(ValueError):
+        BrokerOffsetDetector(
+            verifier,
+            minimum_sample_interval_seconds=0,
+        )
