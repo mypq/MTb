@@ -364,6 +364,7 @@ def test_corrupt_history_reports_error_without_recording(tmp_path):
     assert snapshot.error is not None
     assert len(BrokerOffsetRegistry(registry_path).load()) == 0
 
+
 def test_corrupt_history_clears_stale_decision_but_preserves_record(
     tmp_path,
 ):
@@ -398,7 +399,10 @@ def test_corrupt_history_clears_stale_decision_but_preserves_record(
     assert failed.last_record == first.last_record
     assert len(registry.load()) == 1
 
-def test_modified_old_history_sample_is_detected(tmp_path):
+
+def test_modified_old_history_sample_is_rejected(
+    tmp_path,
+):
     rows = [
         make_row(sequence, 7200)
         for sequence in range(1, 4)
@@ -413,8 +417,6 @@ def test_modified_old_history_sample_is_detected(tmp_path):
     assert first.state == "BASELINE_RECORDED"
     assert len(registry.load()) == 1
 
-    # Change an old row while preserving its run ID,
-    # sequence and monotonic counter.
     modified_rows = [dict(row) for row in rows]
     modified_rows[0]["time_trade_server_epoch"] = str(
         int(modified_rows[0]["time_gmt_epoch"]) + 10800
@@ -428,15 +430,15 @@ def test_modified_old_history_sample_is_detected(tmp_path):
 
     second = service.poll_once()
 
-    # The service must detect the modified historical row
-    # and reprocess the latest three samples.
-    assert second.state == "COLLECTING"
-    assert second.last_decision is not None
-    assert second.last_decision.sample_count == 2
+    assert second.state == "ERROR"
+    assert second.error is not None
+    assert "modified" in second.error.lower()
+    assert second.last_decision is None
 
-    # Replayed overlapping evidence must not create a new record.
+    # The original registry evidence must remain untouched.
     assert len(registry.load()) == 1
     assert second.last_record == first.last_record
+
 
 def test_new_mt5_account_identity_gets_independent_baseline(
     tmp_path,
@@ -503,6 +505,8 @@ def test_new_mt5_account_identity_gets_independent_baseline(
         sample["account_login"] == ACCOUNT + 1
         for sample in new_record.evidence_samples
     )
+
+
 def test_new_broker_server_identity_gets_independent_baseline(
     tmp_path,
     monkeypatch,
@@ -567,6 +571,7 @@ def test_new_broker_server_identity_gets_independent_baseline(
         sample["broker_server"] == "Different-Broker-Server"
         for sample in new_record.evidence_samples
     )
+
 
 def test_new_symbol_identity_gets_independent_baseline(
     tmp_path,
@@ -830,4 +835,62 @@ def test_service_restart_preserves_registry_and_requires_new_evidence(
     assert [
         sample["sample_sequence"]
         for sample in records[1].evidence_samples
+    ] == [4, 5, 6]
+
+
+def test_service_restart_uses_incremental_checkpoint(
+    tmp_path,
+):
+    rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    service, registry, history_path = make_service(
+        tmp_path,
+        rows,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "BASELINE_RECORDED"
+    assert first.samples_processed == 3
+
+    checkpoint_path = history_path.with_suffix(
+        ".checkpoint.json"
+    )
+    assert checkpoint_path.exists()
+
+    restarted_service = BrokerOffsetEvidenceService(
+        history_path,
+        BrokerOffsetDetector(make_verifier()),
+        BrokerOffsetRegistry(registry.path),
+    )
+
+    after_restart = restarted_service.poll_once()
+
+    assert after_restart.error is None
+    assert after_restart.state == "WAITING_FOR_NEW_EVIDENCE"
+    assert after_restart.samples_processed == 3
+    assert len(registry.load()) == 1
+
+    append_rows(
+        history_path,
+        [
+            make_row(sequence, 7200)
+            for sequence in range(4, 7)
+        ],
+    )
+
+    after_new_samples = restarted_service.poll_once()
+
+    assert after_new_samples.error is None
+    assert after_new_samples.state == "CONFIRMATION_RECORDED"
+    assert after_new_samples.samples_processed == 6
+
+    records = registry.load()
+    assert len(records) == 2
+    assert records[1].event_type == "CONFIRMATION"
+    assert [
+        item["sample_sequence"]
+        for item in records[1].evidence_samples
     ] == [4, 5, 6]
