@@ -1,4 +1,3 @@
-
 """Periodic runtime monitor for MT5 broker-offset evidence."""
 
 from __future__ import annotations
@@ -110,7 +109,31 @@ class BrokerOffsetEvidenceMonitor:
                             ),
                         )
 
-                except Exception:
+                except Exception as exc:
+                    previous = self._last_snapshot
+
+                    if previous is None:
+                        try:
+                            previous = self._service.snapshot()
+                        except Exception:
+                            previous = None
+
+                    self._last_snapshot = BrokerOffsetServiceSnapshot(
+                        state="ERROR",
+                        samples_processed=(
+                            previous.samples_processed
+                            if previous is not None
+                            else 0
+                        ),
+                        last_decision=None,
+                        last_record=(
+                            previous.last_record
+                            if previous is not None
+                            else None
+                        ),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
                     logger.exception(
                         "Unexpected broker offset monitor failure."
                     )
