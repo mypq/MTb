@@ -159,6 +159,66 @@ class BrokerOffsetEvidenceService:
             sample.monotonic_ms,
         )
 
+    @staticmethod
+    def _has_new_independent_evidence(
+        decision: BrokerOffsetDecision,
+        latest: BrokerOffsetRecord,
+    ) -> bool:
+        """Reject evidence windows that overlap the latest stored window.
+
+        Three consecutive samples are required for every registry event.
+        A later candidate must use a completely new group of samples,
+        rather than reusing two samples from the previous event.
+        """
+
+        previous_samples = latest.evidence_samples
+
+        # Legacy v1 records do not contain sample-level evidence.
+        # Their exact sample window cannot be compared.
+        if not previous_samples:
+            return True
+
+        candidate_samples = decision.evidence_samples
+
+        if len(candidate_samples) != 3:
+            return False
+
+        previous_run_id = latest.run_id
+        candidate_run_id = decision.run_id
+
+        # A new EA run has a new sequence space. Its samples are
+        # independent of the previous run's sequence numbers.
+        if candidate_run_id != previous_run_id:
+            return True
+
+        try:
+            previous_sequences = [
+                item["sample_sequence"]
+                for item in previous_samples
+            ]
+            candidate_sequences = [
+                item.sample_sequence
+                for item in candidate_samples
+            ]
+        except (KeyError, AttributeError, TypeError):
+            return False
+
+        if (
+            len(previous_sequences) != 3
+            or len(candidate_sequences) != 3
+        ):
+            return False
+
+        if not all(
+            isinstance(value, int) and not isinstance(value, bool)
+            for value in previous_sequences + candidate_sequences
+        ):
+            return False
+
+        # The first candidate sample must come after the final sample
+        # used by the previous registry event.
+        return min(candidate_sequences) > max(previous_sequences)
+
     def _process_sample(
         self,
         sample: MT5ClockHistorySample,
@@ -182,15 +242,13 @@ class BrokerOffsetEvidenceService:
             identity=decision.identity
         )
 
-        # Compare only with the latest state for this identity.
-        # Searching the entire history would incorrectly suppress a
-        # legitimate return to an offset recorded in the past.
-        if (
-            latest is not None
-            and latest.offset_seconds == decision.offset_seconds
-        ):
-            self._state = "CANDIDATE_ALREADY_RECORDED"
-            return
+        if latest is not None:
+            if not self._has_new_independent_evidence(
+                decision,
+                latest,
+            ):
+                self._state = "WAITING_FOR_NEW_EVIDENCE"
+                return
 
         self._last_record = self._registry.append_candidate(
             decision
@@ -198,6 +256,8 @@ class BrokerOffsetEvidenceService:
 
         if self._last_record.event_type == "BASELINE":
             self._state = "BASELINE_RECORDED"
+        elif self._last_record.event_type == "CONFIRMATION":
+            self._state = "CONFIRMATION_RECORDED"
         elif self._last_record.event_type == "OFFSET_CHANGE":
             self._state = "OFFSET_CHANGE_RECORDED"
         else:
