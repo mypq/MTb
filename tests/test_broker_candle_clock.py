@@ -439,7 +439,11 @@ def test_real_offset_change_near_minute_boundary_is_not_ignored():
         offset=BROKER_OFFSET + 60,
     )
 
-    snapshot = calibrator.observe(**changed_observation)
+    with patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        return_value=11.1,
+    ):
+        snapshot = calibrator.observe(**changed_observation)
 
     assert snapshot.status == "DEGRADED"
     assert snapshot.offset_seconds is None
@@ -515,6 +519,7 @@ def test_trusted_evidence_rejects_replaced_ntp_verification():
     assert snapshot.offset_seconds is None
     assert evidence is None
     assert "changed" in snapshot.reason
+
 
 def test_new_observation_does_not_reuse_stale_calibration_samples():
     calibrator, _ = make_calibrator(
