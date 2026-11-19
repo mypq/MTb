@@ -330,6 +330,11 @@ class BrokerOffsetRegistry:
             "uncertainty_seconds": ntp_uncertainty,
         }
 
+        self._validate_ntp_sample_consistency(
+            ntp_evidence,
+            samples,
+        )
+
         timestamp = self._utc_datetime(
             recorded_at_utc or datetime.now(timezone.utc),
             "recorded_at_utc",
@@ -873,6 +878,47 @@ class BrokerOffsetRegistry:
         }
 
     @classmethod
+    def _validate_ntp_sample_consistency(
+        cls,
+        ntp: dict[str, Any],
+        samples: tuple[dict[str, Any], ...],
+    ) -> None:
+        """Ensure the NTP summary matches the final evidence sample."""
+
+        if not samples:
+            raise BrokerOffsetRegistryError(
+                "NTP evidence samples are missing."
+            )
+
+        if ntp["sample_count"] != len(ntp["servers"]):
+            raise BrokerOffsetRegistryError(
+                "NTP sample count does not match the server count."
+            )
+
+        latest = samples[-1]
+
+        matching_fields = (
+            ("checked_at_unix", "ntp_checked_at_unix"),
+            ("offset_seconds", "ntp_offset_seconds"),
+            ("uncertainty_seconds", "ntp_uncertainty_seconds"),
+        )
+
+        for summary_field, sample_field in matching_fields:
+            summary_value = cls._finite(
+                ntp[summary_field],
+                f"NTP {summary_field}",
+            )
+            sample_value = cls._finite(
+                latest[sample_field],
+                f"Evidence {sample_field}",
+            )
+
+            if summary_value != sample_value:
+                raise BrokerOffsetRegistryError(
+                    "NTP summary does not match the final evidence sample."
+                )
+
+    @classmethod
     def _validate_event_history(
         cls,
         record: BrokerOffsetRecord,
@@ -1117,6 +1163,11 @@ class BrokerOffsetRegistry:
         )
 
         ntp = cls._validate_ntp_evidence(data["ntp_evidence"])
+
+        cls._validate_ntp_sample_consistency(
+            ntp,
+            tuple(samples_raw),
+        )
 
         start = cls._parse_timestamp(
             data["evidence_start_utc"], "evidence_start_utc"
