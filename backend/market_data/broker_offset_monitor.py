@@ -1,3 +1,4 @@
+
 """Periodic runtime monitor for MT5 broker-offset evidence."""
 
 from __future__ import annotations
@@ -14,6 +15,14 @@ from backend.market_data.broker_offset_service import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_BROKER_OFFSET_POLL_INTERVAL_SECONDS = 1.0
+
+RECORDED_EVENT_STATES = frozenset(
+    {
+        "BASELINE_RECORDED",
+        "CONFIRMATION_RECORDED",
+        "OFFSET_CHANGE_RECORDED",
+    }
+)
 
 
 class BrokerOffsetEvidenceMonitor:
@@ -88,10 +97,12 @@ class BrokerOffsetEvidenceMonitor:
                             "Broker offset evidence processing failed: %s",
                             snapshot.error,
                         )
-                    elif snapshot.state == "CANDIDATE_RECORDED":
+                    elif snapshot.state in RECORDED_EVENT_STATES:
                         logger.info(
-                            "Broker offset candidate recorded: "
-                            "offset_seconds=%s run_id=%s identity=%s",
+                            "Broker offset event recorded: "
+                            "state=%s offset_seconds=%s "
+                            "run_id=%s identity=%s",
+                            snapshot.state,
                             (
                                 snapshot.last_record.offset_seconds
                                 if snapshot.last_record is not None
