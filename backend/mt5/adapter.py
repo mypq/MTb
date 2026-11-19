@@ -819,6 +819,11 @@ class MT5Adapter:
                     tuple(raw_timestamps),
                 )
 
+                if len(historical_records) != len(raw_timestamps):
+                    raise ValueError(
+                        "Historical offset lookup returned an incomplete result."
+                    )
+
                 for rate, timestamp_value, historical_record in zip(
                     rate_items,
                     raw_timestamps,
