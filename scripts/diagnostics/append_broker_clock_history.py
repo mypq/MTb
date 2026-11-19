@@ -15,6 +15,7 @@ MAX_NTP_AGE_SECONDS = 6 * 60 * 60
 MIN_NTP_SAMPLES = 3
 MAX_NTP_OFFSET_SECONDS = 1.0
 MAX_NTP_UNCERTAINTY_SECONDS = 1.0
+NTP_AGE_PRECISION_TOLERANCE_SECONDS = 0.000001
 
 SOURCE_FIELDS = {
     "cycle_end_local_utc",
@@ -308,7 +309,10 @@ def valid_ntp_metadata(row):
     if not 0 <= ntp_uncertainty <= MAX_NTP_UNCERTAINTY_SECONDS:
         return False
 
-    if not 0 <= reported_age <= MAX_NTP_AGE_SECONDS:
+    if (
+        reported_age < -NTP_AGE_PRECISION_TOLERANCE_SECONDS
+        or reported_age > MAX_NTP_AGE_SECONDS
+    ):
         return False
 
     return True
@@ -323,16 +327,24 @@ def valid_ntp_at_observation(row, observed_at):
 
     actual_age = observed_epoch - checked
 
-    if actual_age < 0:
+    if actual_age < -NTP_AGE_PRECISION_TOLERANCE_SECONDS:
         return False
 
     if actual_age > MAX_NTP_AGE_SECONDS:
         return False
 
+    # Treat sub-microsecond negative values as timestamp precision noise.
+    actual_age = max(0.0, actual_age)
+
     reported_age = number(row.get("ntp_age_seconds"))
 
     if reported_age is None:
         return False
+
+    if reported_age < -NTP_AGE_PRECISION_TOLERANCE_SECONDS:
+        return False
+
+    reported_age = max(0.0, reported_age)
 
     # Detect inconsistent NTP age metadata.
     if abs(actual_age - reported_age) > 5.0:
