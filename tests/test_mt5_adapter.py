@@ -1581,9 +1581,14 @@ def test_closed_candles_are_blocked_after_ntp_evidence_is_replaced():
     calibrator = adapter._candle_clock_calibrator
     assert calibrator is not None
 
-    # Replace the live NTP verification after calibration.
-    replacement = calibrator._ntp.verify()
-    assert replacement.verified is True
+    current = calibrator._ntp.last_verification()
+    assert current is not None
+
+    replacement = replace(
+        current,
+        offset_seconds=current.offset_seconds + 0.01,
+    )
+    calibrator._ntp._last_verification = replacement
 
     mt5.copy_rates_from_pos.return_value = [make_rate()]
 
