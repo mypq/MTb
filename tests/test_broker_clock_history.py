@@ -146,7 +146,7 @@ def test_active_candles_are_archived_when_tick_updated():
     )
     assert {
         item["evidence_kind"] for item in observations
-    } == {"m1_active_candle", "m5_active_candle"}
+    } == {"tick", "m1_active_candle", "m5_active_candle"}
     assert stats["skipped_stale_active"] == 0
 
 
@@ -157,7 +157,7 @@ def test_active_candle_streams_are_independently_validated():
     )
     assert {
         item["evidence_kind"] for item in observations
-    } == {"m5_active_candle"}
+    } == {"tick", "m5_active_candle"}
 
 
 def test_archives_all_three_updated_streams(
