@@ -172,6 +172,13 @@ class MarketDataRepository:
                         duplicate_candles=duplicate_count,
                     )
 
+                evidence = batch.clock_evidence
+
+                if evidence is None or evidence.verified is not True:
+                    raise MarketDataPersistenceError(
+                        "Verified clock evidence is required for persistence."
+                    )
+
                 now = datetime.now(timezone.utc)
 
                 batch_record = MarketDataBatchRecord(
@@ -181,6 +188,26 @@ class MarketDataRepository:
                     received_at=batch.received_at,
                     candle_count=len(new_candles),
                     created_at=now,
+                    clock_verified=evidence.verified,
+                    clock_account_login=evidence.account_login,
+                    clock_broker_server=evidence.broker_server,
+                    clock_terminal_build=evidence.terminal_build,
+                    clock_checked_at=evidence.checked_at,
+                    clock_ntp_offset_seconds=evidence.ntp_offset_seconds,
+                    clock_ntp_uncertainty_seconds=(
+                        evidence.ntp_uncertainty_seconds
+                    ),
+                    clock_ntp_sample_count=evidence.ntp_sample_count,
+                    clock_ntp_servers=list(evidence.ntp_servers),
+                    clock_candle_offset_seconds=(
+                        evidence.candle_offset_seconds
+                    ),
+                    clock_candle_uncertainty_seconds=(
+                        evidence.candle_uncertainty_seconds
+                    ),
+                    clock_calibration_sample_count=(
+                        evidence.calibration_sample_count
+                    ),
                 )
 
                 session.add(batch_record)
