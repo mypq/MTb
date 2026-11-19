@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -326,14 +325,42 @@ class BrokerOffsetRegistry:
                         "New registry timestamp cannot precede the latest record."
                     )
 
-                previous = next(
-                    (
-                        record
-                        for record in reversed(existing)
-                        if record.identity == identity
-                    ),
-                    None,
+                identity_records = [
+                    record
+                    for record in existing
+                    if record.identity == identity
+                ]
+
+                previous = identity_records[-1] if identity_records else None
+
+                previous_evidence_ends = [
+                    record.evidence_end_utc
+                    for record in identity_records
+                    if record.evidence_end_utc is not None
+                ]
+
+                latest_evidence_end = (
+                    max(previous_evidence_ends)
+                    if previous_evidence_ends
+                    else None
                 )
+
+                if (
+                    latest_evidence_end is not None
+                    and start <= latest_evidence_end
+                ):
+                    raise BrokerOffsetRegistryError(
+                        "New evidence overlaps or precedes previously stored evidence."
+                    )
+
+                if (
+                    previous is not None
+                    and previous.evidence_end_utc is not None
+                    and latest_evidence_end != previous.evidence_end_utc
+                ):
+                    raise BrokerOffsetRegistryError(
+                        "Previous registry evidence windows are not chronological."
+                    )
 
                 if previous is None:
                     event_type = "BASELINE"
