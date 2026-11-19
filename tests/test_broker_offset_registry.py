@@ -492,6 +492,108 @@ def test_candidate_without_ntp_proof_is_rejected(tmp_path) -> None:
         registry.append_candidate(decision, recorded_at_utc=BASE_TIME)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("ntp_checked_at_unix", BASE_EPOCH + 1),
+        ("ntp_offset_seconds", 0.25),
+        ("ntp_uncertainty_seconds", 0.25),
+    ],
+)
+def test_append_rejects_ntp_summary_mismatch_with_final_sample(
+    tmp_path,
+    field,
+    value,
+) -> None:
+    registry = BrokerOffsetRegistry(
+        tmp_path / "offsets.jsonl"
+    )
+
+    decision = replace(
+        make_decision(),
+        **{field: value},
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="NTP summary does not match",
+    ):
+        registry.append_candidate(
+            decision,
+            recorded_at_utc=BASE_TIME,
+        )
+
+    assert registry.load() == ()
+
+
+def test_append_rejects_ntp_sample_count_server_mismatch(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(
+        tmp_path / "offsets.jsonl"
+    )
+
+    decision = replace(
+        make_decision(),
+        ntp_sample_count=4,
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="NTP sample count does not match",
+    ):
+        registry.append_candidate(
+            decision,
+            recorded_at_utc=BASE_TIME,
+        )
+
+    assert registry.load() == ()
+
+
+def test_load_rejects_ntp_summary_mismatch_with_final_sample(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["ntp_evidence"]["offset_seconds"] = 0.25
+    write_json_lines(path, records)
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="NTP summary does not match",
+    ):
+        registry.load()
+
+
+def test_load_rejects_ntp_sample_count_server_mismatch(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    records = read_json_lines(path)
+    records[0]["ntp_evidence"]["sample_count"] = 4
+    write_json_lines(path, records)
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="NTP sample count does not match",
+    ):
+        registry.load()
+
+
 def test_incorrect_sample_identity_is_rejected(tmp_path) -> None:
     registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
     decision = make_decision()
