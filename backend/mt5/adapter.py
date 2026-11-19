@@ -69,6 +69,14 @@ class MT5Adapter:
         with self._lock:
             self._candle_clock_calibrator = calibrator
 
+    def mark_candle_clock_connection_lost(self) -> None:
+        """Invalidate candle-clock calibration after MT5 disconnects."""
+        with self._lock:
+            calibrator = self._candle_clock_calibrator
+
+        if calibrator is not None:
+            calibrator.mark_connection_lost()
+
     def set_broker_offset_registry(self, registry) -> None:
         if not callable(getattr(registry, "latest", None)):
             raise TypeError(
