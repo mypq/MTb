@@ -168,24 +168,33 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
     assert connection.state == MT5ConnectionState.CONNECTED
 
     base_monotonic = 1000.0
+    monotonic_values = iter((
+        base_monotonic,
+        base_monotonic + 0.3,
+        base_monotonic + 0.6,
+    ))
+
+    def stable_monotonic():
+        try:
+            return next(monotonic_values)
+        except StopIteration:
+            return base_monotonic + 0.6
+
+    monotonic_patcher = patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        side_effect=stable_monotonic,
+    )
+    monotonic_patcher.start()
 
     try:
-        with patch(
-            "backend.market_data.broker_candle_clock.monotonic",
-            side_effect=(
-                base_monotonic,
-                base_monotonic + 0.3,
-                base_monotonic + 0.6,
-            ),
-        ):
-            snapshot = None
+        snapshot = None
 
-            for _ in range(3):
-                sample = adapter.get_active_candle_clock_sample(
-                    "XAUUSD"
-                )
+        for _ in range(3):
+            sample = adapter.get_active_candle_clock_sample(
+                "XAUUSD"
+            )
 
-                snapshot = calibrator.observe(**sample)
+            snapshot = calibrator.observe(**sample)
 
         assert snapshot is not None
         assert snapshot.status == "VERIFIED"
@@ -363,6 +372,7 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             database.dispose()
 
     finally:
+        monotonic_patcher.stop()
         adapter.shutdown()
 
 
