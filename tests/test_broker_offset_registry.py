@@ -95,6 +95,53 @@ def decision_with_run_id(
     )
 
 
+def decision_with_time_shift(
+    decision: BrokerOffsetDecision,
+    shift_seconds: int,
+) -> BrokerOffsetDecision:
+    shifted_samples = tuple(
+        replace(
+            sample,
+            time_gmt_epoch=sample.time_gmt_epoch + shift_seconds,
+            time_trade_server_epoch=(
+                sample.time_trade_server_epoch + shift_seconds
+            ),
+            time_current_quote_epoch=(
+                sample.time_current_quote_epoch + shift_seconds
+            ),
+            time_local_epoch=sample.time_local_epoch + shift_seconds,
+        )
+        for sample in decision.evidence_samples
+    )
+
+    return replace(
+        decision,
+        evidence_samples=shifted_samples,
+    )
+
+
+def decision_with_identity(
+    decision: BrokerOffsetDecision,
+    identity: tuple[int, str, str, int],
+) -> BrokerOffsetDecision:
+    samples = tuple(
+        replace(
+            sample,
+            account_login=identity[0],
+            broker_server=identity[1],
+            symbol=identity[2],
+            terminal_build=identity[3],
+        )
+        for sample in decision.evidence_samples
+    )
+
+    return replace(
+        decision,
+        identity=identity,
+        evidence_samples=samples,
+    )
+
+
 def append_candidate_in_process(args):
     path, decision, recorded_at = args
 
@@ -246,6 +293,35 @@ def test_v1_and_v3_records_can_coexist(tmp_path) -> None:
     assert records[1] == new_record
 
 
+def test_overlapping_confirmation_evidence_is_rejected(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(
+        tmp_path / "offsets.jsonl"
+    )
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    overlapping = decision_with_run_id(
+        make_decision(),
+        "different-run-id",
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="overlaps or precedes",
+    ):
+        registry.append_candidate(
+            overlapping,
+            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        )
+
+    assert registry.load() == (first,)
+
+
 def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
     registry = BrokerOffsetRegistry(path)
@@ -255,7 +331,7 @@ def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
         recorded_at_utc=BASE_TIME,
     )
     second_decision = decision_with_run_id(
-        make_decision(),
+        decision_with_time_shift(make_decision(), 180),
         "run-002",
     )
     second = registry.append_candidate(
@@ -283,7 +359,10 @@ def test_latest_returns_latest_record(tmp_path) -> None:
         recorded_at_utc=BASE_TIME,
     )
     second = registry.append_candidate(
-        decision_with_run_id(make_decision(), "run-002"),
+        decision_with_run_id(
+            decision_with_time_shift(make_decision(), 180),
+            "run-002",
+        ),
         recorded_at_utc=BASE_TIME + timedelta(minutes=1),
     )
 
@@ -374,7 +453,10 @@ def test_timestamp_cannot_move_backwards(tmp_path) -> None:
 
     with pytest.raises(BrokerOffsetRegistryError):
         registry.append_candidate(
-            decision_with_run_id(make_decision(), "run-002"),
+            decision_with_run_id(
+                decision_with_time_shift(make_decision(), 180),
+                "run-002",
+            ),
             recorded_at_utc=BASE_TIME - timedelta(seconds=1),
         )
 
@@ -586,7 +668,10 @@ def test_confirmation_must_match_previous_identity_offset(tmp_path) -> None:
         recorded_at_utc=BASE_TIME,
     )
     registry.append_candidate(
-        decision_with_run_id(make_decision(), "run-002"),
+        decision_with_run_id(
+            decision_with_time_shift(make_decision(), 180),
+            "run-002",
+        ),
         recorded_at_utc=BASE_TIME + timedelta(minutes=1),
     )
 
@@ -762,7 +847,7 @@ def test_partial_write_failure_restores_original_file(
     with pytest.raises(BrokerOffsetRegistryError):
         registry.append_candidate(
             decision_with_run_id(
-                make_decision(),
+                decision_with_time_shift(make_decision(), 180),
                 "partial-write-failure",
             ),
             recorded_at_utc=BASE_TIME + timedelta(minutes=1),
@@ -806,7 +891,7 @@ def test_fsync_failure_restores_original_file(
     with pytest.raises(BrokerOffsetRegistryError):
         registry.append_candidate(
             decision_with_run_id(
-                make_decision(),
+                decision_with_time_shift(make_decision(), 180),
                 "fsync-failure",
             ),
             recorded_at_utc=BASE_TIME + timedelta(minutes=1),
@@ -868,7 +953,7 @@ def test_rollback_failure_reports_uncertain_registry_integrity(
     ):
         registry.append_candidate(
             decision_with_run_id(
-                make_decision(),
+                decision_with_time_shift(make_decision(), 180),
                 "rollback-failure",
             ),
             recorded_at_utc=BASE_TIME + timedelta(minutes=1),
@@ -933,7 +1018,7 @@ def test_rollback_fsync_failure_reports_uncertain_integrity(
     ):
         registry.append_candidate(
             decision_with_run_id(
-                make_decision(),
+                decision_with_time_shift(make_decision(), 180),
                 "rollback-fsync-failure",
             ),
             recorded_at_utc=BASE_TIME + timedelta(minutes=1),
@@ -975,7 +1060,7 @@ def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
     path.write_text(original_v2 + "\n", encoding="utf-8")
 
     new_record = registry.append_candidate(
-        make_decision(),
+        decision_with_time_shift(make_decision(), 180),
         recorded_at_utc=BASE_TIME + timedelta(minutes=1),
     )
 
