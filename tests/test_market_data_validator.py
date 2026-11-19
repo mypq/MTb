@@ -752,3 +752,29 @@ def test_stale_clock_evidence_blocks_analysis():
         issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
         for issue in report.issues
     )
+def test_future_clock_evidence_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    future_evidence = batch.clock_evidence.model_copy(
+        update={
+            "checked_at": CHECKED_AT + timedelta(seconds=1),
+        }
+    )
+    batch = batch.model_copy(
+        update={"clock_evidence": future_evidence}
+    )
+
+    report = MarketDataValidator().validate(
+        batch,
+        300,
+        CHECKED_AT,
+    )
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
