@@ -365,6 +365,7 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
     finally:
         adapter.shutdown()
 
+
 def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
     monkeypatch,
 ):
@@ -437,14 +438,8 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         assert snapshot.sample_count == 3
         assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
 
-        # 3. Simulate MT5 disconnection.
-        mt5.terminal_info.return_value.connected = False
-
-        disconnected = adapter.connection_status()
-        assert disconnected.state == MT5ConnectionState.DISCONNECTED
-
-        # 4. More than 30 seconds pass.
-        # Old calibration must be invalidated before candle retrieval.
+        # 3. More than 30 seconds pass while MT5 is still connected.
+        # The expired calibration must block candle retrieval first.
         with patch(
             "backend.market_data.broker_candle_clock.monotonic",
             return_value=140.0,
@@ -461,7 +456,13 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         assert stale_snapshot.sample_count == 0
         assert stale_snapshot.offset_seconds is None
 
-        # No closed-candle request may have been made during disconnection.
+        # 4. Now simulate MT5 disconnection.
+        mt5.terminal_info.return_value.connected = False
+
+        disconnected = adapter.connection_status()
+        assert disconnected.state == MT5ConnectionState.DISCONNECTED
+
+        # No closed-candle request was made while disconnected.
         assert not any(
             call.args[2] == 1
             for call in mt5.copy_rates_from_pos.call_args_list
