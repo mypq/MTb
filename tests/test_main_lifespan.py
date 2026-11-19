@@ -1834,3 +1834,150 @@ def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose
         ) < events.index("backup.stop")
 
     asyncio.run(scenario())
+
+def test_lifespan_skips_mt5_shutdown_while_real_broker_worker_is_blocked(
+    monkeypatch,
+):
+    from backend.mt5.broker_tick_monitor import (
+        BrokerTickMonitor as RealBrokerTickMonitor,
+    )
+    from backend.mt5.broker_tick_worker import (
+        BrokerTickMonitorWorker as RealBrokerTickMonitorWorker,
+    )
+    from backend.mt5.time_models import BrokerTimeSample
+
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    worker_started = Event()
+    release_worker = Event()
+    adapter_shutdown_called = Event()
+    worker_instances = []
+
+    class BlockingAdapter:
+        def __init__(self, settings):
+            self.settings = settings
+            self.candle_clock_calibrator = None
+            self.broker_offset_registry = None
+
+        def connect(self):
+            events.append("adapter.connect")
+            return SimpleNamespace(
+                state=MT5ConnectionState.CONNECTED,
+            )
+
+        def connection_status(self):
+            return SimpleNamespace(
+                state=MT5ConnectionState.CONNECTED,
+            )
+
+        def mark_candle_clock_connection_lost(self):
+            pass
+
+        def set_candle_clock_calibrator(self, calibrator):
+            self.candle_clock_calibrator = calibrator
+
+        def set_broker_offset_registry(self, registry):
+            self.broker_offset_registry = registry
+
+        def get_active_candle_clock_sample(self, symbol):
+            return {}
+
+        def get_broker_time_sample(self, symbol):
+            worker_started.set()
+
+            if not release_worker.wait(timeout=5):
+                raise RuntimeError(
+                    "Blocked MT5 worker release timed out."
+                )
+
+            return BrokerTimeSample(
+                symbol=symbol,
+                broker_time_msc=1,
+                received_at_utc=datetime.now(timezone.utc),
+                received_monotonic_ns=0,
+                bid=2000.0,
+                ask=2000.1,
+                account_login=12345,
+                broker_server="Test-Server",
+            )
+
+        def shutdown(self):
+            events.append("adapter.shutdown")
+            adapter_shutdown_called.set()
+
+    class FastStopWorker(RealBrokerTickMonitorWorker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            worker_instances.append(self)
+
+        def stop(self, timeout_seconds=15.0):
+            return super().stop(timeout_seconds=0.05)
+
+    monkeypatch.setattr(
+        main,
+        "MT5Adapter",
+        BlockingAdapter,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "MT5ConnectionMonitor",
+        RealMT5ConnectionMonitor,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "BrokerTickMonitor",
+        RealBrokerTickMonitor,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "BrokerTickMonitorWorker",
+        FastStopWorker,
+    )
+
+    async def wait_for_worker():
+        for _ in range(600):
+            if worker_started.is_set():
+                return
+
+            await asyncio.sleep(0.005)
+
+        raise AssertionError(
+            "Real broker worker did not enter its blocked MT5 operation."
+        )
+
+    async def run():
+        async with main.lifespan(app):
+            await wait_for_worker()
+
+            assert len(worker_instances) == 1
+            assert worker_instances[0].is_running
+
+    try:
+        asyncio.run(run())
+
+        worker = worker_instances[0]
+
+        # Shutdown must not close MT5 while its real worker is blocked.
+        assert worker.is_running
+        assert not adapter_shutdown_called.is_set()
+        assert "adapter.shutdown" not in events
+
+        # The application must still complete its database cleanup.
+        assert "database.dispose" in events
+
+    finally:
+        release_worker.set()
+
+        if worker_instances:
+            assert worker_instances[0].stop(
+                timeout_seconds=3,
+            )
+
+    assert not worker_instances[0].is_running
+    assert not adapter_shutdown_called.is_set()
