@@ -102,6 +102,64 @@ def run_archiver(monkeypatch, source, output, capsys):
     return result, captured.out
 
 
+def active_source_row(**overrides):
+    row = valid_source_row(
+        tick_update_status="UPDATED",
+        m1_update_status="UNCHANGED",
+        m5_update_status="UNCHANGED",
+        m1_active_open_raw="1794869040",
+        m1_active_read_status="OK",
+        m1_active_corrected_read_midpoint_utc=(
+            "2026-11-16T20:44:17.330279+00:00"
+        ),
+        m1_active_open_minus_expected_utc_boundary_seconds="7200.0",
+        m5_active_open_raw="1794868800",
+        m5_active_read_status="OK",
+        m5_active_corrected_read_midpoint_utc=(
+            "2026-11-16T20:44:17.330279+00:00"
+        ),
+        m5_active_open_minus_expected_utc_boundary_seconds="7200.0",
+    )
+    row.update(overrides)
+    return row
+
+
+def test_active_candles_require_a_fresh_tick_in_same_cycle():
+    for tick_status in ("INITIAL", "UNCHANGED", "NO_DATA", "READ_ERROR"):
+        row = active_source_row(tick_update_status=tick_status)
+        observations, stats = history_module.build_observations(
+            [row], "evidence.csv"
+        )
+        assert not any(
+            item["evidence_kind"] in {
+                "m1_active_candle", "m5_active_candle"
+            }
+            for item in observations
+        )
+        assert stats["skipped_stale_active"] == 2
+
+
+def test_active_candles_are_archived_when_tick_updated():
+    row = active_source_row()
+    observations, stats = history_module.build_observations(
+        [row], "evidence.csv"
+    )
+    assert {
+        item["evidence_kind"] for item in observations
+    } == {"m1_active_candle", "m5_active_candle"}
+    assert stats["skipped_stale_active"] == 0
+
+
+def test_active_candle_streams_are_independently_validated():
+    row = active_source_row(m1_active_read_status="READ_ERROR")
+    observations, _ = history_module.build_observations(
+        [row], "evidence.csv"
+    )
+    assert {
+        item["evidence_kind"] for item in observations
+    } == {"m5_active_candle"}
+
+
 def test_archives_all_three_updated_streams(
     tmp_path, monkeypatch, capsys
 ):
