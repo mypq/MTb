@@ -205,6 +205,19 @@ class BrokerCandleClockCalibrator:
                 )
 
             now_mono = monotonic()
+
+            if (
+                self._last_sample_monotonic is not None
+                and now_mono - self._last_sample_monotonic
+                > self._maximum_age
+            ):
+                self._reset()
+                self._status = "COLLECTING"
+                self._reason = (
+                    "Previous calibration samples expired; "
+                    "collecting fresh samples."
+                )
+
             self._samples.append((minute_aligned, now_mono))
             self._last_sample_monotonic = now_mono
             self._ntp_evidence = ntp
