@@ -224,7 +224,11 @@ def configure_test_candle_clock(
     )
 
     registry = Mock()
-    registry.for_broker_times.return_value = (confirmation,)
+    registry.for_broker_times.side_effect = (
+        lambda identity, timestamps: tuple(
+            confirmation for _ in timestamps
+        )
+    )
 
     adapter.set_broker_offset_registry(registry)
 
@@ -476,6 +480,7 @@ def test_closed_candles_require_historical_confirmation_coverage():
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=raw_timestamp),
     ]
+    adapter._broker_offset_registry.for_broker_times.side_effect = None
     adapter._broker_offset_registry.for_broker_times.return_value = (None,)
 
     with pytest.raises(
@@ -511,6 +516,7 @@ def test_historical_offset_is_used_instead_of_current_live_offset():
             "sample_count": 3,
         },
     )
+    adapter._broker_offset_registry.for_broker_times.side_effect = None
     adapter._broker_offset_registry.for_broker_times.return_value = (
         historical_confirmation,
     )
