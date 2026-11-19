@@ -348,6 +348,7 @@ def build_observations(source_rows, source_name):
     rejected_identity = 0
     skipped_untrusted_ntp = 0
     skipped_status = {}
+    skipped_stale_active = 0
 
     for row in source_rows:
         if not valid_identity(row):
@@ -396,6 +397,16 @@ def build_observations(source_rows, source_name):
                 if required_status == "UPDATED"
                 else {required_status}
             )
+
+            if kind in {"m1_active_candle", "m5_active_candle"}:
+                # A successful read is not proof that the market is moving.
+                # Require a tick change observed in this same capture cycle.
+                tick_status = (
+                    row.get("tick_update_status") or ""
+                ).strip().upper()
+                if tick_status != "UPDATED":
+                    skipped_stale_active += 1
+                    continue
 
             if status not in allowed_statuses:
                 skipped_status[status or "UNKNOWN"] = (
@@ -455,6 +466,7 @@ def build_observations(source_rows, source_name):
         "rejected_identity": rejected_identity,
         "skipped_untrusted_ntp": skipped_untrusted_ntp,
         "skipped_status": skipped_status,
+        "skipped_stale_active": skipped_stale_active,
     }
 
     return observations, stats
@@ -534,6 +546,8 @@ def main():
         print(f"Rejected identity rows: {stats['rejected_identity']}")
         print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
         print(f"Skipped statuses: {stats['skipped_status']}")
+    print(f"Skipped stale active-candle observations: {stats['skipped_stale_active']}")
+        print(f"Skipped stale active-candle observations: {stats['skipped_stale_active']}")
         return 5
 
     try:
