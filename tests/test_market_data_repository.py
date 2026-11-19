@@ -335,10 +335,15 @@ def test_same_timestamp_for_different_symbols_is_independent(repository):
         update={"symbol": "EURUSD"}
     )
 
+    clock_evidence = original.batch.clock_evidence.model_copy(
+        update={"symbol": "EURUSD"}
+    )
+
     batch = original.batch.model_copy(
         update={
             "symbol": "EURUSD",
             "candles": (candle,),
+            "clock_evidence": clock_evidence,
         }
     )
 
@@ -385,6 +390,7 @@ def test_same_timestamp_for_different_timeframes_is_independent(repository):
     result = repo.save_snapshot(snapshot)
 
     assert result.inserted_candles == 1
+    assert result.duplicate_candles == 0
     assert database_counts(database) == (2, 2)
 
 
@@ -460,6 +466,7 @@ def test_any_existing_candle_field_conflict_is_rejected(
         repo.save_snapshot(make_snapshot(count=1))
 
     assert database_counts(database) == (1, 1)
+
 
 def test_get_history_returns_latest_candles_in_ascending_order(repository):
     repo, database = repository
