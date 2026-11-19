@@ -490,7 +490,11 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
 
         # 7. Candle fetching is allowed again only after fresh verification.
-        batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            return_value=145.0,
+        ):
+            batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
 
         assert len(batch.candles) == 2
         assert all(candle.is_closed for candle in batch.candles)
