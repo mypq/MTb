@@ -705,8 +705,8 @@ class MT5Adapter:
                     f"Candle clock identity verification failed: {exc}"
                 ) from exc
 
-            # Require a confirmed registry event for the exact
-            # account, broker, symbol and terminal build.
+            # Resolve historical broker offsets per candle below.
+            # The current live calibration is not proof for older bars.
             registry = self._broker_offset_registry
 
             if registry is None:
@@ -744,50 +744,11 @@ class MT5Adapter:
                     terminal_build,
                 )
 
-                confirmation = registry.latest(
-                    identity=identity
-                )
-
             except Exception as exc:
                 raise MT5AdapterError(
-                    "Broker offset confirmation lookup failed: "
+                    "Broker offset identity lookup failed: "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
-
-            if (
-                confirmation is None
-                or confirmation.event_type != "CONFIRMATION"
-            ):
-                raise MT5AdapterError(
-                    "A confirmed broker offset is required "
-                    "before UTC candle conversion."
-                )
-
-            ntp_evidence = confirmation.ntp_evidence
-
-            if (
-                confirmation.evidence_sample_count != 3
-                or len(confirmation.evidence_samples) != 3
-                or not isinstance(ntp_evidence, dict)
-                or ntp_evidence.get("verified") is not True
-                or ntp_evidence.get("sample_count", 0) < 3
-            ):
-                raise MT5AdapterError(
-                    "Broker offset confirmation evidence is incomplete."
-                )
-
-            if (
-                abs(
-                    float(clock.offset_seconds)
-                    - float(confirmation.offset_seconds)
-                ) > 0.000001
-            ):
-                calibrator.reset()
-
-                raise MT5AdapterError(
-                    "Broker registry offset does not match "
-                    "the independently calibrated candle clock."
-                )
 
             # Only retrieve closed candles after clock and identity
             # verification have both succeeded.
@@ -848,8 +809,37 @@ class MT5Adapter:
                             "MT5 returned an invalid candle timestamp."
                         )
 
+                    historical_record = registry.for_broker_time(
+                        identity,
+                        timestamp_value,
+                    )
+
+                    if (
+                        historical_record is None
+                        or historical_record.event_type != "CONFIRMATION"
+                    ):
+                        raise ValueError(
+                            "No confirmed historical broker-offset evidence "
+                            "covers raw candle timestamp "
+                            f"{timestamp_value}; UTC conversion is blocked."
+                        )
+
+                    historical_ntp = historical_record.ntp_evidence
+
+                    if (
+                        historical_record.evidence_sample_count != 3
+                        or len(historical_record.evidence_samples) != 3
+                        or not isinstance(historical_ntp, dict)
+                        or historical_ntp.get("verified") is not True
+                        or historical_ntp.get("sample_count", 0) < 3
+                    ):
+                        raise ValueError(
+                            "Historical broker-offset confirmation evidence "
+                            "is incomplete."
+                        )
+
                     candle_time = datetime.fromtimestamp(
-                        timestamp_value - clock.offset_seconds,
+                        timestamp_value - historical_record.offset_seconds,
                         tz=timezone.utc,
                     )
 
