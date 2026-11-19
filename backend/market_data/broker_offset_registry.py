@@ -441,7 +441,19 @@ class BrokerOffsetRegistry:
         original_size = os.fstat(descriptor).st_size
 
         try:
-            view = memoryview(payload)
+            # Older valid JSONL files may not end with a newline.
+            # Separate the next record without modifying existing evidence.
+            separator = b""
+
+            if original_size > 0:
+                os.lseek(descriptor, original_size - 1, os.SEEK_SET)
+                last_byte = os.read(descriptor, 1)
+
+                if last_byte != b"\n":
+                    separator = b"\n"
+
+            complete_payload = separator + payload
+            view = memoryview(complete_payload)
             total = 0
 
             while total < len(view):
