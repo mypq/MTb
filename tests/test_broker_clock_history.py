@@ -662,3 +662,59 @@ def test_history_keeps_existing_rows_unchanged(
     final_rows = read_history(output)
     assert final_rows[:3] == original_rows
     assert len(final_rows) == 6
+@pytest.mark.parametrize(
+    "reported_age, expected",
+    [
+        ("-0.0000005", True),
+        ("-0.0000009", True),
+        ("-0.000001", True),
+        ("-0.0000011", False),
+        ("-0.000002", False),
+        ("0", True),
+        ("1.5", True),
+        ("21601", False),
+    ],
+)
+def test_ntp_metadata_age_precision_tolerance(
+    reported_age, expected
+):
+    row = valid_source_row(ntp_age_seconds=reported_age)
+
+    assert (
+        history_module.valid_ntp_metadata(row)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "age_difference, expected",
+    [
+        (-0.0000005, True),
+        (-0.0000009, True),
+        (-0.000001, True),
+        (-0.0000011, False),
+        (-0.000002, False),
+        (0.0, True),
+        (1.0, True),
+        (21601.0, False),
+    ],
+)
+def test_ntp_observation_age_precision_tolerance(
+    age_difference, expected
+):
+    observed_at = "2026-11-16T20:44:17.258084+00:00"
+    observed_epoch = history_module.iso_epoch(observed_at)
+
+    row = valid_source_row(
+        ntp_checked_at_unix=str(
+            observed_epoch - age_difference
+        ),
+        ntp_age_seconds="0",
+    )
+
+    assert (
+        history_module.valid_ntp_at_observation(
+            row, observed_at
+        )
+        is expected
+    )
