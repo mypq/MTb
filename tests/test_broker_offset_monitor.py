@@ -1,7 +1,7 @@
-
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -16,6 +16,7 @@ from backend.market_data.broker_offset_registry import (
 )
 from backend.market_data.broker_offset_service import (
     BrokerOffsetEvidenceService,
+    BrokerOffsetServiceSnapshot,
 )
 from backend.market_data.ntp_time import (
     NtpSample,
@@ -129,6 +130,7 @@ def test_monitor_rejects_invalid_service():
     with pytest.raises(TypeError):
         BrokerOffsetEvidenceMonitor(None)
 
+
 def test_unexpected_poll_failure_is_visible_in_monitor_snapshot(
     tmp_path,
     monkeypatch,
@@ -170,3 +172,57 @@ def test_unexpected_poll_failure_is_visible_in_monitor_snapshot(
         assert monitor.is_running is False
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "BASELINE_RECORDED",
+        "CONFIRMATION_RECORDED",
+        "OFFSET_CHANGE_RECORDED",
+    ],
+)
+def test_monitor_logs_all_recorded_event_states(
+    tmp_path,
+    monkeypatch,
+    caplog,
+    state,
+):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
+
+        expected_snapshot = BrokerOffsetServiceSnapshot(
+            state=state,
+            samples_processed=3,
+            last_decision=None,
+            last_record=None,
+            error=None,
+        )
+
+        def return_recorded_snapshot():
+            stop_event.set()
+            return expected_snapshot
+
+        monkeypatch.setattr(
+            monitor._service,
+            "poll_once",
+            return_recorded_snapshot,
+        )
+
+        await monitor.run(stop_event)
+
+        assert monitor.snapshot() == expected_snapshot
+        assert monitor.is_running is False
+
+    with caplog.at_level(
+        logging.INFO,
+        logger="backend.market_data.broker_offset_monitor",
+    ):
+        asyncio.run(scenario())
+
+    assert any(
+        "Broker offset event recorded" in record.message
+        and f"state={state}" in record.message
+        for record in caplog.records
+    )
