@@ -1,9 +1,45 @@
+
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
+
+
+UTC = timezone.utc
+
+CLOCK_COLUMNS = {
+    "clock_verified",
+    "clock_account_login",
+    "clock_broker_server",
+    "clock_terminal_build",
+    "clock_checked_at",
+    "clock_ntp_offset_seconds",
+    "clock_ntp_uncertainty_seconds",
+    "clock_ntp_sample_count",
+    "clock_ntp_servers",
+    "clock_candle_offset_seconds",
+    "clock_candle_uncertainty_seconds",
+    "clock_calibration_sample_count",
+}
+
+
+def make_alembic_config(project_root: Path, database_url: str) -> Config:
+    config = Config(str(project_root / "alembic.ini"))
+
+    config.set_main_option(
+        "script_location",
+        str(project_root / "migrations"),
+    )
+
+    config.set_main_option(
+        "sqlalchemy.url",
+        database_url,
+    )
+
+    return config
 
 
 def test_initial_migration_upgrade_and_downgrade(
@@ -22,21 +58,90 @@ def test_initial_migration_upgrade_and_downgrade(
     )
 
     project_root = Path(__file__).resolve().parents[1]
-
-    alembic_config = Config(
-        str(project_root / "alembic.ini")
-    )
-
-    alembic_config.set_main_option(
-        "script_location",
-        str(project_root / "migrations"),
-    )
-
-    alembic_config.set_main_option(
-        "sqlalchemy.url",
+    alembic_config = make_alembic_config(
+        project_root,
         database_url,
     )
 
+    # First create the database using the original migration only.
+    command.upgrade(alembic_config, "0001_market_data")
+
+    engine = create_engine(database_url)
+
+    try:
+        inspector = inspect(engine)
+
+        assert "market_data_batches" in inspector.get_table_names()
+        assert "market_candles" in inspector.get_table_names()
+
+        old_batch_columns = {
+            column["name"]
+            for column in inspector.get_columns("market_data_batches")
+        }
+
+        # Clock evidence columns must not exist in migration 0001.
+        assert CLOCK_COLUMNS.isdisjoint(old_batch_columns)
+
+        # Insert a genuine legacy-format row before migration 0002.
+        legacy_received_at = datetime(
+            2026,
+            11,
+            18,
+            12,
+            0,
+            tzinfo=UTC,
+        )
+
+        legacy_created_at = datetime(
+            2026,
+            11,
+            18,
+            12,
+            0,
+            1,
+            tzinfo=UTC,
+        )
+
+        with engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO market_data_batches (
+                        symbol,
+                        timeframe,
+                        source,
+                        received_at,
+                        candle_count,
+                        created_at
+                    )
+                    VALUES (
+                        :symbol,
+                        :timeframe,
+                        :source,
+                        :received_at,
+                        :candle_count,
+                        :created_at
+                    )
+                    """
+                ),
+                {
+                    "symbol": "XAUUSD",
+                    "timeframe": "M5",
+                    "source": "MT5",
+                    "received_at": legacy_received_at,
+                    "candle_count": 1,
+                    "created_at": legacy_created_at,
+                },
+            )
+
+            legacy_batch_id = result.lastrowid
+
+        assert legacy_batch_id is not None
+
+    finally:
+        engine.dispose()
+
+    # Upgrade the existing database from 0001 to the latest migration.
     command.upgrade(alembic_config, "head")
 
     engine = create_engine(database_url)
@@ -67,29 +172,14 @@ def test_initial_migration_upgrade_and_downgrade(
             "created_at",
         }.issubset(batch_columns)
 
-        clock_columns = {
-            "clock_verified",
-            "clock_account_login",
-            "clock_broker_server",
-            "clock_terminal_build",
-            "clock_checked_at",
-            "clock_ntp_offset_seconds",
-            "clock_ntp_uncertainty_seconds",
-            "clock_ntp_sample_count",
-            "clock_ntp_servers",
-            "clock_candle_offset_seconds",
-            "clock_candle_uncertainty_seconds",
-            "clock_calibration_sample_count",
-        }
-
-        assert clock_columns.issubset(batch_columns)
+        assert CLOCK_COLUMNS.issubset(batch_columns)
 
         batch_column_details = {
             column["name"]: column
             for column in inspector.get_columns("market_data_batches")
         }
 
-        for column_name in clock_columns:
+        for column_name in CLOCK_COLUMNS:
             assert batch_column_details[column_name]["nullable"] is True
 
         assert {
@@ -151,9 +241,50 @@ def test_initial_migration_upgrade_and_downgrade(
             for foreign_key in foreign_keys
         )
 
+        # The legacy row must survive the migration unchanged.
+        with engine.connect() as connection:
+            legacy_row = connection.execute(
+                text(
+                    """
+                    SELECT
+                        id,
+                        symbol,
+                        timeframe,
+                        source,
+                        candle_count,
+                        clock_verified,
+                        clock_account_login,
+                        clock_broker_server,
+                        clock_terminal_build,
+                        clock_checked_at,
+                        clock_ntp_offset_seconds,
+                        clock_ntp_uncertainty_seconds,
+                        clock_ntp_sample_count,
+                        clock_ntp_servers,
+                        clock_candle_offset_seconds,
+                        clock_candle_uncertainty_seconds,
+                        clock_calibration_sample_count
+                    FROM market_data_batches
+                    WHERE id = :batch_id
+                    """
+                ),
+                {"batch_id": legacy_batch_id},
+            ).mappings().one()
+
+        assert legacy_row["id"] == legacy_batch_id
+        assert legacy_row["symbol"] == "XAUUSD"
+        assert legacy_row["timeframe"] == "M5"
+        assert legacy_row["source"] == "MT5"
+        assert legacy_row["candle_count"] == 1
+
+        # Never invent historical clock evidence for legacy records.
+        for column_name in CLOCK_COLUMNS:
+            assert legacy_row[column_name] is None
+
     finally:
         engine.dispose()
 
+    # Downgrade must remove both market-data tables.
     command.downgrade(alembic_config, "base")
 
     verification_engine = create_engine(database_url)
