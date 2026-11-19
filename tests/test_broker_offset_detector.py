@@ -1,5 +1,6 @@
-
 from __future__ import annotations
+
+from dataclasses import replace
 
 import pytest
 
@@ -14,14 +15,18 @@ from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 BASE_EPOCH = 1_794_952_458
 
 
-def make_verifier(*, verify: bool = True) -> NtpTimeVerifier:
+def make_verifier(
+    *,
+    verify: bool = True,
+    ntp_offset_seconds: float = 0.0,
+) -> NtpTimeVerifier:
     verifier = NtpTimeVerifier(
         servers=("ntp-a", "ntp-b", "ntp-c"),
         wall_clock=lambda: float(BASE_EPOCH),
         monotonic_clock=lambda: 100.0,
         query=lambda server: NtpSample(
             server=server,
-            offset_seconds=0.0,
+            offset_seconds=ntp_offset_seconds,
             round_trip_seconds=0.02,
             root_dispersion_seconds=0.01,
         ),
@@ -284,8 +289,6 @@ def test_invalid_ntp_verifier_is_rejected() -> None:
     with pytest.raises(TypeError):
         BrokerOffsetDetector(None)  # type: ignore[arg-type]
 
-from dataclasses import replace
-
 
 def test_sample_older_than_ntp_freshness_window_is_rejected() -> None:
     detector = BrokerOffsetDetector(make_verifier())
@@ -395,3 +398,70 @@ def test_invalid_minimum_sample_interval_is_rejected() -> None:
             verifier,
             minimum_sample_interval_seconds=0,
         )
+
+
+@pytest.mark.parametrize(
+    "ntp_offset_seconds",
+    [-0.75, 0.75],
+)
+def test_candidate_uses_raw_clock_difference_without_ntp_reapplication(
+    ntp_offset_seconds: float,
+) -> None:
+    detector = BrokerOffsetDetector(
+        make_verifier(
+            ntp_offset_seconds=ntp_offset_seconds
+        )
+    )
+
+    detector.observe(make_sample(sequence=1))
+    detector.observe(
+        make_sample(
+            sequence=2,
+            monotonic_ms=61000,
+        )
+    )
+
+    result = detector.observe(
+        make_sample(
+            sequence=3,
+            monotonic_ms=121000,
+        )
+    )
+
+    assert result.status == BrokerOffsetStatus.CANDIDATE_READY
+    assert result.offset_seconds == 7200
+
+    assert all(
+        sample.calculated_offset_seconds == 7200.0
+        for sample in result.evidence_samples
+    )
+
+    assert all(
+        sample.ntp_offset_seconds == ntp_offset_seconds
+        for sample in result.evidence_samples
+    )
+
+
+@pytest.mark.parametrize(
+    "ntp_offset_seconds",
+    [-120.0, 120.0],
+)
+def test_large_positive_and_negative_ntp_offsets_block_candidate(
+    ntp_offset_seconds: float,
+) -> None:
+    verifier = make_verifier(
+        verify=False,
+        ntp_offset_seconds=ntp_offset_seconds,
+    )
+
+    verification = verifier.verify()
+    assert verification.verified is False
+
+    detector = BrokerOffsetDetector(verifier)
+
+    result = detector.observe(make_sample())
+
+    assert result.status == BrokerOffsetStatus.WAITING_FOR_NTP
+    assert result.candidate_ready is False
+    assert result.offset_seconds is None
+    assert result.sample_count == 0
