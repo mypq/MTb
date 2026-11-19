@@ -16,6 +16,7 @@ from backend.market_data.models import (
     CandleBatch,
     CandleQuality,
     MarketCandle,
+    MarketDataClockEvidence,
     VolumeSource,
 )
 from backend.market_data.repository import MarketDataRepository
@@ -72,12 +73,33 @@ def make_recent_batch() -> CandleBatch:
         for offset in (1, 0)
     )
 
+    clock_evidence = MarketDataClockEvidence(
+        verified=True,
+        account_login=123456,
+        broker_server="Test-Broker",
+        symbol="XAUUSD",
+        terminal_build=6316,
+        checked_at=boundary - timedelta(seconds=1),
+        ntp_offset_seconds=0.0,
+        ntp_uncertainty_seconds=0.05,
+        ntp_sample_count=3,
+        ntp_servers=(
+            "time.google.com",
+            "time.cloudflare.com",
+            "pool.ntp.org",
+        ),
+        candle_offset_seconds=7200.0,
+        candle_uncertainty_seconds=0.5,
+        calibration_sample_count=3,
+    )
+
     return CandleBatch(
         symbol="XAUUSD",
         timeframe="M5",
         candles=candles,
         received_at=boundary,
-        source="INTEGRATION_TEST",
+        source="MT5",
+        clock_evidence=clock_evidence,
     )
 
 
@@ -314,6 +336,8 @@ def test_conflicting_candle_returns_http_409_and_preserves_original(
 
         assert len(records) == 2
         assert records[-1].close_price == original_close
+
+
 def test_persistence_preserves_complete_candle_and_batch_metadata(
     integration_environment,
 ):
@@ -347,6 +371,28 @@ def test_persistence_preserves_complete_candle_and_batch_metadata(
         assert batch_record.source == batch.source
         assert batch_record.candle_count == len(batch.candles)
         assert batch_record.created_at is not None
+
+        evidence = batch.clock_evidence
+        assert evidence is not None
+
+        assert batch_record.clock_verified is True
+        assert batch_record.clock_account_login == evidence.account_login
+        assert batch_record.clock_broker_server == evidence.broker_server
+        assert batch_record.clock_terminal_build == evidence.terminal_build
+
+        assert (
+            batch_record.clock_checked_at.replace(tzinfo=UTC)
+            == evidence.checked_at
+        )
+
+        assert batch_record.clock_ntp_offset_seconds == evidence.ntp_offset_seconds
+        assert batch_record.clock_ntp_uncertainty_seconds == evidence.ntp_uncertainty_seconds
+        assert batch_record.clock_ntp_sample_count == evidence.ntp_sample_count
+        assert batch_record.clock_ntp_servers == list(evidence.ntp_servers)
+
+        assert batch_record.clock_candle_offset_seconds == evidence.candle_offset_seconds
+        assert batch_record.clock_candle_uncertainty_seconds == evidence.candle_uncertainty_seconds
+        assert batch_record.clock_calibration_sample_count == evidence.calibration_sample_count
 
         assert len(records) == len(batch.candles)
 
