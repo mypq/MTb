@@ -373,6 +373,14 @@ class BrokerCandleClockCalibrator:
 
             return snapshot, evidence
 
+    def mark_connection_lost(self) -> BrokerCandleClockSnapshot:
+        """Invalidate candle-clock evidence immediately after MT5 disconnects."""
+        with self._lock:
+            return self._invalidate(
+                "DEGRADED",
+                "MT5 connection was lost; fresh candle-clock calibration is required.",
+            )
+
     def reset(self) -> None:
         with self._lock:
             self._reset()
