@@ -153,10 +153,26 @@ def resolve_ntp_state(
     attempt_error: str | None = None,
 ) -> tuple[NtpVerification | None, bool, str]:
     """
-    Trust only the current successful NTP verification attempt.
-
-    Any failed or missing refresh immediately invalidates previous trust.
+    Preserve the latest successful NTP verification between scheduled
+    refresh attempts, while immediately invalidating trust after an
+    actual failed refresh.
     """
+
+    # No refresh was attempted in this cycle.
+    # Reuse the previous result only while the verifier still trusts it.
+    if attempt_result is None and not attempt_error:
+        previous_result = verifier.last_verification()
+
+        if previous_result is not None:
+            return previous_result, True, ""
+
+        return (
+            None,
+            False,
+            "NTP verification has not completed or is no longer trusted.",
+        )
+
+    # A new successful verification establishes fresh trust.
     if (
         attempt_result is not None
         and attempt_result.verified
@@ -164,6 +180,7 @@ def resolve_ntp_state(
     ):
         return attempt_result, True, ""
 
+    # An actual failed attempt or exception invalidates previous trust.
     verifier.reset()
 
     error = attempt_error or (
