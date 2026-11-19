@@ -268,6 +268,10 @@ def test_worker_recovers_after_mt5_connection_is_restored():
             self.failure_seen = Event()
             self.success_seen = Event()
             self.tick_calls = 0
+            self.candle_clock_connection_lost = False
+
+        def mark_candle_clock_connection_lost(self):
+            self.candle_clock_connection_lost = True
 
         def connection_status(self):
             state = (
@@ -346,6 +350,7 @@ def test_worker_recovers_after_mt5_connection_is_restored():
             MT5ConnectionState.CONNECTED
         )
         assert adapter.connected is True
+        assert adapter.candle_clock_connection_lost is True
 
         assert adapter.success_seen.wait(timeout=2)
 
