@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     UniqueConstraint,
 )
@@ -48,6 +49,69 @@ class MarketDataBatchRecord(DatabaseBase):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
+    )
+
+    # Historical clock evidence associated with this batch.
+    # Nullable to preserve compatibility with legacy database records.
+
+    clock_verified: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+    )
+
+    clock_account_login: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    clock_broker_server: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+
+    clock_terminal_build: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    clock_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    clock_ntp_offset_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    clock_ntp_uncertainty_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    clock_ntp_sample_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    clock_ntp_servers: Mapped[list[str] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
+    clock_candle_offset_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    clock_candle_uncertainty_seconds: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    clock_calibration_sample_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
 
     candles: Mapped[list[MarketCandleRecord]] = relationship(
