@@ -1,3 +1,4 @@
+
 """Detect broker UTC offsets using consecutive MT5 samples and NTP evidence."""
 
 from __future__ import annotations
@@ -9,7 +10,10 @@ from math import isfinite
 from statistics import median
 
 from backend.market_data.clock_history import MT5ClockHistorySample
-from backend.market_data.ntp_time import NtpTimeVerifier
+from backend.market_data.ntp_time import (
+    NtpTimeVerifier,
+    NtpVerification,
+)
 
 
 class BrokerOffsetStatus(str, Enum):
@@ -150,6 +154,7 @@ class BrokerOffsetDetector:
                 float,
                 float,
                 float,
+                NtpVerification,
             ]
         ] = deque(maxlen=required_samples)
 
@@ -169,7 +174,9 @@ class BrokerOffsetDetector:
                 "Fresh trusted NTP verification is unavailable.",
             )
 
-        ntp_offset, ntp_uncertainty, checked_at = ntp
+        ntp_offset = ntp.offset_seconds
+        ntp_uncertainty = ntp.uncertainty_seconds
+        checked_at = ntp.checked_at_unix
 
         if not sample.terminal_connected:
             self._window.clear()
@@ -233,6 +240,7 @@ class BrokerOffsetDetector:
                 ntp_uncertainty,
                 ntp_offset,
                 checked_at,
+                ntp,
             )
         )
 
@@ -248,6 +256,7 @@ class BrokerOffsetDetector:
                     ntp_uncertainty,
                     ntp_offset,
                     checked_at,
+                    ntp,
                 )
             )
             return self._decision(
@@ -279,7 +288,7 @@ class BrokerOffsetDetector:
             for entry in self._window
         )
 
-        verification = self._ntp.last_verification()
+        verification = self._window[-1][5]
 
         return self._decision(
             BrokerOffsetStatus.CANDIDATE_READY,
@@ -301,10 +310,7 @@ class BrokerOffsetDetector:
     def _trusted_ntp_for(
         self,
         sample: MT5ClockHistorySample,
-    ) -> tuple[float, float, float] | None:
-        if not self._ntp.is_trusted():
-            return None
-
+    ) -> NtpVerification | None:
         verification = self._ntp.last_verification()
 
         if (
@@ -335,7 +341,7 @@ class BrokerOffsetDetector:
         ):
             return None
 
-        return float(offset), float(uncertainty), float(checked_at)
+        return verification
 
     def _decision(
         self,
