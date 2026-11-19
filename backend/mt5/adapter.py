@@ -789,7 +789,10 @@ class MT5Adapter:
             candles: list[MarketCandle] = []
 
             try:
-                for rate in rates:
+                rate_items = list(rates)
+                raw_timestamps: list[int] = []
+
+                for rate in rate_items:
                     raw_timestamp = rate["time"]
 
                     if isinstance(raw_timestamp, bool):
@@ -809,11 +812,18 @@ class MT5Adapter:
                             "MT5 returned an invalid candle timestamp."
                         )
 
-                    historical_record = registry.for_broker_time(
-                        identity,
-                        timestamp_value,
-                    )
+                    raw_timestamps.append(timestamp_value)
 
+                historical_records = registry.for_broker_times(
+                    identity,
+                    tuple(raw_timestamps),
+                )
+
+                for rate, timestamp_value, historical_record in zip(
+                    rate_items,
+                    raw_timestamps,
+                    historical_records,
+                ):
                     if (
                         historical_record is None
                         or historical_record.event_type != "CONFIRMATION"
