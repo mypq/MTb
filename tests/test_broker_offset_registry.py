@@ -1,1313 +1,1226 @@
+"""Append-only broker offset registry with backward-compatible v1/v2/v3."""
+
 from __future__ import annotations
 
 import json
-from concurrent.futures import (
-    ProcessPoolExecutor,
-    ThreadPoolExecutor,
-)
-from dataclasses import replace
+import math
+import os
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterator
 
-import pytest
-
-import backend.market_data.broker_offset_registry as registry_module
-from backend.market_data.broker_offset_registry import (
-    BrokerOffsetRegistry,
-    BrokerOffsetRegistryError,
-)
 from backend.market_data.broker_offset_detector import (
     BrokerOffsetDecision,
-    BrokerOffsetDetector,
+    BrokerOffsetStatus,
 )
-from backend.market_data.clock_history import MT5ClockHistorySample
-from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
 
 
-UTC = timezone.utc
-BASE_TIME = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
-BASE_EPOCH = int(BASE_TIME.timestamp())
-
-IDENTITY = (337260380, "XMGlobal-MT5 9", "GOLD", 6316)
+REGISTRY_SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = {1, 2, 3}
+MAX_BROKER_OFFSET_SECONDS = 14 * 60 * 60
 
 
-def make_verifier(
-    ntp_offset_seconds: float = 0.0,
-) -> NtpTimeVerifier:
-    verifier = NtpTimeVerifier(
-        servers=("ntp-a", "ntp-b", "ntp-c"),
-        wall_clock=lambda: float(BASE_EPOCH),
-        monotonic_clock=lambda: 100.0,
-        query=lambda server: NtpSample(
-            server=server,
-            offset_seconds=ntp_offset_seconds,
-            round_trip_seconds=0.02,
-            root_dispersion_seconds=0.01,
-        ),
-    )
-    assert verifier.verify().verified
-    return verifier
+class BrokerOffsetRegistryError(ValueError):
+    """Invalid broker offset registry data."""
 
 
-def make_sample(sequence: int) -> MT5ClockHistorySample:
-    gmt = BASE_EPOCH + (sequence - 1) * 60
-    return MT5ClockHistorySample(
-        schema_version=1,
-        run_id="run-001",
-        sample_sequence=sequence,
-        monotonic_ms=1000 + (sequence - 1) * 60000,
-        time_gmt_epoch=gmt,
-        time_trade_server_epoch=gmt + 7200,
-        time_current_quote_epoch=gmt + 7200,
-        time_local_epoch=gmt,
-        server_utc_offset_seconds=7200,
-        account_login=IDENTITY[0],
-        broker_server=IDENTITY[1],
-        symbol=IDENTITY[2],
-        terminal_build=IDENTITY[3],
-        terminal_connected=True,
-    )
+@dataclass(frozen=True, slots=True)
+class BrokerOffsetRecord:
+    schema_version: int
+    record_sequence: int
+    recorded_at_utc: datetime
+    offset_seconds: int
+    uncertainty_seconds: float
+    run_id: str
+    account_login: int
+    broker_server: str
+    symbol: str
+    terminal_build: int
+    evidence_sample_count: int
+    evidence_samples: tuple[dict[str, Any], ...] = ()
+    ntp_evidence: dict[str, Any] | None = None
+    evidence_start_utc: datetime | None = None
+    evidence_end_utc: datetime | None = None
+    event_type: str | None = None
+    previous_offset_seconds: int | None = None
+    transition_start_utc: datetime | None = None
+    transition_end_utc: datetime | None = None
 
-
-def make_decision(
-    ntp_offset_seconds: float = 0.0,
-) -> BrokerOffsetDecision:
-    detector = BrokerOffsetDetector(
-        make_verifier(ntp_offset_seconds)
-    )
-    detector.observe(make_sample(1))
-    detector.observe(make_sample(2))
-    result = detector.observe(make_sample(3))
-    assert result.candidate_ready
-    return result
-
-
-def decision_with_run_id(
-    decision: BrokerOffsetDecision,
-    run_id: str,
-) -> BrokerOffsetDecision:
-    return replace(
-        decision,
-        run_id=run_id,
-        evidence_samples=tuple(
-            replace(sample, run_id=run_id)
-            for sample in decision.evidence_samples
-        ),
-    )
-
-
-def decision_with_time_shift(
-    decision: BrokerOffsetDecision,
-    shift_seconds: int,
-) -> BrokerOffsetDecision:
-    shifted_samples = tuple(
-        replace(
-            sample,
-            time_gmt_epoch=sample.time_gmt_epoch + shift_seconds,
-            time_trade_server_epoch=(
-                sample.time_trade_server_epoch + shift_seconds
-            ),
-            time_current_quote_epoch=(
-                sample.time_current_quote_epoch + shift_seconds
-            ),
-            time_local_epoch=sample.time_local_epoch + shift_seconds,
+    @property
+    def identity(self) -> tuple[int, str, str, int]:
+        return (
+            self.account_login,
+            self.broker_server,
+            self.symbol,
+            self.terminal_build,
         )
-        for sample in decision.evidence_samples
-    )
-
-    return replace(
-        decision,
-        evidence_samples=shifted_samples,
-    )
 
 
-def decision_with_identity(
-    decision: BrokerOffsetDecision,
-    identity: tuple[int, str, str, int],
-) -> BrokerOffsetDecision:
-    samples = tuple(
-        replace(
-            sample,
-            account_login=identity[0],
-            broker_server=identity[1],
-            symbol=identity[2],
-            terminal_build=identity[3],
-        )
-        for sample in decision.evidence_samples
-    )
+class BrokerOffsetRegistry:
+    """Append-only JSONL history with process-safe append serialization."""
 
-    return replace(
-        decision,
-        identity=identity,
-        evidence_samples=samples,
-    )
-
-
-def append_candidate_in_process(args):
-    path, decision, recorded_at = args
-
-    registry = BrokerOffsetRegistry(path)
-
-    record = registry.append_candidate(
-        decision,
-        recorded_at_utc=recorded_at,
-    )
-
-    return record.record_sequence, record.run_id
-
-
-def make_v1_record(sequence: int = 1) -> dict:
-    return {
-        "schema_version": 1,
-        "record_sequence": sequence,
-        "recorded_at_utc": BASE_TIME.isoformat(),
-        "offset_seconds": 7200,
-        "uncertainty_seconds": 1.1,
-        "run_id": "legacy-run",
-        "account_login": IDENTITY[0],
-        "broker_server": IDENTITY[1],
-        "symbol": IDENTITY[2],
-        "terminal_build": IDENTITY[3],
-        "evidence_sample_count": 3,
+    _V1_FIELDS = {
+        "schema_version", "record_sequence", "recorded_at_utc",
+        "offset_seconds", "uncertainty_seconds", "run_id",
+        "account_login", "broker_server", "symbol", "terminal_build",
+        "evidence_sample_count",
     }
 
+    _V2_FIELDS = _V1_FIELDS | {
+        "evidence_samples", "ntp_evidence",
+        "evidence_start_utc", "evidence_end_utc",
+    }
 
-def read_json_lines(path):
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
+    _V3_FIELDS = _V2_FIELDS | {
+        "event_type", "previous_offset_seconds",
+        "transition_start_utc", "transition_end_utc",
+    }
 
+    def __init__(self, path: str | Path) -> None:
+        if not isinstance(path, (str, Path)):
+            raise TypeError("path must be a string or Path.")
+        self.path = Path(path)
+        self._lock_path = self.path.with_name(
+            self.path.name + ".lock"
+        )
 
-def write_json_lines(path, records):
-    path.write_text(
-        "".join(
+    @contextmanager
+    def _exclusive_file_lock(self) -> Iterator[None]:
+        """Serialize registry read/validate/append across processes."""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._lock_path.open("a+b") as lock_handle:
+            if os.name == "nt":
+                import msvcrt
+
+                lock_handle.seek(0, os.SEEK_END)
+                if lock_handle.tell() == 0:
+                    lock_handle.write(b"\0")
+                    lock_handle.flush()
+                lock_handle.seek(0)
+                msvcrt.locking(
+                    lock_handle.fileno(),
+                    msvcrt.LK_LOCK,
+                    1,
+                )
+                try:
+                    yield
+                finally:
+                    lock_handle.seek(0)
+                    msvcrt.locking(
+                        lock_handle.fileno(),
+                        msvcrt.LK_UNLCK,
+                        1,
+                    )
+            else:
+                import fcntl
+
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+    def load(self) -> tuple[BrokerOffsetRecord, ...]:
+        """Read and deeply validate the complete registry under a shared lock."""
+        try:
+            with self._exclusive_file_lock():
+                return self._load_unlocked()
+        except BrokerOffsetRegistryError:
+            raise
+        except OSError as exc:
+            raise BrokerOffsetRegistryError(
+                "Unable to read broker offset registry."
+            ) from exc
+
+    def _load_unlocked(self) -> tuple[BrokerOffsetRecord, ...]:
+        if not self.path.exists():
+            return ()
+
+        try:
+            content = self.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise BrokerOffsetRegistryError(
+                "Unable to read broker offset registry."
+            ) from exc
+
+        if not content:
+            return ()
+
+        records: list[BrokerOffsetRecord] = []
+
+        for expected, line in enumerate(content.splitlines(), start=1):
+            if not line.strip():
+                raise BrokerOffsetRegistryError(
+                    f"Empty registry line at record {expected}."
+                )
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise BrokerOffsetRegistryError(
+                    f"Invalid JSON at record {expected}."
+                ) from exc
+
+            record = self._parse_record(data)
+
+            if record.record_sequence != expected:
+                raise BrokerOffsetRegistryError(
+                    "Registry sequence is missing, duplicated, or out of order."
+                )
+
+            if (
+                records
+                and record.recorded_at_utc < records[-1].recorded_at_utc
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Registry timestamps must be chronological."
+                )
+
+            previous = next(
+                (
+                    item for item in reversed(records)
+                    if item.identity == record.identity
+                ),
+                None,
+            )
+            self._validate_event_history(record, previous)
+            records.append(record)
+
+        return tuple(records)
+
+    def append_candidate(
+        self,
+        decision: BrokerOffsetDecision,
+        *,
+        recorded_at_utc: datetime | None = None,
+    ) -> BrokerOffsetRecord:
+        if not isinstance(decision, BrokerOffsetDecision):
+            raise TypeError("decision must be a BrokerOffsetDecision.")
+
+        if (
+            decision.status != BrokerOffsetStatus.CANDIDATE_READY
+            or decision.candidate_ready is not True
+            or decision.required_samples != 3
+            or decision.sample_count != 3
+        ):
+            raise BrokerOffsetRegistryError(
+                "Only a three-sample candidate-ready decision can be stored."
+            )
+
+        if len(decision.evidence_samples) != 3:
+            raise BrokerOffsetRegistryError(
+                "Three complete evidence samples are required."
+            )
+
+        if not decision.ntp_verified or decision.ntp_sample_count < 3:
+            raise BrokerOffsetRegistryError(
+                "Verified NTP evidence with at least three samples is required."
+            )
+
+        offset = decision.offset_seconds
+        uncertainty = decision.uncertainty_seconds
+
+        self._validate_offset(offset, "Candidate offset")
+        uncertainty_value = self._finite(
+            uncertainty, "Candidate uncertainty"
+        )
+        if uncertainty_value < 0:
+            raise BrokerOffsetRegistryError(
+                "Candidate uncertainty cannot be negative."
+            )
+
+        if (
+            not isinstance(decision.run_id, str)
+            or not decision.run_id.strip()
+        ):
+            raise BrokerOffsetRegistryError("Candidate run_id is missing.")
+
+        identity = decision.identity
+        self._validate_identity(identity)
+
+        if (
+            decision.ntp_checked_at_unix is None
+            or decision.ntp_offset_seconds is None
+            or decision.ntp_uncertainty_seconds is None
+            or not decision.ntp_servers
+        ):
+            raise BrokerOffsetRegistryError(
+                "NTP evidence details are incomplete."
+            )
+
+        ntp_checked = self._finite(
+            decision.ntp_checked_at_unix, "ntp_checked_at_unix"
+        )
+        ntp_offset = self._finite(
+            decision.ntp_offset_seconds, "ntp_offset_seconds"
+        )
+        ntp_uncertainty = self._finite(
+            decision.ntp_uncertainty_seconds,
+            "ntp_uncertainty_seconds",
+        )
+        if ntp_uncertainty < 0:
+            raise BrokerOffsetRegistryError(
+                "NTP uncertainty cannot be negative."
+            )
+
+        ntp_servers = self._validate_servers(decision.ntp_servers)
+
+        samples = tuple(
+            self._sample_dict(item)
+            for item in decision.evidence_samples
+        )
+        self._validate_samples(
+            samples,
+            run_id=decision.run_id,
+            identity=identity,
+            offset=offset,
+        )
+
+        first_epoch = (
+            samples[0]["time_gmt_epoch"]
+            + samples[0]["ntp_offset_seconds"]
+        )
+        last_epoch = (
+            samples[-1]["time_gmt_epoch"]
+            + samples[-1]["ntp_offset_seconds"]
+        )
+
+        try:
+            start = datetime.fromtimestamp(first_epoch, timezone.utc)
+            end = datetime.fromtimestamp(last_epoch, timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise BrokerOffsetRegistryError(
+                "Evidence timestamps are outside the supported range."
+            ) from exc
+
+        if end <= start:
+            raise BrokerOffsetRegistryError(
+                "Evidence timestamps must form a positive chronological interval."
+            )
+
+        ntp_evidence = {
+            "verified": True,
+            "sample_count": decision.ntp_sample_count,
+            "servers": list(ntp_servers),
+            "checked_at_unix": ntp_checked,
+            "offset_seconds": ntp_offset,
+            "uncertainty_seconds": ntp_uncertainty,
+        }
+
+        timestamp = self._utc_datetime(
+            recorded_at_utc or datetime.now(timezone.utc),
+            "recorded_at_utc",
+        )
+
+        # Lock covers the entire read/validate/sequence/event/append operation.
+        try:
+            with self._exclusive_file_lock():
+                existing = self._load_unlocked()
+
+                if existing and timestamp < existing[-1].recorded_at_utc:
+                    raise BrokerOffsetRegistryError(
+                        "New registry timestamp cannot precede the latest record."
+                    )
+
+                identity_records = [
+                    record
+                    for record in existing
+                    if record.identity == identity
+                ]
+
+                previous = identity_records[-1] if identity_records else None
+
+                previous_evidence_ends = [
+                    record.evidence_end_utc
+                    for record in identity_records
+                    if record.evidence_end_utc is not None
+                ]
+
+                latest_evidence_end = (
+                    max(previous_evidence_ends)
+                    if previous_evidence_ends
+                    else None
+                )
+
+                if (
+                    latest_evidence_end is not None
+                    and start <= latest_evidence_end
+                ):
+                    raise BrokerOffsetRegistryError(
+                        "New evidence overlaps or precedes previously stored evidence."
+                    )
+
+                if (
+                    previous is not None
+                    and previous.evidence_end_utc is not None
+                    and latest_evidence_end != previous.evidence_end_utc
+                ):
+                    raise BrokerOffsetRegistryError(
+                        "Previous registry evidence windows are not chronological."
+                    )
+
+                if previous is None:
+                    event_type = "BASELINE"
+                    previous_offset = None
+                    transition_start = None
+                    transition_end = None
+                elif previous.offset_seconds == offset:
+                    event_type = "CONFIRMATION"
+                    previous_offset = previous.offset_seconds
+                    transition_start = None
+                    transition_end = None
+                else:
+                    event_type = "OFFSET_CHANGE"
+                    previous_offset = previous.offset_seconds
+
+                    if previous.evidence_end_utc is None:
+                        # Legacy v1 has no bounded evidence interval.
+                        # Do not invent transition boundaries from its record time.
+                        transition_start = None
+                        transition_end = None
+                    else:
+                        transition_start = previous.evidence_end_utc
+                        transition_end = start
+
+                        if transition_end <= transition_start:
+                            raise BrokerOffsetRegistryError(
+                                "New evidence overlaps or precedes the previous "
+                                "evidence interval; the transition is unresolved."
+                            )
+
+                    if timestamp < end:
+                        raise BrokerOffsetRegistryError(
+                            "Record time cannot precede the new evidence end."
+                        )
+
+                record = BrokerOffsetRecord(
+                    schema_version=3,
+                    record_sequence=len(existing) + 1,
+                    recorded_at_utc=timestamp,
+                    offset_seconds=offset,
+                    uncertainty_seconds=uncertainty_value,
+                    run_id=decision.run_id,
+                    account_login=identity[0],
+                    broker_server=identity[1],
+                    symbol=identity[2],
+                    terminal_build=identity[3],
+                    evidence_sample_count=3,
+                    evidence_samples=samples,
+                    ntp_evidence=ntp_evidence,
+                    evidence_start_utc=start,
+                    evidence_end_utc=end,
+                    event_type=event_type,
+                    previous_offset_seconds=previous_offset,
+                    transition_start_utc=transition_start,
+                    transition_end_utc=transition_end,
+                )
+
+                payload = self._serialize_record(record)
+                self._append_payload_locked(payload)
+                return record
+
+        except BrokerOffsetRegistryError:
+            raise
+        except OSError as exc:
+            raise BrokerOffsetRegistryError(
+                "Unable to append broker offset registry record."
+            ) from exc
+
+    def _append_payload_locked(self, payload: bytes) -> None:
+        """Append all bytes or restore the original file length on failure."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+        descriptor = os.open(
+            self.path,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        original_size = os.fstat(descriptor).st_size
+
+        try:
+            # Older valid JSONL files may not end with a newline.
+            # Separate the next record without modifying existing evidence.
+            separator = b""
+
+            if original_size > 0:
+                os.lseek(descriptor, original_size - 1, os.SEEK_SET)
+                last_byte = os.read(descriptor, 1)
+
+                if last_byte != b"\n":
+                    separator = b"\n"
+
+            complete_payload = separator + payload
+            view = memoryview(complete_payload)
+            total = 0
+
+            while total < len(view):
+                written = os.write(descriptor, view[total:])
+                if written <= 0:
+                    raise OSError("Registry append made no progress.")
+                total += written
+
+            os.fsync(descriptor)
+
+        except OSError as write_error:
+            try:
+                os.ftruncate(descriptor, original_size)
+                os.fsync(descriptor)
+
+            except OSError as rollback_error:
+                raise BrokerOffsetRegistryError(
+                    "Registry append failed and rollback also failed. "
+                    "Registry integrity is uncertain; manual recovery is required."
+                ) from rollback_error
+
+            raise write_error
+
+        finally:
+            os.close(descriptor)
+
+    def latest(
+        self,
+        *,
+        identity: tuple[int, str, str, int] | None = None,
+    ) -> BrokerOffsetRecord | None:
+        records = self.load()
+
+        if identity is None:
+            return records[-1] if records else None
+
+        self._validate_identity(identity)
+        return next(
+            (
+                record
+                for record in reversed(records)
+                if record.identity == identity
+            ),
+            None,
+        )
+
+    def for_time(
+        self,
+        identity: tuple[int, str, str, int],
+        timestamp_utc: datetime,
+    ) -> BrokerOffsetRecord | None:
+        """Return the offset record whose evidence covers a UTC instant.
+
+        v1 records and times outside explicit evidence bounds are not proof.
+        """
+        self._validate_identity(identity)
+        instant = self._utc_datetime(timestamp_utc, "timestamp_utc")
+
+        matches = [
+            record
+            for record in self.load()
+            if (
+                record.identity == identity
+                and record.evidence_start_utc is not None
+                and record.evidence_end_utc is not None
+                and record.evidence_start_utc <= instant <= record.evidence_end_utc
+            )
+        ]
+
+        if not matches:
+            return None
+
+        if len({record.offset_seconds for record in matches}) > 1:
+            raise BrokerOffsetRegistryError(
+                "Conflicting offset evidence covers the requested UTC time."
+            )
+
+        return max(
+            matches,
+            key=lambda record: (
+                record.evidence_end_utc,
+                record.record_sequence,
+            ),
+        )
+
+    @staticmethod
+    def _validate_identity(
+        identity: object,
+    ) -> tuple[int, str, str, int]:
+        if not isinstance(identity, tuple) or len(identity) != 4:
+            raise BrokerOffsetRegistryError(
+                "Candidate identity must be a four-item tuple."
+            )
+
+        account, server, symbol, build = identity
+        if (
+            isinstance(account, bool)
+            or not isinstance(account, int)
+            or account <= 0
+            or not isinstance(server, str)
+            or not server.strip()
+            or not isinstance(symbol, str)
+            or not symbol.strip()
+            or isinstance(build, bool)
+            or not isinstance(build, int)
+            or build <= 0
+        ):
+            raise BrokerOffsetRegistryError(
+                "Candidate identity fields are invalid."
+            )
+        return identity
+
+    @staticmethod
+    def _validate_offset(value: object, name: str) -> int:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or abs(value) > MAX_BROKER_OFFSET_SECONDS
+        ):
+            raise BrokerOffsetRegistryError(f"{name} is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_servers(value: object) -> tuple[str, ...]:
+        if not isinstance(value, (tuple, list)) or len(value) < 3:
+            raise BrokerOffsetRegistryError(
+                "At least three NTP servers are required."
+            )
+
+        if not all(
+            isinstance(server, str) and server.strip()
+            for server in value
+        ):
+            raise BrokerOffsetRegistryError(
+                "NTP server names must be non-empty strings."
+            )
+
+        normalized = tuple(server.strip().lower() for server in value)
+        if len(set(normalized)) != len(normalized):
+            raise BrokerOffsetRegistryError(
+                "NTP server names must be distinct."
+            )
+        return tuple(server.strip() for server in value)
+
+    @staticmethod
+    def _utc_datetime(value: datetime, name: str) -> datetime:
+        if (
+            not isinstance(value, datetime)
+            or value.tzinfo is None
+            or value.utcoffset() != timedelta(0)
+        ):
+            raise BrokerOffsetRegistryError(
+                f"{name} must be timezone-aware UTC."
+            )
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _finite(value: object, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise BrokerOffsetRegistryError(
+                f"{name} must be finite."
+            )
+        return float(value)
+
+    @staticmethod
+    def _sample_dict(sample: object) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        try:
+            data = asdict(sample)
+        except (TypeError, ValueError) as exc:
+            raise BrokerOffsetRegistryError(
+                "Invalid evidence sample object."
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise BrokerOffsetRegistryError(
+                "Evidence sample is invalid."
+            )
+        return data
+
+    @classmethod
+    def _validate_samples(
+        cls,
+        samples: tuple[dict[str, Any], ...],
+        *,
+        run_id: str,
+        identity: tuple[int, str, str, int],
+        offset: int,
+    ) -> None:
+        required = {
+            "run_id", "sample_sequence", "monotonic_ms",
+            "time_gmt_epoch", "time_trade_server_epoch",
+            "time_current_quote_epoch", "time_local_epoch",
+            "server_utc_offset_seconds", "account_login",
+            "broker_server", "symbol", "terminal_build",
+            "terminal_connected", "calculated_offset_seconds",
+            "ntp_offset_seconds", "ntp_uncertainty_seconds",
+            "ntp_checked_at_unix",
+        }
+
+        if len(samples) != 3:
+            raise BrokerOffsetRegistryError(
+                "Exactly three evidence samples are required."
+            )
+
+        sequences: list[int] = []
+        evidence_epochs: list[float] = []
+
+        for sample in samples:
+            if set(sample) != required:
+                raise BrokerOffsetRegistryError(
+                    "Evidence sample has missing or unexpected fields."
+                )
+
+            if sample["run_id"] != run_id:
+                raise BrokerOffsetRegistryError(
+                    "Evidence run IDs do not match."
+                )
+
+            sample_identity = (
+                sample["account_login"],
+                sample["broker_server"],
+                sample["symbol"],
+                sample["terminal_build"],
+            )
+            if sample_identity != identity:
+                raise BrokerOffsetRegistryError(
+                    "Evidence identity mismatch."
+                )
+
+            if sample["terminal_connected"] is not True:
+                raise BrokerOffsetRegistryError(
+                    "Disconnected evidence is invalid."
+                )
+
+            for name in (
+                "sample_sequence", "monotonic_ms",
+                "time_gmt_epoch", "time_trade_server_epoch",
+                "time_current_quote_epoch", "time_local_epoch",
+                "server_utc_offset_seconds", "account_login",
+                "terminal_build",
+            ):
+                value = sample[name]
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise BrokerOffsetRegistryError(
+                        f"Evidence {name} must be an integer."
+                    )
+
+            if (
+                sample["sample_sequence"] <= 0
+                or not 0 <= sample["monotonic_ms"] <= 0xFFFFFFFF
+                or min(
+                    sample["time_gmt_epoch"],
+                    sample["time_trade_server_epoch"],
+                    sample["time_local_epoch"],
+                    sample["account_login"],
+                    sample["terminal_build"],
+                ) <= 0
+                or sample["time_current_quote_epoch"] < 0
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Evidence sample contains an invalid integer value."
+                )
+
+            measured = (
+                sample["time_trade_server_epoch"]
+                - sample["time_gmt_epoch"]
+            )
+            if measured != sample["server_utc_offset_seconds"]:
+                raise BrokerOffsetRegistryError(
+                    "Evidence raw clock fields do not match server offset."
+                )
+
+            calculated = cls._finite(
+                sample["calculated_offset_seconds"],
+                "calculated_offset_seconds",
+            )
+            ntp_offset = cls._finite(
+                sample["ntp_offset_seconds"], "ntp_offset_seconds"
+            )
+            ntp_uncertainty = cls._finite(
+                sample["ntp_uncertainty_seconds"],
+                "ntp_uncertainty_seconds",
+            )
+            ntp_checked = cls._finite(
+                sample["ntp_checked_at_unix"],
+                "ntp_checked_at_unix",
+            )
+
+            if ntp_uncertainty < 0 or ntp_checked <= 0:
+                raise BrokerOffsetRegistryError(
+                    "Evidence NTP values are invalid."
+                )
+
+            corrected_calculated = (
+                sample["time_trade_server_epoch"]
+                - sample["time_gmt_epoch"]
+                - ntp_offset
+            )
+
+            if abs(calculated - corrected_calculated) > 0.001:
+                raise BrokerOffsetRegistryError(
+                    "Evidence calculated offset conflicts with raw clocks and NTP."
+                )
+
+            if abs(calculated - offset) > 1.5:
+                raise BrokerOffsetRegistryError(
+                    "Evidence calculated offset does not match candidate."
+                )
+
+            sequence = sample["sample_sequence"]
+            sequences.append(sequence)
+            evidence_epochs.append(
+                sample["time_gmt_epoch"] + ntp_offset
+            )
+
+        if sequences != list(range(sequences[0], sequences[0] + 3)):
+            raise BrokerOffsetRegistryError(
+                "Evidence sequences are not consecutive."
+            )
+
+        if not (
+            evidence_epochs[0] < evidence_epochs[1] < evidence_epochs[2]
+        ):
+            raise BrokerOffsetRegistryError(
+                "Evidence timestamps are not strictly chronological."
+            )
+
+    @classmethod
+    def _validate_ntp_evidence(
+        cls,
+        ntp: object,
+    ) -> dict[str, Any]:
+        required = {
+            "verified", "sample_count", "servers",
+            "checked_at_unix", "offset_seconds",
+            "uncertainty_seconds",
+        }
+        if not isinstance(ntp, dict) or set(ntp) != required:
+            raise BrokerOffsetRegistryError(
+                "Stored NTP evidence fields are invalid."
+            )
+
+        if ntp["verified"] is not True:
+            raise BrokerOffsetRegistryError(
+                "Stored NTP evidence is not verified."
+            )
+
+        count = ntp["sample_count"]
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 3
+        ):
+            raise BrokerOffsetRegistryError(
+                "Stored NTP sample count is invalid."
+            )
+
+        servers = cls._validate_servers(ntp["servers"])
+        checked = cls._finite(
+            ntp["checked_at_unix"], "NTP checked_at_unix"
+        )
+        offset = cls._finite(
+            ntp["offset_seconds"], "NTP offset_seconds"
+        )
+        uncertainty = cls._finite(
+            ntp["uncertainty_seconds"], "NTP uncertainty_seconds"
+        )
+        if checked <= 0 or uncertainty < 0:
+            raise BrokerOffsetRegistryError(
+                "Stored NTP evidence values are invalid."
+            )
+
+        return {
+            "verified": True,
+            "sample_count": count,
+            "servers": list(servers),
+            "checked_at_unix": checked,
+            "offset_seconds": offset,
+            "uncertainty_seconds": uncertainty,
+        }
+
+    @classmethod
+    def _validate_event_history(
+        cls,
+        record: BrokerOffsetRecord,
+        previous: BrokerOffsetRecord | None,
+    ) -> None:
+        # v1/v2 records have no event metadata. They remain readable;
+        # the next v3 event is checked against their stored offset.
+        if record.schema_version != 3:
+            return
+
+        if previous is None:
+            expected = "BASELINE"
+        elif previous.offset_seconds == record.offset_seconds:
+            expected = "CONFIRMATION"
+        else:
+            expected = "OFFSET_CHANGE"
+
+        if record.event_type != expected:
+            raise BrokerOffsetRegistryError(
+                "Stored event type conflicts with the previous identity record."
+            )
+
+        if expected == "BASELINE":
+            if (
+                record.previous_offset_seconds is not None
+                or record.transition_start_utc is not None
+                or record.transition_end_utc is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Baseline event contains transition metadata."
+                )
+            return
+
+        if expected == "CONFIRMATION":
+            if (
+                record.previous_offset_seconds != previous.offset_seconds
+                or record.transition_start_utc is not None
+                or record.transition_end_utc is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Confirmation event metadata is inconsistent."
+                )
+            return
+
+        if record.previous_offset_seconds != previous.offset_seconds:
+            raise BrokerOffsetRegistryError(
+                "Offset-change previous offset is inconsistent."
+            )
+
+        if previous.evidence_end_utc is None:
+            if (
+                record.transition_start_utc is not None
+                or record.transition_end_utc is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "A legacy record without evidence bounds cannot define "
+                    "transition boundaries."
+                )
+            return
+
+        # Retain readability of previously written v3 events.
+        # Historical lookup never relies on these legacy transition fields.
+        legacy_transition = (
+            record.transition_start_utc == previous.recorded_at_utc
+            and record.transition_end_utc == record.evidence_end_utc
+        )
+
+        evidence_transition = (
+            record.transition_start_utc == previous.evidence_end_utc
+            and record.transition_end_utc == record.evidence_start_utc
+        )
+
+        if not (legacy_transition or evidence_transition):
+            raise BrokerOffsetRegistryError(
+                "Offset-change transition metadata does not match evidence bounds."
+            )
+
+        if (
+            record.transition_start_utc is None
+            or record.transition_end_utc is None
+            or record.transition_end_utc <= record.transition_start_utc
+            or record.recorded_at_utc < record.evidence_end_utc
+        ):
+            raise BrokerOffsetRegistryError(
+                "Offset-change transition interval is invalid."
+            )
+
+    @classmethod
+    def _serialize_record(cls, record: BrokerOffsetRecord) -> bytes:
+        data = {
+            "schema_version": 3,
+            "record_sequence": record.record_sequence,
+            "recorded_at_utc": record.recorded_at_utc.isoformat(),
+            "offset_seconds": record.offset_seconds,
+            "uncertainty_seconds": record.uncertainty_seconds,
+            "run_id": record.run_id,
+            "account_login": record.account_login,
+            "broker_server": record.broker_server,
+            "symbol": record.symbol,
+            "terminal_build": record.terminal_build,
+            "evidence_sample_count": record.evidence_sample_count,
+            "evidence_samples": list(record.evidence_samples),
+            "ntp_evidence": record.ntp_evidence,
+            "evidence_start_utc": record.evidence_start_utc.isoformat(),
+            "evidence_end_utc": record.evidence_end_utc.isoformat(),
+            "event_type": record.event_type,
+            "previous_offset_seconds": record.previous_offset_seconds,
+            "transition_start_utc": (
+                record.transition_start_utc.isoformat()
+                if record.transition_start_utc is not None else None
+            ),
+            "transition_end_utc": (
+                record.transition_end_utc.isoformat()
+                if record.transition_end_utc is not None else None
+            ),
+        }
+
+        return (
             json.dumps(
-                item,
+                data,
                 sort_keys=True,
                 separators=(",", ":"),
+                allow_nan=False,
             ) + "\n"
-            for item in records
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_append_and_load_v2_candidate(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    loaded = registry.load()
-
-    assert len(loaded) == 1
-    assert loaded[0] == record
-    assert record.schema_version == 3
-    assert record.event_type == "BASELINE"
-    assert record.previous_offset_seconds is None
-    assert record.transition_start_utc is None
-    assert record.transition_end_utc is None
-    assert record.record_sequence == 1
-    assert record.offset_seconds == 7200
-    assert record.evidence_sample_count == 3
-    assert len(record.evidence_samples) == 3
-    assert record.ntp_evidence["verified"] is True
-    assert record.ntp_evidence["sample_count"] >= 3
-    assert record.evidence_start_utc is not None
-    assert record.evidence_end_utc is not None
-    assert record.evidence_end_utc > record.evidence_start_utc
-
-
-def test_registry_accepts_nonzero_ntp_offset_correction(
-    tmp_path,
-) -> None:
-    registry = BrokerOffsetRegistry(
-        tmp_path / "offsets.jsonl"
-    )
-
-    decision = make_decision(
-        ntp_offset_seconds=0.25
-    )
-
-    record = registry.append_candidate(
-        decision,
-        recorded_at_utc=BASE_TIME,
-    )
-
-    assert record.offset_seconds == 7200
-    assert record.ntp_evidence["offset_seconds"] == 0.25
-
-    assert len(record.evidence_samples) == 3
-
-    for sample in record.evidence_samples:
-        assert sample["ntp_offset_seconds"] == 0.25
-        assert sample["calculated_offset_seconds"] == 7199.75
-
-    loaded = registry.load()
-
-    assert len(loaded) == 1
-    assert loaded[0] == record
-
-
-def test_v1_history_remains_readable_and_unchanged(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    original = json.dumps(
-        make_v1_record(),
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    path.write_text(original + "\n", encoding="utf-8")
-
-    registry = BrokerOffsetRegistry(path)
-    records = registry.load()
-
-    assert len(records) == 1
-    assert records[0].schema_version == 1
-    assert records[0].offset_seconds == 7200
-    assert path.read_text(encoding="utf-8").strip() == original
-
-
-def test_v1_and_v3_records_can_coexist(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    legacy = make_v1_record()
-    legacy["recorded_at_utc"] = (
-        BASE_TIME - timedelta(minutes=5)
-    ).isoformat()
-    path.write_text(
-        json.dumps(legacy, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-
-    registry = BrokerOffsetRegistry(path)
-    new_record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = registry.load()
-    assert len(records) == 2
-    assert records[0].schema_version == 1
-    assert records[1].schema_version == 3
-    assert records[1].event_type == "CONFIRMATION"
-    assert records[1] == new_record
-
-
-def test_overlapping_confirmation_evidence_is_rejected(
-    tmp_path,
-) -> None:
-    registry = BrokerOffsetRegistry(
-        tmp_path / "offsets.jsonl"
-    )
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    overlapping = decision_with_run_id(
-        make_decision(),
-        "different-run-id",
-    )
-
-    with pytest.raises(
-        BrokerOffsetRegistryError,
-        match="overlaps or precedes",
-    ):
-        registry.append_candidate(
-            overlapping,
-            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-        )
-
-    assert registry.load() == (first,)
-
-
-def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-    second_decision = decision_with_run_id(
-        decision_with_time_shift(make_decision(), 180),
-        "run-002",
-    )
-    second = registry.append_candidate(
-        second_decision,
-        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-    )
-
-    records = registry.load()
-    assert len(records) == 2
-    assert records[0] == first
-    assert records[1] == second
-    assert records[0].record_sequence == 1
-    assert records[1].record_sequence == 2
-    assert records[1].run_id == "run-002"
-    assert all(
-        sample["run_id"] == "run-002"
-        for sample in records[1].evidence_samples
-    )
-
-
-def test_latest_returns_latest_record(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-    second = registry.append_candidate(
-        decision_with_run_id(
-            decision_with_time_shift(make_decision(), 180),
-            "run-002",
-        ),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-    )
-
-    assert registry.latest() == second
-    assert registry.latest(identity=IDENTITY) == second
-    assert first.record_sequence == 1
-
-
-def test_missing_registry_returns_empty_history(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "missing.jsonl")
-    assert registry.load() == ()
-    assert registry.latest() is None
-
-
-def test_candidate_without_evidence_is_rejected(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    decision = replace(make_decision(), evidence_samples=())
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(decision, recorded_at_utc=BASE_TIME)
-
-
-def test_candidate_without_ntp_proof_is_rejected(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    decision = replace(make_decision(), ntp_verified=False)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(decision, recorded_at_utc=BASE_TIME)
-
-
-def test_incorrect_sample_identity_is_rejected(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    decision = make_decision()
-    changed = replace(
-        decision.evidence_samples[1],
-        broker_server="Other-Broker",
-    )
-    decision = replace(
-        decision,
-        evidence_samples=(
-            decision.evidence_samples[0],
-            changed,
-            decision.evidence_samples[2],
-        ),
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(decision, recorded_at_utc=BASE_TIME)
-
-
-def test_incorrect_sample_offset_is_rejected(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    decision = make_decision()
-    changed = replace(
-        decision.evidence_samples[1],
-        calculated_offset_seconds=10800.0,
-    )
-    decision = replace(
-        decision,
-        evidence_samples=(
-            decision.evidence_samples[0],
-            changed,
-            decision.evidence_samples[2],
-        ),
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(decision, recorded_at_utc=BASE_TIME)
-
-
-def test_non_utc_timestamp_is_rejected(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    wrong = datetime(
-        2026, 11, 18, 14, 0,
-        tzinfo=timezone(timedelta(hours=2)),
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(make_decision(), recorded_at_utc=wrong)
-
-
-def test_timestamp_cannot_move_backwards(tmp_path) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(
-            decision_with_run_id(
-                decision_with_time_shift(make_decision(), 180),
-                "run-002",
-            ),
-            recorded_at_utc=BASE_TIME - timedelta(seconds=1),
-        )
-
-
-def test_empty_line_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    path.write_text("\n", encoding="utf-8")
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_invalid_json_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    path.write_text("{invalid}\n", encoding="utf-8")
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_unknown_schema_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    data = make_v1_record()
-    data["schema_version"] = 99
-    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_sequence_gap_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    first = make_v1_record()
-    first["record_sequence"] = 2
-    path.write_text(json.dumps(first) + "\n", encoding="utf-8")
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_non_chronological_history_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    first = make_v1_record()
-    second = make_v1_record(2)
-    second["recorded_at_utc"] = (
-        BASE_TIME - timedelta(minutes=1)
-    ).isoformat()
-
-    path.write_text(
-        json.dumps(first) + "\n" + json.dumps(second) + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_v2_missing_evidence_fields_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    data = make_v1_record()
-    data["schema_version"] = 2
-    path.write_text(json.dumps(data) + "\n", encoding="utf-8")
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        BrokerOffsetRegistry(path).load()
-
-
-def test_tampered_sample_identity_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["evidence_samples"][1]["account_login"] = 12345
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_tampered_sample_sequence_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["evidence_samples"][1]["sample_sequence"] = 99
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_tampered_raw_clock_offset_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["evidence_samples"][0]["time_trade_server_epoch"] += 1
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_duplicate_ntp_servers_are_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["ntp_evidence"]["servers"] = [
-        "ntp-a",
-        "NTP-A",
-        "ntp-c",
-    ]
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_negative_ntp_uncertainty_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["ntp_evidence"]["uncertainty_seconds"] = -1.0
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_nan_ntp_offset_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["ntp_evidence"]["offset_seconds"] = float("nan")
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_tampered_evidence_time_range_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["evidence_end_utc"] = (
-        BASE_TIME + timedelta(days=1)
-    ).isoformat()
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_invalid_v3_event_sequence_is_rejected_on_load(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    records = read_json_lines(path)
-    records[0]["event_type"] = "CONFIRMATION"
-    records[0]["previous_offset_seconds"] = 7200
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_confirmation_must_match_previous_identity_offset(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-    registry.append_candidate(
-        decision_with_run_id(
-            decision_with_time_shift(make_decision(), 180),
-            "run-002",
-        ),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-    )
-
-    records = read_json_lines(path)
-    records[1]["previous_offset_seconds"] = 3600
-    write_json_lines(path, records)
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_concurrent_appends_keep_unique_sequences(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-
-    decisions = [
-        decision_with_run_id(
-            decision_with_identity(
-                make_decision(),
-                (IDENTITY[0], IDENTITY[1], "GOLD-A", IDENTITY[3]),
-            ),
-            "concurrent-001",
-        ),
-        decision_with_run_id(
-            decision_with_identity(
-                make_decision(),
-                (IDENTITY[0], IDENTITY[1], "GOLD-B", IDENTITY[3]),
-            ),
-            "concurrent-002",
-        ),
-    ]
-
-    def append_one(decision):
-        registry = BrokerOffsetRegistry(path)
-        return registry.append_candidate(
-            decision,
-            recorded_at_utc=BASE_TIME,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(append_one, decisions))
-
-    records = BrokerOffsetRegistry(path).load()
-
-    assert len(results) == 2
-    assert len(records) == 2
-    assert [item.record_sequence for item in records] == [1, 2]
-    assert len({item.run_id for item in records}) == 2
-    assert all(
-        item.event_type == "BASELINE"
-        for item in records
-    )
-
-
-def test_multiprocess_appends_keep_unique_sequences(
-    tmp_path,
-) -> None:
-    path = str(tmp_path / "multiprocess_offsets.jsonl")
-
-    jobs = [
-        (
-            path,
-            decision_with_run_id(
-                decision_with_identity(
-                    make_decision(),
-                    (
-                        IDENTITY[0],
-                        IDENTITY[1],
-                        f"GOLD-{index:03d}",
-                        IDENTITY[3],
-                    ),
-                ),
-                f"process-run-{index:03d}",
-            ),
-            BASE_TIME,
-        )
-        for index in range(1, 9)
-    ]
-
-    with ProcessPoolExecutor(max_workers=4) as executor:
-        results = list(
-            executor.map(
-                append_candidate_in_process,
-                jobs,
-            )
-        )
-
-    records = BrokerOffsetRegistry(path).load()
-
-    assert len(results) == 8
-    assert len(records) == 8
-
-    assert sorted(
-        sequence for sequence, _ in results
-    ) == list(range(1, 9))
-
-    assert [
-        record.record_sequence for record in records
-    ] == list(range(1, 9))
-
-    assert len({
-        record.run_id for record in records
-    }) == 8
-
-    assert all(
-        record.event_type == "BASELINE"
-        for record in records
-    )
-
-
-def test_truncated_trailing_record_is_rejected(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    with path.open("ab") as handle:
-        handle.write(b'{"schema_version":3')
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-
-def test_append_repairs_missing_final_newline_without_corrupting_records(
-    tmp_path,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    original_content = path.read_bytes()
-    assert original_content.endswith(b"\n")
-
-    # Simulate a valid legacy JSONL file without its final newline.
-    path.write_bytes(original_content[:-1])
-
-    second = registry.append_candidate(
-        decision_with_time_shift(make_decision(), 180),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=6),
-    )
-
-    records = registry.load()
-    stored_content = path.read_bytes()
-
-    assert len(records) == 2
-    assert records[0] == first
-    assert records[1] == second
-
-    assert stored_content.startswith(original_content[:-1] + b"\n")
-    assert stored_content.endswith(b"\n")
-    assert len(stored_content.splitlines()) == 2
-
-
-def test_v2_history_remains_readable_and_unchanged(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-    record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    data = read_json_lines(path)[0]
-    data["schema_version"] = 2
-    for field in (
-        "event_type",
-        "previous_offset_seconds",
-        "transition_start_utc",
-        "transition_end_utc",
-    ):
-        data.pop(field)
-
-    original = json.dumps(
-        data,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    path.write_text(original + "\n", encoding="utf-8")
-
-    loaded = registry.load()
-
-    assert len(loaded) == 1
-    assert loaded[0].schema_version == 2
-    assert loaded[0].offset_seconds == record.offset_seconds
-    assert path.read_text(encoding="utf-8").strip() == original
-
-
-def test_partial_write_failure_restores_original_file(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    original_content = path.read_bytes()
-    original_write = registry_module.os.write
-    calls = 0
-
-    def failing_write(descriptor, data):
-        nonlocal calls
-        calls += 1
-
-        if calls == 1:
-            partial_size = max(1, len(data) // 2)
-            return original_write(
-                descriptor,
-                data[:partial_size],
+        ).encode("utf-8")
+
+    @classmethod
+    def _parse_record(cls, data: object) -> BrokerOffsetRecord:
+        if not isinstance(data, dict):
+            raise BrokerOffsetRegistryError(
+                "Registry record must be an object."
             )
 
-        raise OSError("Simulated partial write failure.")
+        version = data.get("schema_version")
+        expected_fields = {
+            1: cls._V1_FIELDS,
+            2: cls._V2_FIELDS,
+            3: cls._V3_FIELDS,
+        }.get(version)
 
-    monkeypatch.setattr(
-        registry_module.os,
-        "write",
-        failing_write,
-    )
+        if expected_fields is None or set(data) != expected_fields:
+            raise BrokerOffsetRegistryError(
+                "Registry record has unsupported schema or invalid fields."
+            )
 
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(
-            decision_with_run_id(
-                decision_with_time_shift(make_decision(), 180),
-                "partial-write-failure",
-            ),
-            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        for name in (
+            "schema_version", "record_sequence", "offset_seconds",
+            "account_login", "terminal_build", "evidence_sample_count",
+        ):
+            value = data[name]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise BrokerOffsetRegistryError(
+                    f"{name} must be an integer."
+                )
+
+        if data["schema_version"] not in SUPPORTED_SCHEMA_VERSIONS:
+            raise BrokerOffsetRegistryError("Unsupported schema version.")
+        if data["record_sequence"] <= 0:
+            raise BrokerOffsetRegistryError(
+                "record_sequence must be positive."
+            )
+        cls._validate_offset(data["offset_seconds"], "Stored offset")
+
+        if data["evidence_sample_count"] != 3:
+            raise BrokerOffsetRegistryError(
+                "Stored evidence count must equal three."
+            )
+
+        uncertainty = cls._finite(
+            data["uncertainty_seconds"], "uncertainty_seconds"
+        )
+        if uncertainty < 0:
+            raise BrokerOffsetRegistryError(
+                "Stored uncertainty cannot be negative."
+            )
+
+        for name in ("run_id", "broker_server", "symbol"):
+            if (
+                not isinstance(data[name], str)
+                or not data[name].strip()
+            ):
+                raise BrokerOffsetRegistryError(f"{name} is invalid.")
+
+        if data["account_login"] <= 0 or data["terminal_build"] <= 0:
+            raise BrokerOffsetRegistryError(
+                "Stored identity is invalid."
+            )
+
+        recorded = cls._parse_timestamp(
+            data["recorded_at_utc"], "recorded_at_utc"
         )
 
-    assert path.read_bytes() == original_content
-    assert registry.load() == (first,)
+        if version == 1:
+            return BrokerOffsetRecord(
+                schema_version=1,
+                record_sequence=data["record_sequence"],
+                recorded_at_utc=recorded,
+                offset_seconds=data["offset_seconds"],
+                uncertainty_seconds=uncertainty,
+                run_id=data["run_id"],
+                account_login=data["account_login"],
+                broker_server=data["broker_server"],
+                symbol=data["symbol"],
+                terminal_build=data["terminal_build"],
+                evidence_sample_count=3,
+            )
 
+        samples_raw = data["evidence_samples"]
+        if (
+            not isinstance(samples_raw, list)
+            or len(samples_raw) != 3
+            or not all(isinstance(item, dict) for item in samples_raw)
+        ):
+            raise BrokerOffsetRegistryError(
+                "Stored evidence samples are invalid."
+            )
 
-def test_fsync_failure_restores_original_file(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    original_content = path.read_bytes()
-    original_fsync = registry_module.os.fsync
-    calls = 0
-
-    def failing_fsync(descriptor):
-        nonlocal calls
-        calls += 1
-
-        if calls == 1:
-            raise OSError("Simulated fsync failure.")
-
-        return original_fsync(descriptor)
-
-    monkeypatch.setattr(
-        registry_module.os,
-        "fsync",
-        failing_fsync,
-    )
-
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.append_candidate(
-            decision_with_run_id(
-                decision_with_time_shift(make_decision(), 180),
-                "fsync-failure",
-            ),
-            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        identity = (
+            data["account_login"],
+            data["broker_server"],
+            data["symbol"],
+            data["terminal_build"],
+        )
+        cls._validate_samples(
+            tuple(samples_raw),
+            run_id=data["run_id"],
+            identity=identity,
+            offset=data["offset_seconds"],
         )
 
-    assert calls == 2
-    assert path.read_bytes() == original_content
-    assert registry.load() == (first,)
+        ntp = cls._validate_ntp_evidence(data["ntp_evidence"])
 
-
-def test_rollback_failure_reports_uncertain_registry_integrity(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    original_content = path.read_bytes()
-    original_write = registry_module.os.write
-
-    def partial_then_fail(descriptor, data):
-        partial_size = max(1, len(data) // 2)
-
-        monkeypatch.setattr(
-            registry_module.os,
-            "write",
-            lambda *_args: (_ for _ in ()).throw(
-                OSError("Simulated write failure.")
-            ),
+        start = cls._parse_timestamp(
+            data["evidence_start_utc"], "evidence_start_utc"
+        )
+        end = cls._parse_timestamp(
+            data["evidence_end_utc"], "evidence_end_utc"
         )
 
-        return original_write(
-            descriptor,
-            data[:partial_size],
+        expected_start = (
+            samples_raw[0]["time_gmt_epoch"]
+            + samples_raw[0]["ntp_offset_seconds"]
+        )
+        expected_end = (
+            samples_raw[-1]["time_gmt_epoch"]
+            + samples_raw[-1]["ntp_offset_seconds"]
+        )
+        if (
+            end <= start
+            or abs(start.timestamp() - expected_start) > 0.001
+            or abs(end.timestamp() - expected_end) > 0.001
+        ):
+            raise BrokerOffsetRegistryError(
+                "Stored evidence time range conflicts with its samples."
+            )
+
+        common = dict(
+            schema_version=version,
+            record_sequence=data["record_sequence"],
+            recorded_at_utc=recorded,
+            offset_seconds=data["offset_seconds"],
+            uncertainty_seconds=uncertainty,
+            run_id=data["run_id"],
+            account_login=data["account_login"],
+            broker_server=data["broker_server"],
+            symbol=data["symbol"],
+            terminal_build=data["terminal_build"],
+            evidence_sample_count=3,
+            evidence_samples=tuple(samples_raw),
+            ntp_evidence=ntp,
+            evidence_start_utc=start,
+            evidence_end_utc=end,
         )
 
-    def failing_truncate(*_args):
-        raise OSError("Simulated rollback failure.")
+        if version == 2:
+            return BrokerOffsetRecord(**common)
 
-    monkeypatch.setattr(
-        registry_module.os,
-        "write",
-        partial_then_fail,
-    )
-    monkeypatch.setattr(
-        registry_module.os,
-        "ftruncate",
-        failing_truncate,
-    )
+        event_type = data["event_type"]
+        previous_offset = data["previous_offset_seconds"]
 
-    with pytest.raises(
-        BrokerOffsetRegistryError,
-        match="rollback also failed",
-    ):
-        registry.append_candidate(
-            decision_with_run_id(
-                decision_with_time_shift(make_decision(), 180),
-                "rollback-failure",
-            ),
-            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
+        if event_type not in {
+            "BASELINE", "CONFIRMATION", "OFFSET_CHANGE"
+        }:
+            raise BrokerOffsetRegistryError(
+                "Stored event_type is invalid."
+            )
+
+        if previous_offset is not None:
+            cls._validate_offset(
+                previous_offset, "Stored previous offset"
+            )
+
+        transition_start_value = data["transition_start_utc"]
+        transition_end_value = data["transition_end_utc"]
+
+        if event_type == "BASELINE":
+            if (
+                previous_offset is not None
+                or transition_start_value is not None
+                or transition_end_value is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Baseline event cannot contain transition metadata."
+                )
+        elif event_type == "CONFIRMATION":
+            if (
+                previous_offset != data["offset_seconds"]
+                or transition_start_value is not None
+                or transition_end_value is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "Confirmation event fields are inconsistent."
+                )
+        elif (
+            previous_offset is None
+            or previous_offset == data["offset_seconds"]
+            or (
+                (transition_start_value is None)
+                != (transition_end_value is None)
+            )
+        ):
+            raise BrokerOffsetRegistryError(
+                "Offset-change event fields are incomplete."
+            )
+
+        transition_start = (
+            cls._parse_timestamp(
+                transition_start_value, "transition_start_utc"
+            )
+            if transition_start_value is not None else None
+        )
+        transition_end = (
+            cls._parse_timestamp(
+                transition_end_value, "transition_end_utc"
+            )
+            if transition_end_value is not None else None
         )
 
-    assert path.read_bytes() != original_content
+        if event_type == "OFFSET_CHANGE" and (
+            (
+                transition_start is not None
+                and transition_end is not None
+                and (
+                    transition_end <= transition_start
+                    or recorded < end
+                )
+            )
+            or (
+                transition_start is None
+                and transition_end is not None
+            )
+        ):
+            raise BrokerOffsetRegistryError(
+                "Stored transition interval is invalid."
+            )
 
-    with pytest.raises(BrokerOffsetRegistryError):
-        registry.load()
-
-    assert first.record_sequence == 1
-
-
-def test_rollback_fsync_failure_reports_uncertain_integrity(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    first = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    original_content = path.read_bytes()
-    original_write = registry_module.os.write
-
-    def partial_then_fail(descriptor, data):
-        partial_size = max(1, len(data) // 2)
-
-        monkeypatch.setattr(
-            registry_module.os,
-            "write",
-            lambda *_args: (_ for _ in ()).throw(
-                OSError("Simulated write failure.")
-            ),
+        return BrokerOffsetRecord(
+            **common,
+            event_type=event_type,
+            previous_offset_seconds=previous_offset,
+            transition_start_utc=transition_start,
+            transition_end_utc=transition_end,
         )
 
-        return original_write(
-            descriptor,
-            data[:partial_size],
-        )
+    @staticmethod
+    def _parse_timestamp(value: object, name: str) -> datetime:
+        if not isinstance(value, str):
+            raise BrokerOffsetRegistryError(
+                f"{name} must be an ISO timestamp."
+            )
+        try:
+            result = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise BrokerOffsetRegistryError(
+                f"{name} is invalid."
+            ) from exc
 
-    def failing_fsync(_descriptor):
-        raise OSError("Simulated rollback fsync failure.")
-
-    monkeypatch.setattr(
-        registry_module.os,
-        "write",
-        partial_then_fail,
-    )
-    monkeypatch.setattr(
-        registry_module.os,
-        "fsync",
-        failing_fsync,
-    )
-
-    with pytest.raises(
-        BrokerOffsetRegistryError,
-        match="rollback also failed",
-    ):
-        registry.append_candidate(
-            decision_with_run_id(
-                decision_with_time_shift(make_decision(), 180),
-                "rollback-fsync-failure",
-            ),
-            recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-        )
-
-    # The truncate succeeded, but its durability could not be confirmed.
-    assert path.read_bytes() == original_content
-
-    # The current process can read the restored contents.
-    assert registry.load() == (first,)
-
-
-def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
-    path = tmp_path / "offsets.jsonl"
-    registry = BrokerOffsetRegistry(path)
-
-    original_record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME,
-    )
-
-    legacy_data = read_json_lines(path)[0]
-    legacy_data["schema_version"] = 2
-
-    for field in (
-        "event_type",
-        "previous_offset_seconds",
-        "transition_start_utc",
-        "transition_end_utc",
-    ):
-        legacy_data.pop(field)
-
-    original_v2 = json.dumps(
-        legacy_data,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-    path.write_text(original_v2 + "\n", encoding="utf-8")
-
-    new_record = registry.append_candidate(
-        decision_with_time_shift(make_decision(), 180),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=1),
-    )
-
-    records = registry.load()
-
-    assert len(records) == 2
-    assert records[0].schema_version == 2
-    assert records[0].offset_seconds == original_record.offset_seconds
-    assert records[1].schema_version == 3
-    assert records[1].event_type == "CONFIRMATION"
-    assert records[1].previous_offset_seconds == records[0].offset_seconds
-    assert records[1] == new_record
-
-    stored_lines = path.read_text(encoding="utf-8").splitlines()
-    assert stored_lines[0] == original_v2
-
-
-def decision_with_offset_and_time(
-    offset_seconds: int,
-    shift_seconds: int,
-) -> BrokerOffsetDecision:
-    decision = make_decision()
-    old_offset = decision.offset_seconds
-    offset_delta = offset_seconds - old_offset
-
-    changed_samples = tuple(
-        replace(
-            sample,
-            time_gmt_epoch=(
-                sample.time_gmt_epoch + shift_seconds
-            ),
-            time_trade_server_epoch=(
-                sample.time_trade_server_epoch
-                + shift_seconds
-                + offset_delta
-            ),
-            time_current_quote_epoch=(
-                sample.time_current_quote_epoch
-                + shift_seconds
-                + offset_delta
-            ),
-            time_local_epoch=(
-                sample.time_local_epoch + shift_seconds
-            ),
-            server_utc_offset_seconds=offset_seconds,
-            calculated_offset_seconds=float(offset_seconds),
-        )
-        for sample in decision.evidence_samples
-    )
-
-    return replace(
-        decision,
-        offset_seconds=offset_seconds,
-        evidence_samples=changed_samples,
-    )
-
-
-def test_for_time_uses_only_explicit_evidence_interval(
-    tmp_path,
-) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-
-    record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
-    )
-
-    assert registry.for_time(
-        IDENTITY,
-        record.evidence_start_utc,
-    ) == record
-
-    assert registry.for_time(
-        IDENTITY,
-        record.evidence_end_utc,
-    ) == record
-
-    assert registry.for_time(
-        IDENTITY,
-        record.evidence_start_utc - timedelta(microseconds=1),
-    ) is None
-
-    assert registry.for_time(
-        IDENTITY,
-        record.evidence_end_utc + timedelta(microseconds=1),
-    ) is None
-
-
-def test_for_time_never_uses_v1_record_as_historical_proof(
-    tmp_path,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-
-    path.write_text(
-        json.dumps(
-            make_v1_record(),
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n",
-        encoding="utf-8",
-    )
-
-    registry = BrokerOffsetRegistry(path)
-
-    assert registry.for_time(IDENTITY, BASE_TIME) is None
-
-
-def test_offset_change_leaves_unresolved_gap_between_evidence_windows(
-    tmp_path,
-) -> None:
-    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
-
-    old_record = registry.append_candidate(
-        make_decision(),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
-    )
-
-    new_record = registry.append_candidate(
-        decision_with_offset_and_time(3600, 600),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=15),
-    )
-
-    assert new_record.event_type == "OFFSET_CHANGE"
-
-    assert (
-        new_record.transition_start_utc
-        == old_record.evidence_end_utc
-    )
-
-    assert (
-        new_record.transition_end_utc
-        == new_record.evidence_start_utc
-    )
-
-    old_time = (
-        old_record.evidence_start_utc + timedelta(seconds=30)
-    )
-
-    gap_time = (
-        old_record.evidence_end_utc + timedelta(minutes=4)
-    )
-
-    new_time = (
-        new_record.evidence_start_utc + timedelta(seconds=30)
-    )
-
-    assert registry.for_time(
-        IDENTITY,
-        old_time,
-    ).offset_seconds == 7200
-
-    assert registry.for_time(
-        IDENTITY,
-        gap_time,
-    ) is None
-
-    assert registry.for_time(
-        IDENTITY,
-        new_time,
-    ).offset_seconds == 3600
-
-
-def test_offset_change_after_v1_does_not_invent_transition_bounds(
-    tmp_path,
-) -> None:
-    path = tmp_path / "offsets.jsonl"
-
-    path.write_text(
-        json.dumps(
-            make_v1_record(),
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n",
-        encoding="utf-8",
-    )
-
-    registry = BrokerOffsetRegistry(path)
-
-    new_record = registry.append_candidate(
-        decision_with_offset_and_time(3600, 600),
-        recorded_at_utc=BASE_TIME + timedelta(minutes=15),
-    )
-
-    assert new_record.event_type == "OFFSET_CHANGE"
-    assert new_record.transition_start_utc is None
-    assert new_record.transition_end_utc is None
-
-    assert registry.for_time(
-        IDENTITY,
-        new_record.evidence_start_utc + timedelta(seconds=30),
-    ) == new_record
-
-    assert registry.for_time(
-        IDENTITY,
-        BASE_TIME,
-    ) is None
+        if result.tzinfo is None or result.utcoffset() != timedelta(0):
+            raise BrokerOffsetRegistryError(
+                f"{name} must be UTC."
+            )
+        return result.astimezone(timezone.utc)
