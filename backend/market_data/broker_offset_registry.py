@@ -95,16 +95,19 @@ class BrokerOffsetRegistry:
             if os.name == "nt":
                 import msvcrt
 
-                lock_handle.seek(0, os.SEEK_END)
-                if lock_handle.tell() == 0:
-                    lock_handle.write(b"\0")
-                    lock_handle.flush()
+                # Lock before initializing the file. Two Windows workers
+                # opening a new empty lock file must not both write its first byte.
                 lock_handle.seek(0)
                 msvcrt.locking(
                     lock_handle.fileno(),
                     msvcrt.LK_LOCK,
                     1,
                 )
+                try:
+                    lock_handle.seek(0, os.SEEK_END)
+                    if lock_handle.tell() == 0:
+                        lock_handle.write(bytes([0]))
+                        lock_handle.flush()
                 try:
                     yield
                 finally:
