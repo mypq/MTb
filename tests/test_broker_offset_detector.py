@@ -9,7 +9,11 @@ from backend.market_data.broker_offset_detector import (
     BrokerOffsetStatus,
 )
 from backend.market_data.clock_history import MT5ClockHistorySample
-from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
+from backend.market_data.ntp_time import (
+    NtpSample,
+    NtpTimeVerifier,
+    NtpVerification,
+)
 
 
 BASE_EPOCH = 1_794_952_458
@@ -465,3 +469,87 @@ def test_large_positive_and_negative_ntp_offsets_block_candidate(
     assert result.candidate_ready is False
     assert result.offset_seconds is None
     assert result.sample_count == 0
+
+
+def test_candidate_uses_ntp_snapshot_captured_with_final_sample(
+    monkeypatch,
+) -> None:
+    verifier = make_verifier()
+    original = verifier.last_verification()
+
+    assert original is not None
+    assert isinstance(original, NtpVerification)
+
+    final_snapshot = replace(
+        original,
+        checked_at_unix=float(BASE_EPOCH + 120),
+        offset_seconds=0.1,
+        uncertainty_seconds=0.2,
+    )
+
+    newer_snapshot = replace(
+        original,
+        checked_at_unix=float(BASE_EPOCH + 120),
+        offset_seconds=0.3,
+        uncertainty_seconds=0.4,
+    )
+
+    snapshots = iter(
+        (
+            original,
+            original,
+            final_snapshot,
+            newer_snapshot,
+        )
+    )
+
+    calls = 0
+
+    def changing_verification():
+        nonlocal calls
+        calls += 1
+        return next(snapshots)
+
+    monkeypatch.setattr(
+        verifier,
+        "last_verification",
+        changing_verification,
+    )
+
+    detector = BrokerOffsetDetector(verifier)
+
+    detector.observe(make_sample(sequence=1))
+    detector.observe(
+        make_sample(sequence=2, monotonic_ms=61000)
+    )
+
+    result = detector.observe(
+        make_sample(sequence=3, monotonic_ms=121000)
+    )
+
+    assert result.status == BrokerOffsetStatus.CANDIDATE_READY
+    assert result.candidate_ready is True
+
+    assert calls == 3
+
+    assert result.ntp_checked_at_unix == (
+        final_snapshot.checked_at_unix
+    )
+    assert result.ntp_offset_seconds == (
+        final_snapshot.offset_seconds
+    )
+    assert result.ntp_uncertainty_seconds == (
+        final_snapshot.uncertainty_seconds
+    )
+
+    final_sample = result.evidence_samples[-1]
+
+    assert final_sample.ntp_checked_at_unix == (
+        final_snapshot.checked_at_unix
+    )
+    assert final_sample.ntp_offset_seconds == (
+        final_snapshot.offset_seconds
+    )
+    assert final_sample.ntp_uncertainty_seconds == (
+        final_snapshot.uncertainty_seconds
+    )
