@@ -988,3 +988,175 @@ def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
 
     stored_lines = path.read_text(encoding="utf-8").splitlines()
     assert stored_lines[0] == original_v2
+def decision_with_offset_and_time(
+    offset_seconds: int,
+    shift_seconds: int,
+) -> BrokerOffsetDecision:
+    decision = make_decision()
+
+    changed_samples = tuple(
+        replace(
+            sample,
+            time_gmt_epoch=sample.time_gmt_epoch + shift_seconds,
+            time_trade_server_epoch=(
+                sample.time_gmt_epoch + shift_seconds + offset_seconds
+            ),
+            time_current_quote_epoch=(
+                sample.time_current_quote_epoch
+                + shift_seconds
+                + offset_seconds
+                - 7200
+            ),
+            time_local_epoch=sample.time_local_epoch + shift_seconds,
+            server_utc_offset_seconds=offset_seconds,
+            calculated_offset_seconds=float(offset_seconds),
+        )
+        for sample in decision.evidence_samples
+    )
+
+    return replace(
+        decision,
+        offset_seconds=offset_seconds,
+        evidence_samples=changed_samples,
+    )
+
+
+def test_for_time_uses_only_explicit_evidence_interval(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+
+    record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+
+    assert registry.for_time(
+        IDENTITY,
+        record.evidence_start_utc,
+    ) == record
+
+    assert registry.for_time(
+        IDENTITY,
+        record.evidence_end_utc,
+    ) == record
+
+    assert registry.for_time(
+        IDENTITY,
+        record.evidence_start_utc - timedelta(microseconds=1),
+    ) is None
+
+    assert registry.for_time(
+        IDENTITY,
+        record.evidence_end_utc + timedelta(microseconds=1),
+    ) is None
+
+
+def test_for_time_never_uses_v1_record_as_historical_proof(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+
+    path.write_text(
+        json.dumps(
+            make_v1_record(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    registry = BrokerOffsetRegistry(path)
+
+    assert registry.for_time(IDENTITY, BASE_TIME) is None
+
+
+def test_offset_change_leaves_unresolved_gap_between_evidence_windows(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+
+    old_record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+
+    new_record = registry.append_candidate(
+        decision_with_offset_and_time(3600, 600),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=15),
+    )
+
+    assert new_record.event_type == "OFFSET_CHANGE"
+
+    assert (
+        new_record.transition_start_utc
+        == old_record.evidence_end_utc
+    )
+
+    assert (
+        new_record.transition_end_utc
+        == new_record.evidence_start_utc
+    )
+
+    old_time = (
+        old_record.evidence_start_utc + timedelta(seconds=30)
+    )
+
+    gap_time = (
+        old_record.evidence_end_utc + timedelta(minutes=4)
+    )
+
+    new_time = (
+        new_record.evidence_start_utc + timedelta(seconds=30)
+    )
+
+    assert registry.for_time(
+        IDENTITY,
+        old_time,
+    ).offset_seconds == 7200
+
+    assert registry.for_time(
+        IDENTITY,
+        gap_time,
+    ) is None
+
+    assert registry.for_time(
+        IDENTITY,
+        new_time,
+    ).offset_seconds == 3600
+
+
+def test_offset_change_after_v1_does_not_invent_transition_bounds(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+
+    path.write_text(
+        json.dumps(
+            make_v1_record(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    registry = BrokerOffsetRegistry(path)
+
+    new_record = registry.append_candidate(
+        decision_with_offset_and_time(3600, 600),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=15),
+    )
+
+    assert new_record.event_type == "OFFSET_CHANGE"
+    assert new_record.transition_start_utc is None
+    assert new_record.transition_end_utc is None
+
+    assert registry.for_time(
+        IDENTITY,
+        new_record.evidence_start_utc + timedelta(seconds=30),
+    ) == new_record
+
+    assert registry.for_time(
+        IDENTITY,
+        BASE_TIME,
+    ) is None
