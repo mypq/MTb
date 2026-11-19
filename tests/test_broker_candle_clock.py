@@ -478,3 +478,27 @@ def test_trusted_evidence_rejects_lost_ntp_trust():
     assert snapshot.offset_seconds is None
     assert evidence is None
     assert "expired" in snapshot.reason
+def test_trusted_evidence_rejects_replaced_ntp_verification():
+    calibrator, verifier = make_calibrator(required_samples=3)
+
+    verified = calibrate(calibrator)
+    assert verified.status == "VERIFIED"
+
+    # Simulate a fresh NTP verification with changed evidence.
+    verifier._query = lambda server: NtpSample(
+        server=server,
+        offset_seconds=0.1,
+        round_trip_seconds=0.02,
+        root_dispersion_seconds=0.01,
+    )
+
+    replacement = verifier.verify()
+    assert replacement.verified is True
+    assert verifier.is_trusted() is True
+
+    snapshot, evidence = calibrator.trusted_evidence()
+
+    assert snapshot.status == "DEGRADED"
+    assert snapshot.offset_seconds is None
+    assert evidence is None
+    assert "changed" in snapshot.reason
