@@ -150,6 +150,10 @@ class BrokerOffsetRegistry:
             return ()
 
         records: list[BrokerOffsetRecord] = []
+        latest_evidence_end_by_identity: dict[
+            tuple[int, str, str, int],
+            datetime,
+        ] = {}
 
         for expected, line in enumerate(content.splitlines(), start=1):
             if not line.strip():
@@ -186,7 +190,23 @@ class BrokerOffsetRegistry:
                 ),
                 None,
             )
-            self._validate_event_history(record, previous)
+
+            latest_evidence_end = (
+                latest_evidence_end_by_identity.get(record.identity)
+            )
+
+            self._validate_event_history(
+                record,
+                previous,
+                latest_evidence_end,
+            )
+
+            if record.evidence_end_utc is not None:
+                latest_evidence_end_by_identity[record.identity] = max(
+                    latest_evidence_end or record.evidence_end_utc,
+                    record.evidence_end_utc,
+                )
+
             records.append(record)
 
         return tuple(records)
@@ -846,14 +866,14 @@ class BrokerOffsetRegistry:
         cls,
         record: BrokerOffsetRecord,
         previous: BrokerOffsetRecord | None,
+        latest_evidence_end_utc: datetime | None = None,
     ) -> None:
-        # Evidence windows for the same identity must never overlap.
-        # Apply this to v2/v3 records, including legacy-compatible events.
+        # Evidence windows must never overlap any earlier evidence
+        # for the same identity, even when legacy v1 records intervene.
         if (
-            previous is not None
-            and previous.evidence_end_utc is not None
+            latest_evidence_end_utc is not None
             and record.evidence_start_utc is not None
-            and record.evidence_start_utc <= previous.evidence_end_utc
+            and record.evidence_start_utc <= latest_evidence_end_utc
         ):
             raise BrokerOffsetRegistryError(
                 "Stored evidence overlaps or precedes the previous identity evidence."
