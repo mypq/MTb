@@ -272,3 +272,45 @@ def test_start_after_stop_restarts_monitor():
         assert adapter.connection_status.call_count > previous_calls
     finally:
         assert monitor.stop(timeout_seconds=2.0) is True
+def test_connection_loss_invalidates_candle_clock_before_reconnect():
+    adapter = Mock()
+    adapter.connection_status.return_value = make_status(
+        MT5ConnectionState.DISCONNECTED
+    )
+    adapter.connect.return_value = make_status(
+        MT5ConnectionState.CONNECTED
+    )
+
+    monitor = MT5ConnectionMonitor(adapter)
+
+    status = monitor.check_once()
+
+    assert status.state == MT5ConnectionState.CONNECTED
+    assert adapter.mark_candle_clock_connection_lost.call_count == 1
+
+    calls = adapter.method_calls
+    invalidate_index = next(
+        i for i, call in enumerate(calls)
+        if call[0] == "mark_candle_clock_connection_lost"
+    )
+    reconnect_index = next(
+        i for i, call in enumerate(calls)
+        if call[0] == "connect"
+    )
+
+    assert invalidate_index < reconnect_index
+
+
+def test_disabled_connection_does_not_invalidate_candle_clock():
+    adapter = Mock()
+    adapter.connection_status.return_value = make_status(
+        MT5ConnectionState.DISABLED
+    )
+
+    monitor = MT5ConnectionMonitor(adapter)
+
+    status = monitor.check_once()
+
+    assert status.state == MT5ConnectionState.DISABLED
+    adapter.mark_candle_clock_connection_lost.assert_not_called()
+    adapter.connect.assert_not_called()
