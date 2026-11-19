@@ -515,3 +515,31 @@ def test_trusted_evidence_rejects_replaced_ntp_verification():
     assert snapshot.offset_seconds is None
     assert evidence is None
     assert "changed" in snapshot.reason
+
+def test_new_observation_does_not_reuse_stale_calibration_samples():
+    calibrator, _ = make_calibrator(
+        required_samples=3,
+        minimum_span_seconds=1.0,
+        maximum_sample_age_seconds=30.0,
+    )
+
+    verified = calibrate(
+        calibrator,
+        monotonic_values=(10.0, 10.5, 11.0),
+    )
+
+    assert verified.status == "VERIFIED"
+    assert verified.sample_count == 3
+
+    # Simulate a long MT5 disconnection without calling snapshot().
+    # The next observation arrives after the 30-second age limit.
+    with patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        return_value=50.0,
+    ):
+        snapshot = calibrator.observe(**make_observation())
+
+    # Old samples must not be reused to verify the new observation.
+    assert snapshot.status != "VERIFIED"
+    assert snapshot.offset_seconds is None
+    assert snapshot.sample_count < 3
