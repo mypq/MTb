@@ -1,4 +1,3 @@
-
 """Detect broker UTC offsets using consecutive MT5 samples and NTP evidence."""
 
 from __future__ import annotations
@@ -179,8 +178,19 @@ class BrokerOffsetDetector:
                 "MT5 terminal is disconnected.",
             )
 
-        corrected_gmt = sample.time_gmt_epoch + ntp_offset
-        candidate = sample.time_trade_server_epoch - corrected_gmt
+        raw_offset = (
+            sample.time_trade_server_epoch
+            - sample.time_gmt_epoch
+        )
+
+        if raw_offset != sample.server_utc_offset_seconds:
+            self._window.clear()
+            return self._decision(
+                BrokerOffsetStatus.DEGRADED,
+                "Raw MT5 clock difference conflicts with recorded server offset.",
+            )
+
+        candidate = float(raw_offset)
 
         if not isfinite(candidate) or abs(candidate) > 14 * 60 * 60:
             self._window.clear()
