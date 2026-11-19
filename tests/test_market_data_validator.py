@@ -726,6 +726,8 @@ def test_weekend_closure_gap_does_not_block_analysis():
         issue.code == MarketDataIssueCode.TIME_GAP
         for issue in report.issues
     )
+
+
 def test_stale_clock_evidence_blocks_analysis():
     candle = make_candle(CHECKED_AT - timedelta(minutes=5))
     batch = make_batch((candle,))
@@ -752,6 +754,8 @@ def test_stale_clock_evidence_blocks_analysis():
         issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
         for issue in report.issues
     )
+
+
 def test_future_clock_evidence_blocks_analysis():
     candle = make_candle(CHECKED_AT - timedelta(minutes=5))
     batch = make_batch((candle,))
@@ -778,32 +782,7 @@ def test_future_clock_evidence_blocks_analysis():
         issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
         for issue in report.issues
     )
-def test_excessive_ntp_uncertainty_blocks_analysis():
-    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
-    batch = make_batch((candle,))
 
-    invalid_evidence = batch.clock_evidence.model_copy(
-        update={
-            "ntp_uncertainty_seconds": 1.1,
-        }
-    )
-    batch = batch.model_copy(
-        update={"clock_evidence": invalid_evidence}
-    )
-
-    report = MarketDataValidator().validate(
-        batch,
-        300,
-        CHECKED_AT,
-    )
-
-    assert report.freshness_eligible is True
-    assert report.freshness_verified is False
-    assert report.analysis_eligible is False
-    assert any(
-        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
-        for issue in report.issues
-    )
 
 def test_excessive_ntp_uncertainty_blocks_analysis():
     candle = make_candle(CHECKED_AT - timedelta(minutes=5))
