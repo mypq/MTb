@@ -569,15 +569,20 @@ def test_main_candle_clock_worker_recalibrates_after_mt5_reconnect():
                 clock.value = 100.0 + (self.calls - 1) * 2.0
 
             elif self.calls == 4:
-                # Prove the initial calibration was genuinely VERIFIED.
                 initial_snapshot = calibrator.snapshot()
 
                 assert initial_snapshot.status == "VERIFIED"
                 assert initial_snapshot.sample_count == 3
 
-                # Simulate a stale calibration after MT5 disconnects.
+                # Simulate MT5 disconnection and stale calibration.
                 clock.value = 140.0
                 mt5.terminal_info.return_value.connected = False
+
+                stale_snapshot = calibrator.snapshot()
+
+                assert stale_snapshot.status == "DEGRADED"
+                assert stale_snapshot.sample_count == 0
+                assert stale_snapshot.offset_seconds is None
 
                 return adapter.get_active_candle_clock_sample(symbol)
 
