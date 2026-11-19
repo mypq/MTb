@@ -224,7 +224,7 @@ def configure_test_candle_clock(
     )
 
     registry = Mock()
-    registry.for_broker_time.return_value = confirmation
+    registry.for_broker_times.return_value = (confirmation,)
 
     adapter.set_broker_offset_registry(registry)
 
@@ -476,7 +476,7 @@ def test_closed_candles_require_historical_confirmation_coverage():
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=raw_timestamp),
     ]
-    adapter._broker_offset_registry.for_broker_time.return_value = None
+    adapter._broker_offset_registry.for_broker_times.return_value = (None,)
 
     with pytest.raises(
         MT5AdapterError,
@@ -484,9 +484,9 @@ def test_closed_candles_require_historical_confirmation_coverage():
     ):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
 
-    adapter._broker_offset_registry.for_broker_time.assert_called_once_with(
+    adapter._broker_offset_registry.for_broker_times.assert_called_once_with(
         (123456, "Demo-Server", "XAUUSD", 6316),
-        raw_timestamp,
+        (raw_timestamp,),
     )
 
 
@@ -511,8 +511,8 @@ def test_historical_offset_is_used_instead_of_current_live_offset():
             "sample_count": 3,
         },
     )
-    adapter._broker_offset_registry.for_broker_time.return_value = (
-        historical_confirmation
+    adapter._broker_offset_registry.for_broker_times.return_value = (
+        historical_confirmation,
     )
     mt5.copy_rates_from_pos.return_value = [
         make_rate(timestamp=raw_timestamp),
