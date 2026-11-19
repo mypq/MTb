@@ -831,10 +831,11 @@ class MT5Adapter:
                 ):
                     if (
                         historical_record is None
-                        or historical_record.event_type != "CONFIRMATION"
+                        or historical_record.event_type
+                        not in {"BASELINE", "CONFIRMATION", "OFFSET_CHANGE"}
                     ):
                         raise ValueError(
-                            "No confirmed historical broker-offset evidence "
+                            "No valid historical broker-offset evidence "
                             "covers raw candle timestamp "
                             f"{timestamp_value}; UTC conversion is blocked."
                         )
