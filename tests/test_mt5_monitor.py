@@ -190,6 +190,8 @@ def test_stop_is_idempotent():
     assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.stop(timeout_seconds=2.0) is True
     assert monitor.is_running is False
+
+
 def test_monitor_continues_after_monitoring_cycle_exception():
     adapter = Mock()
     adapter.connection_status.side_effect = [
@@ -272,11 +274,20 @@ def test_start_after_stop_restarts_monitor():
         assert adapter.connection_status.call_count > previous_calls
     finally:
         assert monitor.stop(timeout_seconds=2.0) is True
-def test_connection_loss_invalidates_candle_clock_before_reconnect():
+
+
+@pytest.mark.parametrize(
+    "initial_state",
+    [
+        MT5ConnectionState.DISCONNECTED,
+        MT5ConnectionState.ERROR,
+    ],
+)
+def test_connection_loss_invalidates_candle_clock_before_reconnect(
+    initial_state,
+):
     adapter = Mock()
-    adapter.connection_status.return_value = make_status(
-        MT5ConnectionState.DISCONNECTED
-    )
+    adapter.connection_status.return_value = make_status(initial_state)
     adapter.connect.return_value = make_status(
         MT5ConnectionState.CONNECTED
     )
