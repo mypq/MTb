@@ -15,6 +15,7 @@ from backend.market_data.models import (
     CandleBatch,
     CandleQuality,
     MarketCandle,
+    MarketDataClockEvidence,
     VolumeSource,
 )
 from backend.market_data.repository import (
@@ -96,12 +97,33 @@ def make_snapshot(
             )
         )
 
+    clock_evidence = MarketDataClockEvidence(
+        verified=True,
+        account_login=123456,
+        broker_server="Test-Broker",
+        symbol="XAUUSD",
+        terminal_build=6316,
+        checked_at=CHECKED_AT,
+        ntp_offset_seconds=0.0,
+        ntp_uncertainty_seconds=0.05,
+        ntp_sample_count=3,
+        ntp_servers=(
+            "time.google.com",
+            "time.cloudflare.com",
+            "pool.ntp.org",
+        ),
+        candle_offset_seconds=7200.0,
+        candle_uncertainty_seconds=0.5,
+        calibration_sample_count=3,
+    )
+
     batch = CandleBatch(
         symbol="XAUUSD",
         timeframe="M5",
         candles=tuple(candles),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=clock_evidence,
     )
 
     service = MarketDataService(FakeMarketDataSource(batch))
