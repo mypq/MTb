@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 import time
@@ -1643,3 +1644,75 @@ def test_closed_candles_are_blocked_with_fewer_than_three_clock_samples():
         adapter.get_closed_candles("XAUUSD", "M5", 1)
 
     mt5.copy_rates_from_pos.assert_not_called()
+
+
+def test_shutdown_waits_until_active_mt5_operation_finishes():
+    adapter, mt5 = make_connected_adapter()
+
+    operation_started = Event()
+    release_operation = Event()
+    shutdown_finished = Event()
+
+    def blocking_terminal_info():
+        operation_started.set()
+
+        if not release_operation.wait(timeout=5):
+            raise RuntimeError(
+                "MT5 operation release timed out."
+            )
+
+        return SimpleNamespace(
+            connected=True,
+            trade_allowed=True,
+            build=6316,
+        )
+
+    mt5.terminal_info.side_effect = blocking_terminal_info
+
+    operation_thread = Thread(
+        target=adapter.connection_status,
+        daemon=True,
+    )
+
+    shutdown_thread = None
+
+    try:
+        operation_thread.start()
+
+        assert operation_started.wait(timeout=3)
+
+        def shutdown_adapter():
+            adapter.shutdown()
+            shutdown_finished.set()
+
+        shutdown_thread = Thread(
+            target=shutdown_adapter,
+            daemon=True,
+        )
+        shutdown_thread.start()
+
+        assert not shutdown_finished.wait(timeout=0.1)
+
+        mt5.shutdown.assert_not_called()
+
+        release_operation.set()
+
+        operation_thread.join(timeout=3)
+        shutdown_thread.join(timeout=3)
+
+        assert not operation_thread.is_alive()
+        assert not shutdown_thread.is_alive()
+
+        assert shutdown_finished.is_set()
+        mt5.shutdown.assert_called_once()
+
+    finally:
+        release_operation.set()
+
+        operation_thread.join(timeout=3)
+
+        if shutdown_thread is not None:
+            shutdown_thread.join(timeout=3)
+
+        if not shutdown_finished.is_set():
+            adapter.shutdown()
