@@ -299,3 +299,127 @@ def test_market_observation_with_no_previous_change_time():
     assert status == "UNCHANGED"
     assert changed_at == 110.0
     assert unchanged_seconds == 0.0
+
+def test_successful_verification_is_preserved_without_refresh():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    first = verifier.verify()
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        first,
+    )
+
+    assert trusted is True
+
+    clock.advance(10)
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        None,
+    )
+
+    assert trusted is True
+    assert result is first
+    assert error == ""
+
+
+def test_successful_verification_is_preserved_between_refreshes():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    first = verifier.verify()
+
+    clock.advance(60)
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        None,
+    )
+
+    assert trusted is True
+    assert result is first
+    assert result.offset_seconds == first.offset_seconds
+    assert error == ""
+
+
+def test_no_refresh_without_previous_success_is_not_trusted():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        None,
+    )
+
+    assert result is None
+    assert trusted is False
+    assert error != ""
+
+
+def test_expired_verification_is_not_reused_without_refresh():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    first = verifier.verify()
+    assert first.verified is True
+
+    clock.advance(6 * 60 * 60 + 1)
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        None,
+    )
+
+    assert result is None
+    assert trusted is False
+    assert error != ""
+
+
+def test_failed_refresh_still_invalidates_previous_success():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    first = verifier.verify()
+    assert first.verified is True
+
+    clock.advance(60)
+
+    def failed_query(server):
+        raise OSError("NTP server unavailable")
+
+    verifier._query = failed_query
+    failed_attempt = verifier.verify()
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        failed_attempt,
+    )
+
+    assert failed_attempt.verified is False
+    assert result is None
+    assert trusted is False
+    assert error != ""
+    assert verifier.last_verification() is None
+
+
+def test_refresh_exception_still_invalidates_previous_success():
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    first = verifier.verify()
+    assert first.verified is True
+
+    clock.advance(60)
+
+    result, trusted, error = resolve_ntp_state(
+        verifier,
+        None,
+        "TimeoutError: NTP request timed out",
+    )
+
+    assert result is None
+    assert trusted is False
+    assert error == "TimeoutError: NTP request timed out"
+    assert verifier.last_verification() is None
