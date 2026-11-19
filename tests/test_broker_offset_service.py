@@ -280,7 +280,8 @@ def test_three_new_samples_record_offset_change(tmp_path, monkeypatch):
     assert change.event_type == "OFFSET_CHANGE"
     assert change.previous_offset_seconds == 7200
     assert change.offset_seconds == 10800
-    assert change.transition_start_utc == baseline.recorded_at_utc
+    assert change.transition_start_utc == baseline.evidence_end_utc
+    assert change.transition_end_utc == change.evidence_start_utc
     assert change.transition_end_utc is not None
     assert change.transition_end_utc > change.transition_start_utc
     assert change.recorded_at_utc >= change.transition_end_utc
@@ -330,7 +331,8 @@ def test_return_to_previous_offset_is_recorded_as_new_change(
     assert return_change.offset_seconds == 7200
 
     assert return_change.record_sequence == 3
-    assert return_change.transition_start_utc == first_change.recorded_at_utc
+    assert return_change.transition_start_utc == first_change.evidence_end_utc
+    assert return_change.transition_end_utc == return_change.evidence_start_utc
     assert return_change.transition_end_utc is not None
     assert return_change.transition_end_utc > return_change.transition_start_utc
     assert return_change.recorded_at_utc >= return_change.transition_end_utc
@@ -755,12 +757,12 @@ def test_offset_change_is_tracked_independently_per_identity(
         row = make_row(sequence, 3600)
         row["run_id"] = "third-offset-run"
         row["symbol"] = "EURUSD"
-        row["monotonic_ms"] = str(9000 + sequence * 60000)
+        row["monotonic_ms"] = str(9000 + sequence * 15000)
         row["time_gmt_epoch"] = str(
-            BASE_EPOCH + 360 + sequence * 30
+            BASE_EPOCH + 480 + sequence * 15
         )
         row["time_trade_server_epoch"] = str(
-            BASE_EPOCH + 360 + sequence * 30 + 3600
+            BASE_EPOCH + 480 + sequence * 15 + 3600
         )
         row["time_current_quote_epoch"] = row[
             "time_trade_server_epoch"
