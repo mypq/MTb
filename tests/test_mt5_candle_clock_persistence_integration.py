@@ -364,3 +364,137 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 
     finally:
         adapter.shutdown()
+
+def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
+    monkeypatch,
+):
+    from unittest.mock import patch
+
+    verifier = NtpTimeVerifier(
+        servers=("ntp-a", "ntp-b", "ntp-c"),
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+
+    ntp_result = verifier.verify()
+    assert ntp_result.verified is True
+
+    calibrator = BrokerCandleClockCalibrator(
+        verifier,
+        required_samples=3,
+        minimum_span_seconds=3.0,
+        maximum_spread_seconds=0.5,
+        maximum_sample_age_seconds=30.0,
+    )
+
+    raw_closed_timestamps = []
+    mt5 = make_mt5_module(raw_closed_timestamps)
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=mt5,
+    )
+
+    try:
+        # 1. Initial MT5 connection.
+        connection = adapter.connect()
+        assert connection.state == MT5ConnectionState.CONNECTED
+
+        adapter.set_candle_clock_calibrator(calibrator)
+
+        confirmation = SimpleNamespace(
+            event_type="CONFIRMATION",
+            offset_seconds=BROKER_OFFSET_SECONDS,
+            evidence_sample_count=3,
+            evidence_samples=({}, {}, {}),
+            ntp_evidence={
+                "verified": True,
+                "sample_count": 3,
+                "servers": ["ntp-a", "ntp-b", "ntp-c"],
+            },
+        )
+
+        registry = Mock()
+        registry.latest.return_value = confirmation
+        adapter.set_broker_offset_registry(registry)
+
+        # 2. Initial calibration reaches VERIFIED.
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            side_effect=(100.0, 102.0, 104.0),
+        ):
+            for _ in range(3):
+                sample = adapter.get_active_candle_clock_sample(
+                    "XAUUSD"
+                )
+                snapshot = calibrator.observe(**sample)
+
+        assert snapshot.status == "VERIFIED"
+        assert snapshot.sample_count == 3
+        assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
+
+        # 3. Simulate MT5 disconnection.
+        mt5.terminal_info.return_value.connected = False
+
+        disconnected = adapter.connection_status()
+        assert disconnected.state == MT5ConnectionState.DISCONNECTED
+
+        # 4. More than 30 seconds pass.
+        # Old calibration must be invalidated before candle retrieval.
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            return_value=140.0,
+        ):
+            with pytest.raises(
+                MT5AdapterError,
+                match="Candle clock is not verified",
+            ):
+                adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+            stale_snapshot = calibrator.snapshot()
+
+        assert stale_snapshot.status == "DEGRADED"
+        assert stale_snapshot.sample_count == 0
+        assert stale_snapshot.offset_seconds is None
+
+        # No closed-candle request may have been made during disconnection.
+        assert not any(
+            call.args[2] == 1
+            for call in mt5.copy_rates_from_pos.call_args_list
+        )
+
+        # 5. Restore MT5 connection.
+        mt5.terminal_info.return_value.connected = True
+
+        reconnected = adapter.connect()
+        assert reconnected.state == MT5ConnectionState.CONNECTED
+
+        # 6. Collect entirely fresh samples after reconnect.
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            side_effect=(141.0, 143.0, 145.0),
+        ):
+            for _ in range(3):
+                sample = adapter.get_active_candle_clock_sample(
+                    "XAUUSD"
+                )
+                snapshot = calibrator.observe(**sample)
+
+        assert snapshot.status == "VERIFIED"
+        assert snapshot.sample_count == 3
+        assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
+
+        # 7. Candle fetching is allowed again only after fresh verification.
+        batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+        assert len(batch.candles) == 2
+        assert all(candle.is_closed for candle in batch.candles)
+        assert batch.clock_evidence is not None
+        assert batch.clock_evidence.verified is True
+
+    finally:
+        adapter.shutdown()
