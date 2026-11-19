@@ -108,7 +108,6 @@ class BrokerOffsetRegistry:
                     if lock_handle.tell() == 0:
                         lock_handle.write(bytes([0]))
                         lock_handle.flush()
-                try:
                     yield
                 finally:
                     lock_handle.seek(0)
