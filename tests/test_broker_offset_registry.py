@@ -322,6 +322,46 @@ def test_overlapping_confirmation_evidence_is_rejected(
     assert registry.load() == (first,)
 
 
+def test_load_rejects_overlapping_confirmation_evidence(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+
+    # Build a structurally valid second record whose evidence
+    # overlaps the first record by 60 seconds.
+    second_registry = BrokerOffsetRegistry(
+        tmp_path / "second-registry.jsonl"
+    )
+    second_baseline = second_registry.append_candidate(
+        decision_with_time_shift(make_decision(), 60),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=5),
+    )
+
+    overlapping_confirmation = replace(
+        second_baseline,
+        record_sequence=2,
+        event_type="CONFIRMATION",
+        previous_offset_seconds=first.offset_seconds,
+    )
+
+    path.write_bytes(
+        registry._serialize_record(first)
+        + registry._serialize_record(overlapping_confirmation)
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="Stored evidence overlaps or precedes",
+    ):
+        registry.load()
+
+
 def test_new_candidate_appends_without_replacing_old_record(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
     registry = BrokerOffsetRegistry(path)
