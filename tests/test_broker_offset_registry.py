@@ -816,6 +816,7 @@ def test_fsync_failure_restores_original_file(
     assert path.read_bytes() == original_content
     assert registry.load() == (first,)
 
+
 def test_rollback_failure_reports_uncertain_registry_integrity(
     tmp_path,
     monkeypatch,
@@ -880,6 +881,7 @@ def test_rollback_failure_reports_uncertain_registry_integrity(
 
     assert first.record_sequence == 1
 
+
 def test_rollback_fsync_failure_reports_uncertain_integrity(
     tmp_path,
     monkeypatch,
@@ -943,6 +945,7 @@ def test_rollback_fsync_failure_reports_uncertain_integrity(
     # The current process can read the restored contents.
     assert registry.load() == (first,)
 
+
 def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
     registry = BrokerOffsetRegistry(path)
@@ -988,26 +991,35 @@ def test_v2_history_accepts_new_v3_confirmation(tmp_path) -> None:
 
     stored_lines = path.read_text(encoding="utf-8").splitlines()
     assert stored_lines[0] == original_v2
+
+
 def decision_with_offset_and_time(
     offset_seconds: int,
     shift_seconds: int,
 ) -> BrokerOffsetDecision:
     decision = make_decision()
+    old_offset = decision.offset_seconds
+    offset_delta = offset_seconds - old_offset
 
     changed_samples = tuple(
         replace(
             sample,
-            time_gmt_epoch=sample.time_gmt_epoch + shift_seconds,
+            time_gmt_epoch=(
+                sample.time_gmt_epoch + shift_seconds
+            ),
             time_trade_server_epoch=(
-                sample.time_gmt_epoch + shift_seconds + offset_seconds
+                sample.time_trade_server_epoch
+                + shift_seconds
+                + offset_delta
             ),
             time_current_quote_epoch=(
                 sample.time_current_quote_epoch
                 + shift_seconds
-                + offset_seconds
-                - 7200
+                + offset_delta
             ),
-            time_local_epoch=sample.time_local_epoch + shift_seconds,
+            time_local_epoch=(
+                sample.time_local_epoch + shift_seconds
+            ),
             server_utc_offset_seconds=offset_seconds,
             calculated_offset_seconds=float(offset_seconds),
         )
