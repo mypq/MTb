@@ -6,6 +6,7 @@ from backend.market_data.models import (
     CandleBatch,
     CandleQuality,
     MarketCandle,
+    MarketDataClockEvidence,
     VolumeSource,
 )
 from backend.market_data.service import (
@@ -16,6 +17,28 @@ from backend.market_data.service import (
 
 UTC = timezone.utc
 CHECKED_AT = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+def make_clock_evidence(symbol: str = "XAUUSD") -> MarketDataClockEvidence:
+    return MarketDataClockEvidence(
+        verified=True,
+        account_login=123456,
+        broker_server="Test-Broker",
+        symbol=symbol,
+        terminal_build=6316,
+        checked_at=CHECKED_AT - timedelta(seconds=1),
+        ntp_offset_seconds=0.0,
+        ntp_uncertainty_seconds=0.05,
+        ntp_sample_count=3,
+        ntp_servers=(
+            "ntp-a.example",
+            "ntp-b.example",
+            "ntp-c.example",
+        ),
+        candle_offset_seconds=7200.0,
+        candle_uncertainty_seconds=0.5,
+        calibration_sample_count=3,
+    )
 
 
 def make_candle(
@@ -63,6 +86,7 @@ def make_batch(
         candles=candles,
         received_at=received_at,
         source="MT5",
+        clock_evidence=make_clock_evidence(symbol),
     )
 
 
@@ -298,6 +322,7 @@ def test_stale_snapshot_is_not_eligible_for_analysis():
         candles=(old_candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
     service = MarketDataService(FakeMarketDataSource(batch))
 
@@ -322,6 +347,7 @@ def test_stale_snapshot_is_rejected_from_analysis_batch():
         candles=(old_candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
     service = MarketDataService(FakeMarketDataSource(batch))
 
@@ -362,6 +388,7 @@ def test_unknown_volume_blocks_only_volume_required_analysis():
         candles=(candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
     service = MarketDataService(FakeMarketDataSource(batch))
 
@@ -491,6 +518,7 @@ def test_analysis_batch_rejects_time_gaps():
         candles=candles,
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
 
     service = MarketDataService(FakeMarketDataSource(batch))
@@ -522,6 +550,7 @@ def test_volume_required_analysis_rejection_preserves_snapshot():
         candles=(candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
 
     service = MarketDataService(FakeMarketDataSource(batch))
@@ -555,6 +584,7 @@ def test_unknown_volume_does_not_block_non_volume_analysis():
         candles=(candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
 
     service = MarketDataService(FakeMarketDataSource(batch))
@@ -581,6 +611,7 @@ def test_rejected_snapshot_contains_original_batch():
         candles=(candle,),
         received_at=CHECKED_AT,
         source="MT5",
+        clock_evidence=make_clock_evidence("XAUUSD"),
     )
 
     service = MarketDataService(FakeMarketDataSource(batch))
