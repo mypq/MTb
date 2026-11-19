@@ -222,7 +222,11 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
         )
 
         registry = Mock()
-        registry.latest.return_value = confirmation
+        registry.for_broker_times.side_effect = (
+            lambda identity, timestamps: tuple(
+                confirmation for _ in timestamps
+            )
+        )
 
         adapter.set_broker_offset_registry(registry)
 
@@ -438,7 +442,11 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         )
 
         registry = Mock()
-        registry.latest.return_value = confirmation
+        registry.for_broker_times.side_effect = (
+            lambda identity, timestamps: tuple(
+                confirmation for _ in timestamps
+            )
+        )
         adapter.set_broker_offset_registry(registry)
 
         # 2. Obtain a verified initial calibration.
