@@ -503,3 +503,141 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
 
     finally:
         adapter.shutdown()
+def test_main_candle_clock_worker_recalibrates_after_mt5_reconnect():
+    import asyncio
+
+    from backend.market_data.broker_candle_clock import monotonic
+
+    verifier = NtpTimeVerifier(
+        servers=("ntp-a", "ntp-b", "ntp-c"),
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+
+    assert verifier.verify().verified is True
+
+    calibrator = BrokerCandleClockCalibrator(
+        verifier,
+        required_samples=3,
+        minimum_span_seconds=3.0,
+        maximum_spread_seconds=0.5,
+        maximum_sample_age_seconds=30.0,
+    )
+
+    raw_closed_timestamps = []
+    mt5 = make_mt5_module(raw_closed_timestamps)
+
+    adapter = MT5Adapter(
+        settings=make_settings(),
+        mt5_module=mt5,
+    )
+
+    connection = adapter.connect()
+    assert connection.state == MT5ConnectionState.CONNECTED
+
+    calibration_stop = asyncio.Event()
+    collector_stop = asyncio.Event()
+    collector_started = asyncio.Event()
+
+    class FakeCollector:
+        async def run(self, stop_event):
+            collector_started.set()
+            stop_event.set()
+
+    collector = FakeCollector()
+
+    class FakeClock:
+        value = 100.0
+
+    clock = FakeClock()
+
+    class MainWorkerAdapter:
+        def __init__(self):
+            self.calls = 0
+            self.loop = None
+
+        def get_active_candle_clock_sample(self, symbol):
+            self.calls += 1
+
+            if self.calls == 4:
+                clock.value = 140.0
+                mt5.terminal_info.return_value.connected = False
+
+                return adapter.get_active_candle_clock_sample(symbol)
+
+            if self.calls == 5:
+                clock.value = 145.0
+                mt5.terminal_info.return_value.connected = True
+
+                reconnected = adapter.connect()
+                assert reconnected.state == MT5ConnectionState.CONNECTED
+
+            elif self.calls == 6:
+                clock.value = 147.0
+
+            elif self.calls == 7:
+                clock.value = 149.0
+                self.loop.call_soon_threadsafe(
+                    calibration_stop.set
+                )
+
+            return adapter.get_active_candle_clock_sample(symbol)
+
+    worker_adapter = MainWorkerAdapter()
+
+    async def run_workers():
+        worker_adapter.loop = asyncio.get_running_loop()
+
+        calibration_task = asyncio.create_task(
+            main._candle_clock_calibration_loop(
+                worker_adapter,
+                calibrator,
+                "XAUUSD",
+                calibration_stop,
+            )
+        )
+
+        collector_task = asyncio.create_task(
+            main._run_collector_after_clock_verification(
+                collector,
+                calibrator,
+                collector_stop,
+            )
+        )
+
+        await asyncio.sleep(0.1)
+
+        assert not collector_started.is_set()
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                calibration_task,
+                collector_task,
+            ),
+            timeout=15.0,
+        )
+
+    try:
+        with patch(
+            "backend.market_data.broker_candle_clock.monotonic",
+            side_effect=lambda: clock.value,
+        ):
+            asyncio.run(run_workers())
+
+            final_snapshot = calibrator.snapshot()
+
+        assert worker_adapter.calls == 7
+
+        assert final_snapshot.status == "VERIFIED"
+        assert final_snapshot.sample_count == 3
+        assert final_snapshot.offset_seconds == BROKER_OFFSET_SECONDS
+
+        assert collector_started.is_set()
+        assert collector_stop.is_set()
+
+    finally:
+        adapter.shutdown()
