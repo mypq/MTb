@@ -546,7 +546,6 @@ def main():
         print(f"Rejected identity rows: {stats['rejected_identity']}")
         print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
         print(f"Skipped statuses: {stats['skipped_status']}")
-    print(f"Skipped stale active-candle observations: {stats['skipped_stale_active']}")
         print(f"Skipped stale active-candle observations: {stats['skipped_stale_active']}")
         return 5
 
@@ -576,6 +575,7 @@ def main():
     print(f"Rejected identity rows: {stats['rejected_identity']}")
     print(f"Skipped untrusted NTP rows: {stats['skipped_untrusted_ntp']}")
     print(f"Skipped statuses: {stats['skipped_status']}")
+    print(f"Skipped stale active-candle observations: {stats['skipped_stale_active']}")
     print(f"History: {destination.resolve()}")
 
     print(
