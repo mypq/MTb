@@ -796,6 +796,40 @@ def test_truncated_trailing_record_is_rejected(tmp_path) -> None:
         registry.load()
 
 
+def test_append_repairs_missing_final_newline_without_corrupting_records(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    first = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME,
+    )
+
+    original_content = path.read_bytes()
+    assert original_content.endswith(b"\n")
+
+    # Simulate a valid legacy JSONL file without its final newline.
+    path.write_bytes(original_content[:-1])
+
+    second = registry.append_candidate(
+        decision_with_time_shift(make_decision(), 180),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=6),
+    )
+
+    records = registry.load()
+    stored_content = path.read_bytes()
+
+    assert len(records) == 2
+    assert records[0] == first
+    assert records[1] == second
+
+    assert stored_content.startswith(original_content[:-1] + b"\n")
+    assert stored_content.endswith(b"\n")
+    assert len(stored_content.splitlines()) == 2
+
+
 def test_v2_history_remains_readable_and_unchanged(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
     registry = BrokerOffsetRegistry(path)
