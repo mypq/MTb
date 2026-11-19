@@ -1692,6 +1692,8 @@ def test_candle_clock_read_error_checks_connection_before_invalidation(
     assert adapter.connection_checks == 1
     assert adapter.invalidation_calls == int(expected_invalidation)
     assert calibrator.invalidation_calls == int(expected_invalidation)
+
+
 def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose(
     monkeypatch,
 ):
@@ -1752,6 +1754,11 @@ def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose
 
         await asyncio.to_thread(blocked_backup)
 
+        # Match the production loop: after an active backup
+        # finishes, wait for the explicit shutdown request.
+        if not stop_event.is_set():
+            await stop_event.wait()
+
         events.append("backup.stop")
 
     monkeypatch.setattr(
@@ -1808,7 +1815,6 @@ def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose
             await asyncio.sleep(0.05)
 
             assert not lifecycle_task.done()
-
             assert "database.dispose" not in events
 
         finally:
@@ -1823,17 +1829,18 @@ def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose
 
         assert events.index(
             "collector.stop"
+        ) < events.index("backup.stop")
+
+        assert events.index(
+            "collector.stop"
         ) < events.index("database.dispose")
 
         assert events.index(
             "backup.stop"
         ) < events.index("database.dispose")
 
-        assert events.index(
-            "collector.stop"
-        ) < events.index("backup.stop")
-
     asyncio.run(scenario())
+
 
 def test_lifespan_skips_mt5_shutdown_while_real_broker_worker_is_blocked(
     monkeypatch,
