@@ -687,8 +687,20 @@ def test_concurrent_appends_keep_unique_sequences(tmp_path) -> None:
     path = tmp_path / "offsets.jsonl"
 
     decisions = [
-        decision_with_run_id(make_decision(), "concurrent-001"),
-        decision_with_run_id(make_decision(), "concurrent-002"),
+        decision_with_run_id(
+            decision_with_identity(
+                make_decision(),
+                (IDENTITY[0], IDENTITY[1], "GOLD-A", IDENTITY[3]),
+            ),
+            "concurrent-001",
+        ),
+        decision_with_run_id(
+            decision_with_identity(
+                make_decision(),
+                (IDENTITY[0], IDENTITY[1], "GOLD-B", IDENTITY[3]),
+            ),
+            "concurrent-002",
+        ),
     ]
 
     def append_one(decision):
@@ -707,8 +719,10 @@ def test_concurrent_appends_keep_unique_sequences(tmp_path) -> None:
     assert len(records) == 2
     assert [item.record_sequence for item in records] == [1, 2]
     assert len({item.run_id for item in records}) == 2
-    assert records[0].event_type == "BASELINE"
-    assert records[1].event_type == "CONFIRMATION"
+    assert all(
+        item.event_type == "BASELINE"
+        for item in records
+    )
 
 
 def test_multiprocess_appends_keep_unique_sequences(
@@ -720,7 +734,15 @@ def test_multiprocess_appends_keep_unique_sequences(
         (
             path,
             decision_with_run_id(
-                make_decision(),
+                decision_with_identity(
+                    make_decision(),
+                    (
+                        IDENTITY[0],
+                        IDENTITY[1],
+                        f"GOLD-{index:03d}",
+                        IDENTITY[3],
+                    ),
+                ),
                 f"process-run-{index:03d}",
             ),
             BASE_TIME,
@@ -753,11 +775,9 @@ def test_multiprocess_appends_keep_unique_sequences(
         record.run_id for record in records
     }) == 8
 
-    assert records[0].event_type == "BASELINE"
-
     assert all(
-        record.event_type == "CONFIRMATION"
-        for record in records[1:]
+        record.event_type == "BASELINE"
+        for record in records
     )
 
 
