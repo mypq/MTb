@@ -847,6 +847,18 @@ class BrokerOffsetRegistry:
         record: BrokerOffsetRecord,
         previous: BrokerOffsetRecord | None,
     ) -> None:
+        # Evidence windows for the same identity must never overlap.
+        # Apply this to v2/v3 records, including legacy-compatible events.
+        if (
+            previous is not None
+            and previous.evidence_end_utc is not None
+            and record.evidence_start_utc is not None
+            and record.evidence_start_utc <= previous.evidence_end_utc
+        ):
+            raise BrokerOffsetRegistryError(
+                "Stored evidence overlaps or precedes the previous identity evidence."
+            )
+
         # v1/v2 records have no event metadata. They remain readable;
         # the next v3 event is checked against their stored offset.
         if record.schema_version != 3:
