@@ -328,7 +328,7 @@ def test_freshness_diagnostics_are_calculated_correctly():
     assert report.latest_candle_close_delay_seconds == 0
     assert report.data_age_seconds == 30
     assert report.freshness_eligible is True
-    assert report.freshness_verified is False
+    assert report.freshness_verified is True
 
 
 @pytest.mark.parametrize(
