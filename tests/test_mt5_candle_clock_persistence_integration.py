@@ -25,6 +25,7 @@ from backend.mt5 import (
     MT5AdapterError,
     MT5ConnectionState,
 )
+from backend.mt5.monitor import MT5ConnectionMonitor
 
 
 UTC = timezone.utc
@@ -379,8 +380,6 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
     monkeypatch,
 ):
-    from unittest.mock import patch
-
     verifier = NtpTimeVerifier(
         servers=("ntp-a", "ntp-b", "ntp-c"),
         query=lambda server: NtpSample(
@@ -391,8 +390,7 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         ),
     )
 
-    ntp_result = verifier.verify()
-    assert ntp_result.verified is True
+    assert verifier.verify().verified is True
 
     calibrator = BrokerCandleClockCalibrator(
         verifier,
@@ -405,13 +403,23 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
     raw_closed_timestamps = []
     mt5 = make_mt5_module(raw_closed_timestamps)
 
+    # The fake terminal becomes connected only when initialize()
+    # is called, exactly as it should during monitor recovery.
+    terminal = mt5.terminal_info.return_value
+
+    def initialize_after_disconnect(**kwargs):
+        terminal.connected = True
+        return True
+
+    mt5.initialize.side_effect = initialize_after_disconnect
+
     adapter = MT5Adapter(
         settings=make_settings(),
         mt5_module=mt5,
     )
 
     try:
-        # 1. Initial MT5 connection.
+        # 1. Establish the initial MT5 connection.
         connection = adapter.connect()
         assert connection.state == MT5ConnectionState.CONNECTED
 
@@ -433,7 +441,7 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         registry.latest.return_value = confirmation
         adapter.set_broker_offset_registry(registry)
 
-        # 2. Initial calibration reaches VERIFIED.
+        # 2. Obtain a verified initial calibration.
         with patch(
             "backend.market_data.broker_candle_clock.monotonic",
             side_effect=(100.0, 102.0, 104.0),
@@ -448,46 +456,58 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         assert snapshot.sample_count == 3
         assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
 
-        # 3. More than 30 seconds pass while MT5 is still connected.
-        # The expired calibration must block candle retrieval first.
-        with patch(
-            "backend.market_data.broker_candle_clock.monotonic",
-            return_value=140.0,
-        ):
-            with pytest.raises(
-                MT5AdapterError,
-                match="Candle clock is not verified",
-            ):
-                adapter.get_closed_candles("XAUUSD", "M5", 2)
-
-            stale_snapshot = calibrator.snapshot()
-
-        assert stale_snapshot.status == "DEGRADED"
-        assert stale_snapshot.sample_count == 0
-        assert stale_snapshot.offset_seconds is None
-
-        # 4. Now simulate MT5 disconnection.
-        mt5.terminal_info.return_value.connected = False
+        # 3. Disconnect MT5 while the calibration is still fresh.
+        terminal.connected = False
 
         disconnected = adapter.connection_status()
         assert disconnected.state == MT5ConnectionState.DISCONNECTED
 
-        # No closed-candle request was made while disconnected.
-        assert not any(
-            call.args[2] == 1
-            for call in mt5.copy_rates_from_pos.call_args_list
+        # 4. Run the real connection monitor.
+        # It must invalidate calibration before reconnecting.
+        monitor = MT5ConnectionMonitor(adapter)
+
+        reconnected = monitor.check_once()
+
+        assert reconnected.state == MT5ConnectionState.CONNECTED
+        mt5.initialize.assert_called()
+
+        invalidated_snapshot = calibrator.snapshot()
+
+        assert invalidated_snapshot.status == "DEGRADED"
+        assert invalidated_snapshot.sample_count == 0
+        assert invalidated_snapshot.offset_seconds is None
+        assert "connection was lost" in invalidated_snapshot.reason.lower()
+
+        # 5. A connected terminal must still be blocked from
+        # retrieving closed candles until fresh calibration completes.
+        assert adapter.connection_status().state == (
+            MT5ConnectionState.CONNECTED
         )
 
-        # 5. Restore MT5 connection.
-        mt5.terminal_info.return_value.connected = True
+        closed_fetch_calls_before = [
+            call
+            for call in mt5.copy_rates_from_pos.call_args_list
+            if call.args[2] == 1
+        ]
 
-        reconnected = adapter.connect()
-        assert reconnected.state == MT5ConnectionState.CONNECTED
+        with pytest.raises(
+            MT5AdapterError,
+            match="Candle clock is not verified",
+        ):
+            adapter.get_closed_candles("XAUUSD", "M5", 2)
 
-        # 6. Collect entirely fresh samples after reconnect.
+        closed_fetch_calls_after = [
+            call
+            for call in mt5.copy_rates_from_pos.call_args_list
+            if call.args[2] == 1
+        ]
+
+        assert closed_fetch_calls_after == closed_fetch_calls_before
+
+        # 6. Collect three entirely fresh samples after reconnection.
         with patch(
             "backend.market_data.broker_candle_clock.monotonic",
-            side_effect=(141.0, 143.0, 145.0),
+            side_effect=(110.0, 112.0, 114.0),
         ):
             for _ in range(3):
                 sample = adapter.get_active_candle_clock_sample(
@@ -499,17 +519,28 @@ def test_mt5_disconnect_reconnect_recalibrates_before_candle_fetch(
         assert snapshot.sample_count == 3
         assert snapshot.offset_seconds == BROKER_OFFSET_SECONDS
 
-        # 7. Candle fetching is allowed again only after fresh verification.
+        # 7. Closed-candle retrieval is allowed only after
+        # the new calibration and trusted evidence are available.
         with patch(
             "backend.market_data.broker_candle_clock.monotonic",
-            return_value=145.0,
+            return_value=114.0,
         ):
-            batch = adapter.get_closed_candles("XAUUSD", "M5", 2)
+            batch = adapter.get_closed_candles(
+                "XAUUSD",
+                "M5",
+                2,
+            )
 
         assert len(batch.candles) == 2
         assert all(candle.is_closed for candle in batch.candles)
         assert batch.clock_evidence is not None
         assert batch.clock_evidence.verified is True
+
+        assert len([
+            call
+            for call in mt5.copy_rates_from_pos.call_args_list
+            if call.args[2] == 1
+        ]) > len(closed_fetch_calls_before)
 
     finally:
         adapter.shutdown()
