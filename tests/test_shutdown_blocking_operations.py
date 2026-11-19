@@ -1,4 +1,3 @@
-
 import asyncio
 import time
 from threading import Event
@@ -6,6 +5,7 @@ from types import SimpleNamespace
 
 from backend.market_data.collector import MarketDataCollector
 from backend.market_data.ntp_monitor import NtpVerificationMonitor
+from backend.market_data.ntp_time import NtpVerification
 from backend.main import (
     _candle_clock_calibration_loop,
     _database_backup_loop,
@@ -186,12 +186,17 @@ def test_ntp_monitor_waits_for_blocked_verification():
             if not release.wait(timeout=5):
                 raise RuntimeError("NTP release timed out.")
 
-            return SimpleNamespace(
+            return NtpVerification(
                 verified=True,
+                checked_at_unix=time.time(),
                 offset_seconds=0.01,
                 uncertainty_seconds=0.02,
-                sample_count=5,
-                servers=["time.cloudflare.com"],
+                sample_count=3,
+                servers=(
+                    "time.google.com",
+                    "time.cloudflare.com",
+                    "pool.ntp.org",
+                ),
                 error=None,
             )
 
