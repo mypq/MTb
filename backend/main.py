@@ -42,6 +42,7 @@ from backend.market_data.broker_offset_service import (
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
+from backend.mt5.models import MT5ConnectionState
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.security import verify_api_token
 
@@ -114,16 +115,36 @@ async def _candle_clock_calibration_loop(
                 )
 
         except Exception as exc:
-            # A single failed MT5 read is transient evidence, not proof
-            # that an already verified broker-clock calibration is wrong.
-            # Identity changes and invalid clock evidence are handled by
-            # the calibrator when a valid sample is received.
-            logger.warning(
-                "Broker candle clock sample failed; "
-                "keeping the existing calibration: %s: %s",
-                type(exc).__name__,
-                exc,
-            )
+            try:
+                connection = await asyncio.to_thread(
+                    adapter.connection_status
+                )
+
+                if connection.state in (
+                    MT5ConnectionState.DISCONNECTED,
+                    MT5ConnectionState.ERROR,
+                ):
+                    adapter.mark_candle_clock_connection_lost()
+
+                    logger.warning(
+                        "Broker candle clock degraded because "
+                        "MT5 connection is %s.",
+                        connection.state.value,
+                    )
+                else:
+                    logger.warning(
+                        "Broker candle clock sample failed while "
+                        "MT5 connection state is %s; "
+                        "keeping existing calibration: %s: %s",
+                        connection.state.value,
+                        type(exc).__name__,
+                        exc,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to verify MT5 connection after "
+                    "candle clock sampling error."
+                )
 
         try:
             await asyncio.wait_for(
