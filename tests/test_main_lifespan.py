@@ -1692,3 +1692,145 @@ def test_candle_clock_read_error_checks_connection_before_invalidation(
     assert adapter.connection_checks == 1
     assert adapter.invalidation_calls == int(expected_invalidation)
     assert calibrator.invalidation_calls == int(expected_invalidation)
+def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose(
+    monkeypatch,
+):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=True,
+    )
+
+    collector_started = Event()
+    collector_release = Event()
+    backup_started = Event()
+    backup_release = Event()
+
+    entered = asyncio.Event()
+    shutdown_requested = asyncio.Event()
+
+    class BlockingCollector:
+        def __init__(
+            self,
+            service,
+            repository,
+            *,
+            symbol,
+            timeframe,
+            count,
+        ):
+            self.service = service
+            self.repository = repository
+            self.symbol = symbol
+            self.timeframe = timeframe
+            self.count = count
+
+        async def run(self, stop_event):
+            events.append("collector.start")
+
+            def blocked_collection():
+                collector_started.set()
+
+                if not collector_release.wait(timeout=5):
+                    raise RuntimeError(
+                        "Collector release timed out."
+                    )
+
+            await asyncio.to_thread(blocked_collection)
+
+            events.append("collector.stop")
+
+    async def blocking_backup_loop(backup_service, stop_event):
+        events.append("backup.start")
+
+        def blocked_backup():
+            backup_started.set()
+
+            if not backup_release.wait(timeout=5):
+                raise RuntimeError(
+                    "Backup release timed out."
+                )
+
+        await asyncio.to_thread(blocked_backup)
+
+        events.append("backup.stop")
+
+    monkeypatch.setattr(
+        main,
+        "MarketDataCollector",
+        BlockingCollector,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_database_backup_loop",
+        blocking_backup_loop,
+    )
+
+    async def wait_for_thread(event, name):
+        for _ in range(600):
+            if event.is_set():
+                return
+
+            await asyncio.sleep(0.005)
+
+        raise AssertionError(
+            f"{name} did not start."
+        )
+
+    async def run_lifespan():
+        async with main.lifespan(app):
+            entered.set()
+            await shutdown_requested.wait()
+
+    async def scenario():
+        lifecycle_task = asyncio.create_task(
+            run_lifespan()
+        )
+
+        try:
+            await asyncio.wait_for(
+                entered.wait(),
+                timeout=5,
+            )
+
+            await wait_for_thread(
+                collector_started,
+                "Collector thread",
+            )
+
+            await wait_for_thread(
+                backup_started,
+                "Backup thread",
+            )
+
+            shutdown_requested.set()
+
+            await asyncio.sleep(0.05)
+
+            assert not lifecycle_task.done()
+
+            assert "database.dispose" not in events
+
+        finally:
+            collector_release.set()
+            backup_release.set()
+            shutdown_requested.set()
+
+        await asyncio.wait_for(
+            lifecycle_task,
+            timeout=10,
+        )
+
+        assert events.index(
+            "collector.stop"
+        ) < events.index("database.dispose")
+
+        assert events.index(
+            "backup.stop"
+        ) < events.index("database.dispose")
+
+        assert events.index(
+            "collector.stop"
+        ) < events.index("backup.stop")
+
+    asyncio.run(scenario())
