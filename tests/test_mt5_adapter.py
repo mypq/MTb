@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -316,7 +317,7 @@ def test_symbol_information_mapping():
 def test_empty_symbol_is_rejected():
     adapter = MT5Adapter(
         settings=make_settings(),
-        mt5_module=mt5_module(),
+        mt5_module=make_mt5_module(),
     )
 
     with pytest.raises(ValueError):
@@ -1572,3 +1573,68 @@ def test_closed_candles_are_blocked_after_broker_identity_changes(
 
     finally:
         adapter.shutdown()
+
+
+def test_closed_candles_are_blocked_after_ntp_evidence_is_replaced():
+    adapter, mt5 = make_connected_adapter()
+
+    calibrator = adapter._candle_clock_calibrator
+    assert calibrator is not None
+
+    # Replace the live NTP verification after calibration.
+    replacement = calibrator._ntp.verify()
+    assert replacement.verified is True
+
+    mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Candle clock is not verified",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
+
+
+def test_closed_candles_are_blocked_when_ntp_uncertainty_exceeds_limit():
+    adapter, mt5 = make_connected_adapter()
+
+    calibrator = adapter._candle_clock_calibrator
+    assert calibrator is not None
+
+    current = calibrator._ntp.last_verification()
+    assert current is not None
+
+    # Keep the evidence internally consistent but exceed the adapter limit.
+    excessive = replace(current, uncertainty_seconds=1.1)
+    calibrator._ntp._last_verification = excessive
+    calibrator._ntp_evidence = excessive
+
+    mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Live trusted NTP evidence",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
+
+
+def test_closed_candles_are_blocked_with_fewer_than_three_clock_samples():
+    adapter, mt5 = make_connected_adapter()
+
+    calibrator = adapter._candle_clock_calibrator
+    assert calibrator is not None
+
+    calibrator._samples.clear()
+
+    mt5.copy_rates_from_pos.return_value = [make_rate()]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="Candle clock is not verified",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    mt5.copy_rates_from_pos.assert_not_called()
