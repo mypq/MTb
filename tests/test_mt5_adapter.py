@@ -469,6 +469,47 @@ def test_broker_candle_offset_is_subtracted_before_utc_conversion():
     )
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    ["BASELINE", "CONFIRMATION", "OFFSET_CHANGE"],
+)
+def test_closed_candles_accept_each_direct_evidence_event_type(event_type):
+    adapter, mt5 = make_connected_adapter(
+        broker_offset_seconds=7200,
+    )
+
+    expected_utc = int(
+        (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    )
+    historical_offset = 3600
+    raw_timestamp = expected_utc + historical_offset
+
+    historical_record = SimpleNamespace(
+        event_type=event_type,
+        offset_seconds=historical_offset,
+        evidence_sample_count=3,
+        evidence_samples=({}, {}, {}),
+        ntp_evidence={
+            "verified": True,
+            "sample_count": 3,
+        },
+    )
+    adapter._broker_offset_registry.for_broker_times.side_effect = None
+    adapter._broker_offset_registry.for_broker_times.return_value = (
+        historical_record,
+    )
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=raw_timestamp),
+    ]
+
+    batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+    assert batch.candles[0].timestamp == datetime.fromtimestamp(
+        expected_utc,
+        tz=timezone.utc,
+    )
+
+
 def test_closed_candles_require_historical_confirmation_coverage():
     adapter, mt5 = make_connected_adapter(
         broker_offset_seconds=7200,
@@ -485,7 +526,7 @@ def test_closed_candles_require_historical_confirmation_coverage():
 
     with pytest.raises(
         MT5AdapterError,
-        match="No confirmed historical broker-offset evidence",
+        match="No valid historical broker-offset evidence",
     ):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
 
