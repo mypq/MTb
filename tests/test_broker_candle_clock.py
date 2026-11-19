@@ -403,6 +403,7 @@ def test_manual_reset_clears_identity_and_calibration():
     assert snapshot.sample_count == 0
     assert snapshot.reason == "Calibration manually reset."
 
+
 def test_delayed_active_m1_update_near_minute_boundary_preserves_verified_calibration():
     calibrator, _ = make_calibrator(required_samples=3)
 
@@ -443,6 +444,8 @@ def test_real_offset_change_near_minute_boundary_is_not_ignored():
     assert snapshot.status == "DEGRADED"
     assert snapshot.offset_seconds is None
     assert snapshot.sample_count == 0
+
+
 def test_trusted_evidence_returns_current_verified_ntp_evidence():
     calibrator, verifier = make_calibrator(required_samples=3)
 
@@ -478,25 +481,35 @@ def test_trusted_evidence_rejects_lost_ntp_trust():
     assert snapshot.offset_seconds is None
     assert evidence is None
     assert "expired" in snapshot.reason
+
+
 def test_trusted_evidence_rejects_replaced_ntp_verification():
     calibrator, verifier = make_calibrator(required_samples=3)
 
-    verified = calibrate(calibrator)
-    assert verified.status == "VERIFIED"
+    with patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        side_effect=(10.0, 10.5, 11.0, 11.1),
+    ):
+        verified = None
 
-    # Simulate a fresh NTP verification with changed evidence.
-    verifier._query = lambda server: NtpSample(
-        server=server,
-        offset_seconds=0.1,
-        round_trip_seconds=0.02,
-        root_dispersion_seconds=0.01,
-    )
+        for _ in range(3):
+            verified = calibrator.observe(**make_observation())
 
-    replacement = verifier.verify()
-    assert replacement.verified is True
-    assert verifier.is_trusted() is True
+        assert verified.status == "VERIFIED"
 
-    snapshot, evidence = calibrator.trusted_evidence()
+        # Simulate a fresh NTP verification with changed evidence.
+        verifier._query = lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.1,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        )
+
+        replacement = verifier.verify()
+        assert replacement.verified is True
+        assert verifier.is_trusted() is True
+
+        snapshot, evidence = calibrator.trusted_evidence()
 
     assert snapshot.status == "DEGRADED"
     assert snapshot.offset_seconds is None
