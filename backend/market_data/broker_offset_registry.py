@@ -348,18 +348,25 @@ class BrokerOffsetRegistry:
                 else:
                     event_type = "OFFSET_CHANGE"
                     previous_offset = previous.offset_seconds
-                    transition_start = previous.recorded_at_utc
-                    transition_end = end
 
-                    if transition_end <= transition_start:
-                        raise BrokerOffsetRegistryError(
-                            "New evidence does not establish a chronological "
-                            "transition interval after the previous record."
-                        )
+                    if previous.evidence_end_utc is None:
+                        # Legacy v1 has no bounded evidence interval.
+                        # Do not invent transition boundaries from its record time.
+                        transition_start = None
+                        transition_end = None
+                    else:
+                        transition_start = previous.evidence_end_utc
+                        transition_end = start
 
-                    if timestamp < transition_end:
+                        if transition_end <= transition_start:
+                            raise BrokerOffsetRegistryError(
+                                "New evidence overlaps or precedes the previous "
+                                "evidence interval; the transition is unresolved."
+                            )
+
+                    if timestamp < end:
                         raise BrokerOffsetRegistryError(
-                            "Record time cannot precede the transition evidence end."
+                            "Record time cannot precede the new evidence end."
                         )
 
                 record = BrokerOffsetRecord(
@@ -452,6 +459,45 @@ class BrokerOffsetRegistry:
                 if record.identity == identity
             ),
             None,
+        )
+
+    def for_time(
+        self,
+        identity: tuple[int, str, str, int],
+        timestamp_utc: datetime,
+    ) -> BrokerOffsetRecord | None:
+        """Return the offset record whose evidence covers a UTC instant.
+
+        v1 records and times outside explicit evidence bounds are not proof.
+        """
+        self._validate_identity(identity)
+        instant = self._utc_datetime(timestamp_utc, "timestamp_utc")
+
+        matches = [
+            record
+            for record in self.load()
+            if (
+                record.identity == identity
+                and record.evidence_start_utc is not None
+                and record.evidence_end_utc is not None
+                and record.evidence_start_utc <= instant <= record.evidence_end_utc
+            )
+        ]
+
+        if not matches:
+            return None
+
+        if len({record.offset_seconds for record in matches}) > 1:
+            raise BrokerOffsetRegistryError(
+                "Conflicting offset evidence covers the requested UTC time."
+            )
+
+        return max(
+            matches,
+            key=lambda record: (
+                record.evidence_end_utc,
+                record.record_sequence,
+            ),
         )
 
     @staticmethod
@@ -801,15 +847,47 @@ class BrokerOffsetRegistry:
                 )
             return
 
+        if record.previous_offset_seconds != previous.offset_seconds:
+            raise BrokerOffsetRegistryError(
+                "Offset-change previous offset is inconsistent."
+            )
+
+        if previous.evidence_end_utc is None:
+            if (
+                record.transition_start_utc is not None
+                or record.transition_end_utc is not None
+            ):
+                raise BrokerOffsetRegistryError(
+                    "A legacy record without evidence bounds cannot define "
+                    "transition boundaries."
+                )
+            return
+
+        # Retain readability of previously written v3 events.
+        # Historical lookup never relies on these legacy transition fields.
+        legacy_transition = (
+            record.transition_start_utc == previous.recorded_at_utc
+            and record.transition_end_utc == record.evidence_end_utc
+        )
+
+        evidence_transition = (
+            record.transition_start_utc == previous.evidence_end_utc
+            and record.transition_end_utc == record.evidence_start_utc
+        )
+
+        if not (legacy_transition or evidence_transition):
+            raise BrokerOffsetRegistryError(
+                "Offset-change transition metadata does not match evidence bounds."
+            )
+
         if (
-            record.previous_offset_seconds != previous.offset_seconds
-            or record.transition_start_utc != previous.recorded_at_utc
-            or record.transition_end_utc != record.evidence_end_utc
+            record.transition_start_utc is None
+            or record.transition_end_utc is None
             or record.transition_end_utc <= record.transition_start_utc
-            or record.recorded_at_utc < record.transition_end_utc
+            or record.recorded_at_utc < record.evidence_end_utc
         ):
             raise BrokerOffsetRegistryError(
-                "Offset-change transition metadata is inconsistent."
+                "Offset-change transition interval is invalid."
             )
 
     @classmethod
@@ -1041,8 +1119,10 @@ class BrokerOffsetRegistry:
         elif (
             previous_offset is None
             or previous_offset == data["offset_seconds"]
-            or transition_start_value is None
-            or transition_end_value is None
+            or (
+                (transition_start_value is None)
+                != (transition_end_value is None)
+            )
         ):
             raise BrokerOffsetRegistryError(
                 "Offset-change event fields are incomplete."
@@ -1062,11 +1142,18 @@ class BrokerOffsetRegistry:
         )
 
         if event_type == "OFFSET_CHANGE" and (
-            transition_start is None
-            or transition_end is None
-            or transition_end <= transition_start
-            or transition_end > end
-            or recorded < transition_end
+            (
+                transition_start is not None
+                and transition_end is not None
+                and (
+                    transition_end <= transition_start
+                    or recorded < end
+                )
+            )
+            or (
+                transition_start is None
+                and transition_end is not None
+            )
         ):
             raise BrokerOffsetRegistryError(
                 "Stored transition interval is invalid."
