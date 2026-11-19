@@ -571,67 +571,97 @@ class BrokerOffsetRegistry:
         identity: tuple[int, str, str, int],
         raw_timestamp_epoch: int | float,
     ) -> BrokerOffsetRecord | None:
-        """Resolve a raw MT5 broker-time epoch using explicit evidence.
+        """Resolve one raw MT5 timestamp using explicit historical evidence."""
+        return self.for_broker_times(
+            identity,
+            (raw_timestamp_epoch,),
+        )[0]
+
+    def for_broker_times(
+        self,
+        identity: tuple[int, str, str, int],
+        raw_timestamp_epochs: tuple[int | float, ...] | list[int | float],
+    ) -> tuple[BrokerOffsetRecord | None, ...]:
+        """Resolve raw MT5 broker timestamps against one registry snapshot.
 
         Each record proposes its own UTC instant (raw epoch minus that
         record's broker offset). A record is eligible only when that
         proposed instant falls inside the record's explicit UTC evidence
-        interval. No offset is extrapolated beyond those bounds.
+        interval. The registry is loaded once for the entire batch, and no
+        offset is extrapolated beyond its evidence bounds.
         """
         self._validate_identity(identity)
-        raw_epoch = self._finite(
-            raw_timestamp_epoch,
-            "raw_timestamp_epoch",
-        )
-        if raw_epoch <= 0:
+
+        if not isinstance(raw_timestamp_epochs, (tuple, list)):
             raise BrokerOffsetRegistryError(
-                "Raw broker timestamp must be positive."
+                "Raw broker timestamps must be supplied as a tuple or list."
             )
 
-        matches: list[BrokerOffsetRecord] = []
+        raw_epochs = tuple(
+            self._finite(value, "raw_timestamp_epoch")
+            for value in raw_timestamp_epochs
+        )
 
-        for record in self.load():
+        if any(value <= 0 for value in raw_epochs):
+            raise BrokerOffsetRegistryError(
+                "Raw broker timestamps must be positive."
+            )
+
+        records = tuple(
+            record
+            for record in self.load()
             if (
-                record.identity != identity
-                or record.evidence_start_utc is None
-                or record.evidence_end_utc is None
-            ):
+                record.identity == identity
+                and record.evidence_start_utc is not None
+                and record.evidence_end_utc is not None
+            )
+        )
+
+        resolved: list[BrokerOffsetRecord | None] = []
+
+        for raw_epoch in raw_epochs:
+            matches: list[BrokerOffsetRecord] = []
+
+            for record in records:
+                candidate_epoch = raw_epoch - record.offset_seconds
+
+                try:
+                    candidate_utc = datetime.fromtimestamp(
+                        candidate_epoch,
+                        timezone.utc,
+                    )
+                except (OverflowError, OSError, ValueError) as exc:
+                    raise BrokerOffsetRegistryError(
+                        "Raw broker timestamp is outside the supported range."
+                    ) from exc
+
+                if (
+                    record.evidence_start_utc
+                    <= candidate_utc
+                    <= record.evidence_end_utc
+                ):
+                    matches.append(record)
+
+            if not matches:
+                resolved.append(None)
                 continue
 
-            candidate_epoch = raw_epoch - record.offset_seconds
-
-            try:
-                candidate_utc = datetime.fromtimestamp(
-                    candidate_epoch,
-                    timezone.utc,
-                )
-            except (OverflowError, OSError, ValueError) as exc:
+            if len({record.offset_seconds for record in matches}) > 1:
                 raise BrokerOffsetRegistryError(
-                    "Raw broker timestamp is outside the supported range."
-                ) from exc
+                    "Conflicting historical offset evidence matches the raw broker timestamp."
+                )
 
-            if (
-                record.evidence_start_utc
-                <= candidate_utc
-                <= record.evidence_end_utc
-            ):
-                matches.append(record)
-
-        if not matches:
-            return None
-
-        if len({record.offset_seconds for record in matches}) > 1:
-            raise BrokerOffsetRegistryError(
-                "Conflicting historical offset evidence matches the raw broker timestamp."
+            resolved.append(
+                max(
+                    matches,
+                    key=lambda record: (
+                        record.evidence_end_utc,
+                        record.record_sequence,
+                    ),
+                )
             )
 
-        return max(
-            matches,
-            key=lambda record: (
-                record.evidence_end_utc,
-                record.record_sequence,
-            ),
-        )
+        return tuple(resolved)
 
     @staticmethod
     def _validate_identity(
