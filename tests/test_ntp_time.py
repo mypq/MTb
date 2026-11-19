@@ -255,3 +255,30 @@ def test_inconsistent_ntp_server_offsets_are_rejected():
 
     assert result.verified is False
     assert verifier.is_trusted() is False
+@pytest.mark.parametrize(
+    "offset_seconds",
+    [-120.0, 120.0],
+)
+def test_large_positive_and_negative_clock_skew_are_rejected(
+    offset_seconds: float,
+) -> None:
+    clock = FakeClock()
+    samples = valid_samples()
+
+    samples = {
+        name: NtpSample(
+            server=name,
+            offset_seconds=offset_seconds,
+            round_trip_seconds=0.05,
+            root_dispersion_seconds=0.01,
+        )
+        for name in samples
+    }
+
+    verifier = make_verifier(clock, samples)
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
