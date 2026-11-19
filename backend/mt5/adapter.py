@@ -655,8 +655,14 @@ class MT5Adapter:
                 live_ntp is None
                 or not live_ntp.verified
                 or live_ntp.checked_at_unix is None
+                or not isfinite(live_ntp.checked_at_unix)
+                or live_ntp.checked_at_unix <= 0
                 or live_ntp.offset_seconds is None
+                or not isfinite(live_ntp.offset_seconds)
                 or live_ntp.uncertainty_seconds is None
+                or not isfinite(live_ntp.uncertainty_seconds)
+                or live_ntp.uncertainty_seconds < 0
+                or live_ntp.uncertainty_seconds > 1.0
                 or live_ntp.sample_count < 3
                 or len(live_ntp.servers) < 3
                 or len(set(live_ntp.servers)) < 3
