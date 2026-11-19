@@ -1,4 +1,4 @@
-From __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timezone
 from math import isfinite
@@ -639,6 +639,11 @@ class MT5Adapter:
             if (
                 clock.status != "VERIFIED"
                 or clock.offset_seconds is None
+                or not isfinite(clock.offset_seconds)
+                or clock.uncertainty_seconds is None
+                or not isfinite(clock.uncertainty_seconds)
+                or clock.uncertainty_seconds > 2.0
+                or clock.sample_count < 3
                 or clock.symbol != normalized_symbol
             ):
                 raise MT5AdapterError(
