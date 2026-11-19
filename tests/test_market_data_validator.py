@@ -804,3 +804,179 @@ def test_excessive_ntp_uncertainty_blocks_analysis():
         issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
         for issue in report.issues
     )
+
+def test_excessive_ntp_uncertainty_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"ntp_uncertainty_seconds": 1.1}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_excessive_candle_uncertainty_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"candle_uncertainty_seconds": 2.1}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_insufficient_ntp_samples_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"ntp_sample_count": 2}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_insufficient_calibration_samples_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"calibration_sample_count": 2}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_duplicate_ntp_servers_block_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"ntp_servers": ("ntp-a", "ntp-a", "ntp-b")}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_clock_evidence_symbol_mismatch_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={"symbol": "EURUSD"}
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_non_mt5_source_clock_evidence_blocks_analysis():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+    batch = batch.model_copy(update={"source": "OTHER"})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_clock_evidence_at_maximum_age_is_accepted():
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,))
+
+    evidence = batch.clock_evidence.model_copy(
+        update={
+            "checked_at": CHECKED_AT - timedelta(hours=6),
+        }
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is True
+    assert report.analysis_eligible is True
+    assert not any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
+
+
+def test_clock_evidence_after_batch_receive_time_blocks_analysis():
+    received_at = CHECKED_AT - timedelta(seconds=30)
+    candle = make_candle(CHECKED_AT - timedelta(minutes=5))
+    batch = make_batch((candle,), received_at=received_at)
+
+    evidence = batch.clock_evidence.model_copy(
+        update={
+            "checked_at": CHECKED_AT - timedelta(seconds=10),
+        }
+    )
+    batch = batch.model_copy(update={"clock_evidence": evidence})
+
+    report = MarketDataValidator().validate(batch, 300, CHECKED_AT)
+
+    assert report.freshness_eligible is True
+    assert report.freshness_verified is False
+    assert report.analysis_eligible is False
+    assert any(
+        issue.code == MarketDataIssueCode.CLOCK_EVIDENCE_INVALID
+        for issue in report.issues
+    )
