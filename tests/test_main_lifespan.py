@@ -476,6 +476,10 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             self.state = MT5ConnectionState.DISCONNECTED
             self.candle_clock_calibrator = None
             self.broker_offset_registry = None
+            self.candle_clock_invalidation_calls = 0
+
+        def mark_candle_clock_connection_lost(self):
+            self.candle_clock_invalidation_calls += 1
 
         def connect(self):
             with adapter_lock:
@@ -583,6 +587,20 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
         ControlledCollector,
     )
 
+    async def wait_for_event(event, timeout):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        while not event.is_set():
+            remaining = deadline - loop.time()
+
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+
+            await asyncio.sleep(min(0.01, remaining))
+
+        return True
+
     async def run():
         async with main.lifespan(app):
             try:
@@ -595,14 +613,19 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
 
                 # Both workers must start after the real monitor
                 # successfully restores the MT5 connection.
-                assert await asyncio.wait_for(
-                    asyncio.to_thread(worker_started.wait),
+                assert await wait_for_event(
+                    worker_started,
                     timeout=2,
                 )
 
-                assert await asyncio.wait_for(
-                    asyncio.to_thread(collector_started.wait),
+                assert await wait_for_event(
+                    collector_started,
                     timeout=2,
+                )
+
+                assert (
+                    app.state.mt5_adapter.candle_clock_invalidation_calls
+                    >= 1
                 )
 
                 assert (
