@@ -443,3 +443,38 @@ def test_real_offset_change_near_minute_boundary_is_not_ignored():
     assert snapshot.status == "DEGRADED"
     assert snapshot.offset_seconds is None
     assert snapshot.sample_count == 0
+def test_trusted_evidence_returns_current_verified_ntp_evidence():
+    calibrator, verifier = make_calibrator(required_samples=3)
+
+    with patch(
+        "backend.market_data.broker_candle_clock.monotonic",
+        side_effect=(10.0, 10.5, 11.0, 11.1),
+    ):
+        for _ in range(3):
+            calibrator.observe(**make_observation())
+
+        snapshot, evidence = calibrator.trusted_evidence()
+
+    assert snapshot.status == "VERIFIED"
+    assert snapshot.offset_seconds == BROKER_OFFSET
+    assert evidence is not None
+    assert evidence.verified is True
+    assert evidence.sample_count >= 3
+    assert len(evidence.servers) >= 3
+    assert verifier.is_trusted() is True
+
+
+def test_trusted_evidence_rejects_lost_ntp_trust():
+    calibrator, verifier = make_calibrator(required_samples=3)
+
+    verified = calibrate(calibrator)
+    assert verified.status == "VERIFIED"
+
+    verifier.reset()
+
+    snapshot, evidence = calibrator.trusted_evidence()
+
+    assert snapshot.status == "DEGRADED"
+    assert snapshot.offset_seconds is None
+    assert evidence is None
+    assert "expired" in snapshot.reason
