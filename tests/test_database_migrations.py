@@ -67,6 +67,31 @@ def test_initial_migration_upgrade_and_downgrade(
             "created_at",
         }.issubset(batch_columns)
 
+        clock_columns = {
+            "clock_verified",
+            "clock_account_login",
+            "clock_broker_server",
+            "clock_terminal_build",
+            "clock_checked_at",
+            "clock_ntp_offset_seconds",
+            "clock_ntp_uncertainty_seconds",
+            "clock_ntp_sample_count",
+            "clock_ntp_servers",
+            "clock_candle_offset_seconds",
+            "clock_candle_uncertainty_seconds",
+            "clock_calibration_sample_count",
+        }
+
+        assert clock_columns.issubset(batch_columns)
+
+        batch_column_details = {
+            column["name"]: column
+            for column in inspector.get_columns("market_data_batches")
+        }
+
+        for column_name in clock_columns:
+            assert batch_column_details[column_name]["nullable"] is True
+
         assert {
             "id",
             "batch_id",
