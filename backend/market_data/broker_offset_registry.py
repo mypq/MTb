@@ -435,7 +435,7 @@ class BrokerOffsetRegistry:
 
         descriptor = os.open(
             self.path,
-            os.O_RDWR | os.O_CREAT | os.O_APPEND,
+            os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
             0o600,
         )
         original_size = os.fstat(descriptor).st_size
