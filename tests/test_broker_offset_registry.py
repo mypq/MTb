@@ -219,7 +219,7 @@ def test_append_and_load_v2_candidate(tmp_path) -> None:
     assert record.evidence_end_utc > record.evidence_start_utc
 
 
-def test_registry_accepts_nonzero_ntp_offset_correction(
+def test_registry_uses_raw_offset_and_corrects_evidence_utc(
     tmp_path,
 ) -> None:
     registry = BrokerOffsetRegistry(
@@ -242,7 +242,15 @@ def test_registry_accepts_nonzero_ntp_offset_correction(
 
     for sample in record.evidence_samples:
         assert sample["ntp_offset_seconds"] == 0.25
-        assert sample["calculated_offset_seconds"] == 7199.75
+        assert sample["calculated_offset_seconds"] == 7200.0
+
+    assert record.evidence_start_utc.timestamp() == pytest.approx(
+        BASE_EPOCH + 0.25
+    )
+
+    assert record.evidence_end_utc.timestamp() == pytest.approx(
+        BASE_EPOCH + 120 + 0.25
+    )
 
     loaded = registry.load()
 
@@ -1402,3 +1410,74 @@ def test_offset_change_after_v1_does_not_invent_transition_bounds(
         IDENTITY,
         BASE_TIME,
     ) is None
+
+
+def test_append_rejects_legacy_ntp_adjusted_calculation(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(
+        tmp_path / "offsets.jsonl"
+    )
+
+    decision = make_decision(
+        ntp_offset_seconds=0.25
+    )
+
+    legacy_samples = tuple(
+        replace(
+            sample,
+            calculated_offset_seconds=(
+                sample.calculated_offset_seconds - 0.25
+            ),
+        )
+        for sample in decision.evidence_samples
+    )
+
+    legacy_decision = replace(
+        decision,
+        evidence_samples=legacy_samples,
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="calculated offset conflicts",
+    ):
+        registry.append_candidate(
+            legacy_decision,
+            recorded_at_utc=BASE_TIME,
+        )
+
+    assert registry.load() == ()
+
+
+def test_load_preserves_legacy_ntp_adjusted_records_without_rewriting(
+    tmp_path,
+) -> None:
+    path = tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(path)
+
+    decision = make_decision(
+        ntp_offset_seconds=0.25
+    )
+
+    record = registry.append_candidate(
+        decision,
+        recorded_at_utc=BASE_TIME,
+    )
+
+    stored = read_json_lines(path)
+
+    for sample in stored[0]["evidence_samples"]:
+        sample["calculated_offset_seconds"] -= 0.25
+
+    write_json_lines(path, stored)
+
+    original_content = path.read_text(encoding="utf-8")
+
+    loaded = registry.load()
+
+    assert len(loaded) == 1
+    assert loaded[0].offset_seconds == 7200
+    assert loaded[0].record_sequence == record.record_sequence
+
+    assert path.read_text(encoding="utf-8") == original_content
