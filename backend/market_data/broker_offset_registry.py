@@ -667,6 +667,7 @@ class BrokerOffsetRegistry:
         run_id: str,
         identity: tuple[int, str, str, int],
         offset: int,
+        allow_legacy_calculation: bool = False,
     ) -> None:
         required = {
             "run_id", "sample_sequence", "monotonic_ms",
@@ -773,13 +774,23 @@ class BrokerOffsetRegistry:
                     "Evidence NTP values are invalid."
                 )
 
-            corrected_calculated = (
-                sample["time_trade_server_epoch"]
-                - sample["time_gmt_epoch"]
-                - ntp_offset
+            raw_calculated = float(measured)
+
+            legacy_calculated = (
+                float(measured) - ntp_offset
             )
 
-            if abs(calculated - corrected_calculated) > 0.001:
+            matches_raw = (
+                abs(calculated - raw_calculated) <= 0.001
+            )
+
+            matches_legacy = (
+                abs(calculated - legacy_calculated) <= 0.001
+            )
+
+            if not matches_raw and not (
+                allow_legacy_calculation and matches_legacy
+            ):
                 raise BrokerOffsetRegistryError(
                     "Evidence calculated offset conflicts with raw clocks and NTP."
                 )
@@ -1102,6 +1113,7 @@ class BrokerOffsetRegistry:
             run_id=data["run_id"],
             identity=identity,
             offset=data["offset_seconds"],
+            allow_legacy_calculation=True,
         )
 
         ntp = cls._validate_ntp_evidence(data["ntp_evidence"])
