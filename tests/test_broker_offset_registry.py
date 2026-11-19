@@ -1404,6 +1404,80 @@ def test_for_time_uses_only_explicit_evidence_interval(
     ) is None
 
 
+def test_for_broker_time_uses_only_matching_explicit_evidence(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+    record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+
+    proven_utc = record.evidence_start_utc + timedelta(seconds=30)
+    raw_broker_epoch = int(proven_utc.timestamp()) + record.offset_seconds
+
+    assert registry.for_broker_time(
+        IDENTITY,
+        raw_broker_epoch,
+    ) == record
+
+    outside_raw_epoch = (
+        int((record.evidence_start_utc - timedelta(seconds=1)).timestamp())
+        + record.offset_seconds
+    )
+    assert registry.for_broker_time(
+        IDENTITY,
+        outside_raw_epoch,
+    ) is None
+
+
+def test_for_broker_time_rejects_ambiguous_offset_evidence(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+
+    old_record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+    new_record = registry.append_candidate(
+        decision_with_offset_and_time(3600, 3600),
+        recorded_at_utc=BASE_TIME + timedelta(hours=2),
+    )
+
+    assert new_record.event_type == "OFFSET_CHANGE"
+
+    # The same raw broker epoch maps into both explicit evidence windows
+    # when each record's own offset is applied. It must not be guessed.
+    raw_epoch = (
+        int((old_record.evidence_start_utc + timedelta(seconds=30)).timestamp())
+        + old_record.offset_seconds
+    )
+
+    with pytest.raises(
+        BrokerOffsetRegistryError,
+        match="Conflicting historical offset evidence",
+    ):
+        registry.for_broker_time(IDENTITY, raw_epoch)
+
+
+@pytest.mark.parametrize(
+    "raw_timestamp_epoch",
+    [0, -1, True, float("inf"), float("nan"), "123"],
+)
+def test_for_broker_time_rejects_invalid_raw_timestamps(
+    tmp_path,
+    raw_timestamp_epoch,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+
+    with pytest.raises(BrokerOffsetRegistryError):
+        registry.for_broker_time(
+            IDENTITY,
+            raw_timestamp_epoch,
+        )
+
+
 def test_for_time_never_uses_v1_record_as_historical_proof(
     tmp_path,
 ) -> None:
