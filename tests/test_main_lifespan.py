@@ -1598,41 +1598,74 @@ def test_lifespan_skips_adapter_shutdown_when_broker_tick_worker_stop_raises(
     assert "database.dispose" in events
 
 
-def test_single_candle_clock_read_error_does_not_reset_calibration(
+@pytest.mark.parametrize(
+    ("connection_state", "expected_invalidation"),
+    [
+        (MT5ConnectionState.CONNECTED, False),
+        (MT5ConnectionState.DISCONNECTED, True),
+        (MT5ConnectionState.ERROR, True),
+    ],
+)
+def test_candle_clock_read_error_checks_connection_before_invalidation(
     monkeypatch,
+    connection_state,
+    expected_invalidation,
 ):
     stop_event = asyncio.Event()
 
     class Calibrator:
         def __init__(self):
-            self.reset_calls = 0
+            self.invalidation_calls = 0
 
-        def reset(self):
-            self.reset_calls += 1
+        def mark_connection_lost(self):
+            self.invalidation_calls += 1
 
     calibrator = Calibrator()
 
     class Adapter:
+        def __init__(self):
+            self.connection_checks = 0
+            self.invalidation_calls = 0
+
         def get_active_candle_clock_sample(self, symbol):
             raise RuntimeError("Simulated temporary MT5 read failure")
 
-    async def fail_one_read(function, *args):
+        def connection_status(self):
+            self.connection_checks += 1
+            return SimpleNamespace(state=connection_state)
+
+        def mark_candle_clock_connection_lost(self):
+            self.invalidation_calls += 1
+            calibrator.mark_connection_lost()
+
+    adapter = Adapter()
+    to_thread_calls = 0
+
+    async def fake_to_thread(function, *args):
+        nonlocal to_thread_calls
+        to_thread_calls += 1
+
+        if to_thread_calls == 1:
+            raise RuntimeError("Simulated temporary MT5 read failure")
+
         stop_event.set()
-        raise RuntimeError("Simulated temporary MT5 read failure")
+        return function(*args)
 
     monkeypatch.setattr(
         main.asyncio,
         "to_thread",
-        fail_one_read,
+        fake_to_thread,
     )
 
     asyncio.run(
         main._candle_clock_calibration_loop(
-            Adapter(),
+            adapter,
             calibrator,
             "XAUUSD",
             stop_event,
         )
     )
 
-    assert calibrator.reset_calls == 0
+    assert adapter.connection_checks == 1
+    assert adapter.invalidation_calls == int(expected_invalidation)
+    assert calibrator.invalidation_calls == int(expected_invalidation)
