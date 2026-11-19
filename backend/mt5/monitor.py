@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -120,6 +119,8 @@ class MT5ConnectionMonitor:
         if status.state == MT5ConnectionState.CONNECTED:
             self._record_state(status)
             return status
+
+        self._adapter.mark_candle_clock_connection_lost()
 
         logger.warning(
             "MT5 connection is %s; attempting recovery.",
