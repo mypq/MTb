@@ -24,6 +24,25 @@ class FakeMT5Source:
             broker_time_msc=1790000000000,
         )
 
+    def probe_tick_history(
+        self,
+        symbol,
+        *,
+        lookback_days=30,
+        sample_count=1000,
+    ):
+        self.calls.append(("tick_history", symbol, lookback_days, sample_count))
+        return SimpleNamespace(
+            lookback_days=lookback_days,
+            requested_count_per_query=sample_count,
+            all_ticks_count=1000,
+            quote_ticks_count=700,
+            all_ticks_first_time_msc=1794000000000,
+            all_ticks_last_time_msc=1794000001000,
+            quote_ticks_first_time_msc=1794000000100,
+            quote_ticks_last_time_msc=1794000000900,
+        )
+
     def get_closed_candles(self, *args, **kwargs):
         raise AssertionError("Capability probe must not request candles.")
 
@@ -34,7 +53,7 @@ def test_probe_records_only_observed_live_capabilities():
 
     observations = MT5CapabilityProbe(source, registry).probe(" XAUUSD ", "m5")
 
-    assert len(observations) == 6
+    assert len(observations) == 8
     assert registry.get("account_identity").status is CapabilityStatus.AVAILABLE
     assert registry.get("symbol_metadata", symbol="XAUUSD").status is CapabilityStatus.AVAILABLE
     quote = registry.get("live_quote_sample", symbol="XAUUSD")
@@ -43,12 +62,15 @@ def test_probe_records_only_observed_live_capabilities():
 
     candle = registry.get("candle_history", symbol="XAUUSD", timeframe="M5")
     assert candle.status is CapabilityStatus.UNKNOWN
+    assert registry.get("tick_history_source", symbol="XAUUSD").status is CapabilityStatus.AVAILABLE
+    assert registry.get("quote_history_source", symbol="XAUUSD").status is CapabilityStatus.AVAILABLE
     assert registry.get("tick_history_archive", symbol="XAUUSD").status is CapabilityStatus.UNAVAILABLE
     assert registry.get("quote_archive", symbol="XAUUSD").status is CapabilityStatus.UNAVAILABLE
     assert source.calls == [
         "account",
         ("symbol", "XAUUSD"),
         ("quote", "XAUUSD"),
+        ("tick_history", "XAUUSD", 30, 1000),
     ]
 
 
@@ -63,6 +85,9 @@ def test_probe_records_transient_failures_without_claiming_permanent_broker_limi
         def get_broker_time_sample(self, symbol):
             raise RuntimeError("offline")
 
+        def probe_tick_history(self, symbol, *, lookback_days=30, sample_count=1000):
+            raise RuntimeError("offline")
+
     registry = CapabilityRegistry()
     MT5CapabilityProbe(DisconnectedSource(), registry).probe("XAUUSD", "M5")
 
@@ -71,6 +96,8 @@ def test_probe_records_transient_failures_without_claiming_permanent_broker_limi
     assert quote.status is CapabilityStatus.UNAVAILABLE
     assert "retry" in " ".join(quote.limitations).lower()
     assert registry.get("candle_history", symbol="XAUUSD", timeframe="M5").status is CapabilityStatus.UNKNOWN
+    assert registry.get("tick_history_source", symbol="XAUUSD").status is CapabilityStatus.PARTIAL
+    assert registry.get("quote_history_source", symbol="XAUUSD").status is CapabilityStatus.PARTIAL
 
 
 def test_probe_rejects_empty_scope_before_calling_source():
@@ -102,7 +129,11 @@ def test_probe_initializes_candle_capability_for_every_configured_timeframe():
     ]
     assert [item.timeframe for item in candle_observations] == list(frames)
     assert all(item.status is CapabilityStatus.UNKNOWN for item in candle_observations)
-    assert source.calls == ["account", ("symbol", "XAUUSD")]
+    assert source.calls == [
+        "account",
+        ("symbol", "XAUUSD"),
+        ("tick_history", "XAUUSD", 30, 1000),
+    ]
 
 
 def test_probe_rejects_duplicate_or_incomplete_timeframe_scope():
@@ -121,3 +152,40 @@ def test_probe_rejects_duplicate_or_incomplete_timeframe_scope():
             "M5",
             timeframes=("M1", "M15"),
         )
+
+
+
+def test_probe_keeps_empty_history_partial_not_permanently_unavailable():
+    class EmptyHistorySource(FakeMT5Source):
+        def probe_tick_history(
+            self,
+            symbol,
+            *,
+            lookback_days=30,
+            sample_count=1000,
+        ):
+            self.calls.append(("tick_history", symbol, lookback_days, sample_count))
+            return SimpleNamespace(
+                lookback_days=lookback_days,
+                requested_count_per_query=sample_count,
+                all_ticks_count=0,
+                quote_ticks_count=0,
+                all_ticks_first_time_msc=None,
+                all_ticks_last_time_msc=None,
+                quote_ticks_first_time_msc=None,
+                quote_ticks_last_time_msc=None,
+            )
+
+    registry = CapabilityRegistry()
+    MT5CapabilityProbe(EmptyHistorySource(), registry).probe(
+        "XAUUSD",
+        "M5",
+        include_live_quote=False,
+    )
+
+    tick_source = registry.get("tick_history_source", symbol="XAUUSD")
+    quote_source = registry.get("quote_history_source", symbol="XAUUSD")
+    assert tick_source.status is CapabilityStatus.PARTIAL
+    assert quote_source.status is CapabilityStatus.PARTIAL
+    assert "does not prove" in " ".join(tick_source.limitations)
+    assert registry.get("tick_history_archive", symbol="XAUUSD").status is CapabilityStatus.UNAVAILABLE
