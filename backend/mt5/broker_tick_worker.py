@@ -5,10 +5,15 @@ import logging
 from dataclasses import asdict
 from math import isfinite
 from threading import Event, Lock, Thread, current_thread
+from datetime import datetime, timezone
 from time import monotonic_ns
 from typing import TYPE_CHECKING
 
 from backend.market_data.broker_clock import BrokerClockCalibrator
+from backend.market_data.capabilities import (
+    CapabilityStatus,
+    MarketDataCapability,
+)
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.time_models import BrokerTimeSample
 
@@ -60,6 +65,7 @@ class BrokerTickMonitorWorker:
         self._adapter = adapter
         self._monitor = monitor
         self._clock_calibrator = clock_calibrator
+        self._capability_registry = None
         self._symbol = symbol.strip()
         self._interval_seconds = float(interval_seconds)
 
@@ -174,6 +180,23 @@ class BrokerTickMonitorWorker:
             )
 
         snapshot = self._monitor.observe(sample)
+
+        if self._capability_registry is not None:
+            self._capability_registry.record(
+                MarketDataCapability(
+                    capability="live_quote_sample",
+                    status=CapabilityStatus.AVAILABLE,
+                    source="MT5",
+                    checked_at=datetime.now(timezone.utc),
+                    symbol=self._symbol,
+                    account_login=sample.account_login,
+                    broker_server=sample.broker_server,
+                    evidence=(
+                        "The broker tick monitor received a validated live quote sample.",
+                        "broker_time_msc remains a raw broker timestamp and is not asserted to be UTC.",
+                    ),
+                )
+            )
 
         if self._clock_calibrator is not None:
             calibration = self._clock_calibrator.observe(sample)
