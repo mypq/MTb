@@ -175,6 +175,41 @@ class ClockHistoryIncrementalReader:
                 "A verified rebuild is required."
             )
 
+        previous_by_run = {
+            run_id: _sample_from_checkpoint(value)
+            for run_id, value in checkpoint.last_by_run.items()
+        }
+
+        # Once this process has verified the durable prefix, the history
+        # contract guarantees that the MT5 writer only appends while holding
+        # the same cross-process lock. Re-hashing the entire prefix on every
+        # poll needlessly holds that lock longer as the file grows and blocks
+        # the EA. Reuse the verified digest and validate file identity/size;
+        # a same-size rewrite is still rejected through its changed mtime.
+        if self._checkpoint_verified:
+            if (
+                stat_result.st_size == checkpoint.file_size
+                and stat_result.st_mtime_ns != checkpoint.file_mtime_ns
+            ):
+                raise ClockHistoryFileChangedError(
+                    "Clock history file was modified without an append."
+                )
+
+            handle.seek(checkpoint.offset)
+            try:
+                digest = bytes.fromhex(checkpoint.prefix_sha256)
+            except ValueError as exc:
+                raise ClockHistoryCheckpointError(
+                    "Checkpoint prefix integrity hash is invalid."
+                ) from exc
+
+            return (
+                checkpoint.samples_processed,
+                digest,
+                previous_by_run,
+                checkpoint.offset,
+            )
+
         handle.seek(0)
         remaining = checkpoint.offset
         digest = _ZERO_HASH
@@ -197,11 +232,6 @@ class ClockHistoryIncrementalReader:
             raise ClockHistoryFileChangedError(
                 "Previously processed clock history was modified."
             )
-
-        previous_by_run = {
-            run_id: _sample_from_checkpoint(value)
-            for run_id, value in checkpoint.last_by_run.items()
-        }
 
         handle.seek(checkpoint.offset)
 
