@@ -17,11 +17,6 @@ if config.config_file_name is not None:
 
 settings = get_settings()
 
-config.set_main_option(
-    "sqlalchemy.url",
-    settings.DATABASE_URL.replace("%", "%%"),
-)
-
 target_metadata = DatabaseBase.metadata
 
 
@@ -29,7 +24,7 @@ def run_migrations_offline() -> None:
     """Run migrations without creating an Engine."""
 
     context.configure(
-        url=settings.DATABASE_URL,
+        url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
