@@ -67,6 +67,8 @@ def create_status_endpoint(
     chrony_status,
     broker_tick_worker=None,
     broker_candle_clock_calibrator=None,
+    adapter=None,
+    chrony_service=None,
 ):
     settings = SimpleNamespace(
         APP_NAME="GOLD_BOT",
@@ -85,10 +87,10 @@ def create_status_endpoint(
     monkeypatch.setattr(main, "get_settings", lambda: settings)
 
     application = main.create_app()
-    application.state.mt5_adapter = FakeAdapter()
+    application.state.mt5_adapter = adapter or FakeAdapter()
     application.state.mt5_monitor = FakeMonitor()
     application.state.chrony_status_service = (
-        FakeChronyStatusService(chrony_status)
+        chrony_service or FakeChronyStatusService(chrony_status)
     )
     application.state.ntp_verification_monitor = (
         FakeNtpVerificationMonitor()
@@ -433,11 +435,11 @@ def test_system_status_runs_blocking_checks_without_blocking_event_loop(
                 raise AssertionError("Chrony status check was not released.")
             return self.status
 
-    endpoint = create_status_endpoint(monkeypatch, chrony_status)
-    application = endpoint.__globals__["application"]
-    application.state.mt5_adapter = BlockingAdapter()
-    application.state.chrony_status_service = BlockingChronyService(
-        chrony_status
+    endpoint = create_status_endpoint(
+        monkeypatch,
+        chrony_status,
+        adapter=BlockingAdapter(),
+        chrony_service=BlockingChronyService(chrony_status),
     )
 
     async def scenario():
