@@ -531,7 +531,7 @@ async def lifespan(app: FastAPI):
 
             if selected_symbol:
 
-                def start_market_data_workers():
+                async def start_market_data_workers():
                     nonlocal broker_tick_worker
                     nonlocal collector
                     nonlocal collector_task
@@ -541,28 +541,29 @@ async def lifespan(app: FastAPI):
                     if broker_tick_worker is not None:
                         return
 
-                    async def run_capability_probe():
-                        try:
-                            observations = await asyncio.to_thread(
-                                capability_probe.probe,
-                                selected_symbol,
-                                settings.DEFAULT_TIMEFRAME,
-                            )
-                            logger.info(
-                                "MT5 market-data capability probe completed: "
-                                "symbol=%s observations=%d",
-                                selected_symbol,
-                                len(observations),
-                            )
-                        except Exception:
-                            logger.exception(
-                                "MT5 market-data capability probe failed."
-                            )
+                    # Probe account and symbol metadata before starting the
+                    # quote worker. Both use the same MT5 adapter lock; running
+                    # them concurrently can make shutdown wait on a blocked
+                    # quote call. The worker itself records the first live quote.
+                    try:
+                        observations = await asyncio.to_thread(
+                            capability_probe.probe,
+                            selected_symbol,
+                            settings.DEFAULT_TIMEFRAME,
+                            include_live_quote=False,
+                        )
+                        logger.info(
+                            "MT5 market-data capability probe completed: "
+                            "symbol=%s observations=%d",
+                            selected_symbol,
+                            len(observations),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "MT5 market-data capability probe failed."
+                        )
 
-                    capability_probe_task = asyncio.create_task(
-                        run_capability_probe(),
-                        name="mt5-market-data-capability-probe",
-                    )
+                    capability_probe_task = None
 
                     broker_tick_worker = BrokerTickMonitorWorker(
                         adapter=adapter,
@@ -632,7 +633,7 @@ async def lifespan(app: FastAPI):
                 )
 
                 if initial_state == "CONNECTED":
-                    start_market_data_workers()
+                    await start_market_data_workers()
                 else:
 
                     async def start_market_data_when_connected():
@@ -668,7 +669,7 @@ async def lifespan(app: FastAPI):
                         if startup_stop_event.is_set():
                             return
 
-                        start_market_data_workers()
+                        await start_market_data_workers()
 
                     startup_task = asyncio.create_task(
                         start_market_data_when_connected(),
