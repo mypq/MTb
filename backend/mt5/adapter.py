@@ -609,12 +609,15 @@ class MT5Adapter:
         """Retrieve and validate closed candles from MT5.
 
         Position zero is deliberately excluded because it is the
-        currently forming candle. MT5 rate timestamps are Unix
-        timestamps and are converted explicitly to UTC.
+        currently forming candle. The MT5 ``time`` field is treated as a
+        raw broker-server epoch, not as UTC. Each raw timestamp is resolved
+        independently against explicit historical BrokerOffsetRegistry
+        evidence, and only then converted to a UTC datetime. Missing or
+        conflicting historical evidence blocks the entire batch.
 
         VERIFIED here means the returned candle passed the local
-        structural and closed-bar checks. It does not prove broker
-        clock alignment or that no historical bars are missing.
+        structural and closed-bar checks after historical UTC conversion.
+        It does not prove that no historical bars are missing.
         """
         normalized_symbol = symbol.strip()
 
