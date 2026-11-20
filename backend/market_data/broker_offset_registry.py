@@ -887,22 +887,15 @@ class BrokerOffsetRegistry:
                     "Evidence NTP values are invalid."
                 )
 
-            raw_calculated = float(measured)
+            corrected_calculated = float(measured) - ntp_offset
 
-            legacy_calculated = (
-                float(measured) - ntp_offset
+            matches_corrected = (
+                abs(calculated - corrected_calculated) <= 0.001
             )
 
-            matches_raw = (
-                abs(calculated - raw_calculated) <= 0.001
-            )
-
-            matches_legacy = (
-                abs(calculated - legacy_calculated) <= 0.001
-            )
-
-            if not matches_raw and not (
-                allow_legacy_calculation and matches_legacy
+            if not matches_corrected and not (
+                allow_legacy_calculation
+                and abs(calculated - float(measured)) <= 0.001
             ):
                 raise BrokerOffsetRegistryError(
                     "Evidence calculated offset conflicts with raw clocks and NTP."
