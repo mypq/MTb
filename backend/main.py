@@ -796,8 +796,13 @@ def create_app() -> FastAPI:
             None,
         )
 
-        connection = adapter.connection_status()
-        chrony = chrony_service.snapshot()
+        # MT5 status access and Chrony subprocess queries are synchronous.
+        # Keep both operations off the ASGI event loop so slow external
+        # services cannot block unrelated API requests.
+        connection, chrony = await asyncio.gather(
+            asyncio.to_thread(adapter.connection_status),
+            asyncio.to_thread(chrony_service.snapshot),
+        )
 
         if broker_candle_clock_calibrator is not None:
             candle_clock_snapshot = (
