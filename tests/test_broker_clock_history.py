@@ -723,7 +723,7 @@ def test_ntp_observation_age_precision_tolerance(
 
 def test_lock_recovers_file_owned_by_dead_process(tmp_path, monkeypatch):
     lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("pid=424242\\n", encoding="ascii")
+    lock_path.write_text("pid=424242\n", encoding="ascii")
 
     def dead_process(pid):
         assert pid == 424242
@@ -735,7 +735,7 @@ def test_lock_recovers_file_owned_by_dead_process(tmp_path, monkeypatch):
 
     with history_module.exclusive_file_lock(lock_path):
         assert lock_path.read_text(encoding="ascii") == (
-            f"pid={os.getpid()}\\n"
+            f"pid={os.getpid()}\n"
         )
 
     assert not lock_path.exists()
@@ -745,7 +745,7 @@ def test_lock_does_not_recover_file_owned_by_running_process(
     tmp_path, monkeypatch
 ):
     lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("pid=424242\\n", encoding="ascii")
+    lock_path.write_text("pid=424242\n", encoding="ascii")
 
     monkeypatch.setattr(
         history_module, "_process_is_running", lambda pid: True
@@ -761,7 +761,7 @@ def test_lock_does_not_recover_file_owned_by_running_process(
         with history_module.exclusive_file_lock(lock_path):
             pass
 
-    assert lock_path.read_text(encoding="ascii") == "pid=424242\\n"
+    assert lock_path.read_text(encoding="ascii") == "pid=424242\n"
 
 
 def test_lock_does_not_recover_unreadable_or_unknown_metadata(
