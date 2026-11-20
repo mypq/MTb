@@ -601,8 +601,11 @@ async def lifespan(app: FastAPI):
                         symbol=selected_symbol,
                         timeframe=settings.DEFAULT_TIMEFRAME,
                         count=300,
-                        capability_registry=capability_registry,
                     )
+                    # Attach the optional registry after construction so
+                    # existing collector factories and test doubles that
+                    # implement the original constructor remain compatible.
+                    collector._capability_registry = capability_registry
 
                     app.state.market_data_collector = collector
 
@@ -999,7 +1002,19 @@ def create_app() -> FastAPI:
             "ntp_verification": ntp_verification_monitor.snapshot(),
             "market_data_capabilities": [
                 item.model_dump(mode="json")
-                for item in application.state.market_data_capability_registry.snapshot()
+                for item in (
+                    getattr(
+                        application.state,
+                        "market_data_capability_registry",
+                        None,
+                    ).snapshot()
+                    if getattr(
+                        application.state,
+                        "market_data_capability_registry",
+                        None,
+                    ) is not None
+                    else ()
+                )
             ],
         }
 
