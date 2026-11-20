@@ -405,11 +405,15 @@ def test_invalid_minimum_sample_interval_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    "ntp_offset_seconds",
-    [-0.75, 0.75],
+    ("ntp_offset_seconds", "raw_offset_seconds"),
+    [
+        (-0.75, 7199),
+        (0.75, 7201),
+    ],
 )
-def test_candidate_uses_raw_clock_difference_without_ntp_reapplication(
+def test_candidate_corrects_raw_clock_difference_with_ntp(
     ntp_offset_seconds: float,
+    raw_offset_seconds: int,
 ) -> None:
     detector = BrokerOffsetDetector(
         make_verifier(
@@ -417,11 +421,14 @@ def test_candidate_uses_raw_clock_difference_without_ntp_reapplication(
         )
     )
 
-    detector.observe(make_sample(sequence=1))
+    detector.observe(
+        make_sample(sequence=1, offset=raw_offset_seconds)
+    )
     detector.observe(
         make_sample(
             sequence=2,
             monotonic_ms=61000,
+            offset=raw_offset_seconds,
         )
     )
 
@@ -429,6 +436,7 @@ def test_candidate_uses_raw_clock_difference_without_ntp_reapplication(
         make_sample(
             sequence=3,
             monotonic_ms=121000,
+            offset=raw_offset_seconds,
         )
     )
 
@@ -436,7 +444,7 @@ def test_candidate_uses_raw_clock_difference_without_ntp_reapplication(
     assert result.offset_seconds == 7200
 
     assert all(
-        sample.calculated_offset_seconds == 7200.0
+        sample.calculated_offset_seconds == pytest.approx(7200.0 - 0.25 if ntp_offset_seconds == -0.75 else 7200.25)
         for sample in result.evidence_samples
     )
 
