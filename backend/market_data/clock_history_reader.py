@@ -187,7 +187,7 @@ class ClockHistoryIncrementalReader:
         # a row, even when filesystem timestamp resolution is coarse.
         if self._checkpoint_verified and checkpoint.offset:
             handle.seek(checkpoint.offset - 1)
-            if handle.read(1) != b"\\n":
+            if handle.read(1) != b"\n":
                 raise ClockHistoryFileChangedError(
                     "Clock history prefix was modified before the checkpoint."
                 )
