@@ -830,6 +830,9 @@ def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
             assert app.state.market_data_collector is not None
             assert app.state.market_data_collector.symbol == "XAUUSD"
             assert app.state.market_data_collector.timeframe == "M5"
+            assert app.state.market_data_collector.timeframes == (
+                "M1", "M5", "M15", "M30", "H1", "H4", "D1"
+            )
             assert app.state.market_data_collector.count == 300
 
     asyncio.run(run())
