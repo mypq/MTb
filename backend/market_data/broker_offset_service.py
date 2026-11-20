@@ -74,6 +74,11 @@ class BrokerOffsetEvidenceService:
         self._last_error: str | None = None
         self._state = "NOT_STARTED"
 
+    @property
+    def clock_history_path(self) -> Path:
+        """Path monitored for fresh SessionBridge clock samples."""
+        return self._clock_history_path
+
     def _create_reader(self) -> ClockHistoryIncrementalReader:
         return ClockHistoryIncrementalReader(
             self._clock_history_path,
