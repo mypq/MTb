@@ -157,6 +157,9 @@ class FakeMarketDataValidator:
     def __init__(self, session_calendar=None):
         self.session_calendar = session_calendar
 
+    def set_session_calendar(self, session_calendar):
+        self.session_calendar = session_calendar
+
 
 class FakeMarketDataRepository:
     def __init__(self, database):
@@ -2012,3 +2015,147 @@ def test_lifespan_attaches_historical_offset_registry_to_adapter(
             assert app.state.broker_offset_monitor is None
 
     asyncio.run(run())
+
+
+def _write_session_export(path, *, generated_at, offset=7200, symbol="GOLD"):
+    data = {
+        "schema_version": 1,
+        "status": "ok",
+        "symbol": symbol,
+        "generated_at_utc_epoch": generated_at,
+        "server_utc_offset_seconds": offset,
+        "schedule_kind": "weekly_recurring",
+        "days": [
+            {
+                "day_of_week": day,
+                "trade": (
+                    [{"from_seconds": 3720, "to_seconds": 86280}]
+                    if day in (1, 2, 3, 4, 5)
+                    else []
+                ),
+                "quote": [],
+            }
+            for day in range(7)
+        ],
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_session_calendar_reload_replaces_calendar_with_newer_valid_file(
+    monkeypatch,
+    tmp_path,
+):
+    from backend.market_data.session_calendar import MarketSessionCalendar
+
+    path = tmp_path / "sessions.json"
+    now = datetime.now(timezone.utc)
+    _write_session_export(
+        path,
+        generated_at=int(now.timestamp()) - 10,
+        offset=7200,
+    )
+    initial = MarketSessionCalendar.load(
+        path,
+        now_utc=now,
+    )
+    validator = main.MarketDataValidator(session_calendar=initial)
+
+    _write_session_export(
+        path,
+        generated_at=int(now.timestamp()),
+        offset=10800,
+    )
+    monkeypatch.setattr(
+        main,
+        "SESSION_CALENDAR_RELOAD_INTERVAL_SECONDS",
+        0.01,
+    )
+
+    async def run():
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            main._session_calendar_reload_loop(
+                str(path),
+                validator,
+                "GOLD",
+                3600,
+                stop_event,
+            )
+        )
+
+        try:
+            for _ in range(100):
+                if validator.session_calendar.server_utc_offset_seconds == 10800:
+                    break
+                await asyncio.sleep(0.01)
+            assert validator.session_calendar.server_utc_offset_seconds == 10800
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "invalid_export",
+    ["not-json", "wrong-symbol", "older-snapshot"],
+)
+def test_session_calendar_reload_preserves_last_valid_calendar(
+    monkeypatch,
+    tmp_path,
+    invalid_export,
+):
+    from backend.market_data.session_calendar import MarketSessionCalendar
+
+    path = tmp_path / "sessions.json"
+    now = datetime.now(timezone.utc)
+    _write_session_export(
+        path,
+        generated_at=int(now.timestamp()) - 10,
+        offset=7200,
+    )
+    initial = MarketSessionCalendar.load(path, now_utc=now)
+    validator = main.MarketDataValidator(session_calendar=initial)
+
+    if invalid_export == "not-json":
+        path.write_text("not-json", encoding="utf-8")
+    elif invalid_export == "wrong-symbol":
+        _write_session_export(
+            path,
+            generated_at=int(now.timestamp()),
+            offset=3600,
+            symbol="EURUSD",
+        )
+    else:
+        _write_session_export(
+            path,
+            generated_at=int(now.timestamp()) - 20,
+            offset=3600,
+        )
+
+    monkeypatch.setattr(
+        main,
+        "SESSION_CALENDAR_RELOAD_INTERVAL_SECONDS",
+        0.01,
+    )
+
+    async def run():
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(
+            main._session_calendar_reload_loop(
+                str(path),
+                validator,
+                "GOLD",
+                3600,
+                stop_event,
+            )
+        )
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(run())
+    assert validator.session_calendar is initial
+    assert validator.session_calendar.server_utc_offset_seconds == 7200
