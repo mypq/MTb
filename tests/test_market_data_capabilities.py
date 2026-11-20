@@ -49,6 +49,7 @@ def test_capability_normalizes_identity_fields():
         symbol=" XAUUSD ",
         timeframe=" m5 ",
         broker_server=" Demo-Server ",
+        account_login=123456,
     )
     assert capability.capability == "tick_history"
     assert capability.source == "MT5"
