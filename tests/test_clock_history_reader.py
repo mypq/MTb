@@ -333,3 +333,54 @@ def test_max_samples_per_read_limits_appended_batch(tmp_path):
 
     third = reader.read_new()
     assert [sample.sample_sequence for sample in third.samples] == [3]
+
+
+def test_verified_checkpoint_hashes_only_new_rows_on_subsequent_reads(
+    tmp_path,
+    monkeypatch,
+):
+    import backend.market_data.clock_history_reader as reader_module
+
+    history, _, reader = make_reader(tmp_path)
+    write_history(history, [make_row(1), make_row(2)])
+
+    first = reader.read_new()
+    reader.commit(first)
+
+    original_next_hash = reader_module._next_hash
+    hashed_lines = []
+
+    def count_hash(previous, line):
+        hashed_lines.append(line)
+        return original_next_hash(previous, line)
+
+    monkeypatch.setattr(reader_module, "_next_hash", count_hash)
+
+    with history.open("ab") as handle:
+        handle.write(row_bytes(make_row(3)))
+
+    second = reader.read_new()
+
+    assert [sample.sample_sequence for sample in second.samples] == [3]
+    assert len(hashed_lines) == 1
+    assert hashed_lines[0] == row_bytes(make_row(3))
+
+
+def test_verified_checkpoint_rejects_same_size_prefix_rewrite(tmp_path):
+    history, _, reader = make_reader(tmp_path)
+    write_history(history, [make_row(1), make_row(2)])
+
+    batch = reader.read_new()
+    reader.commit(batch)
+
+    content = history.read_bytes()
+    original = b"XMGlobal-MT5 9"
+    replacement = b"XMGlobal-MT5 8"
+    assert original in content
+    history.write_bytes(content.replace(original, replacement, 1))
+
+    with pytest.raises(
+        ClockHistoryFileChangedError,
+        match="modified",
+    ):
+        reader.read_new()
