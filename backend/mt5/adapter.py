@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import isfinite
 from operator import index
 from threading import RLock
@@ -26,6 +26,7 @@ from backend.mt5.models import (
     MT5ConnectionState,
     MT5ConnectionStatus,
     MT5SymbolInfo,
+    MT5TickHistoryProbeResult,
 )
 from backend.mt5.time_models import BrokerTimeSample
 from backend.mt5.timeframes import (
@@ -478,6 +479,164 @@ class MT5Adapter:
             except (AttributeError, TypeError, ValueError, OverflowError) as exc:
                 raise MT5AdapterError(
                     f"MT5 tick data failed validation: {exc}"
+                ) from exc
+
+    def probe_tick_history(
+        self,
+        symbol: str,
+        *,
+        lookback_days: int = 30,
+        sample_count: int = 1000,
+    ) -> MT5TickHistoryProbeResult:
+        """Probe bounded historical tick and Bid/Ask history without saving it.
+
+        The two MT5 requests are capped independently. This is a source
+        availability check only; it does not create an archive or establish
+        broker-clock calibration.
+        """
+        if not isinstance(symbol, str):
+            raise ValueError("Symbol name must be a string.")
+
+        normalized_symbol = symbol.strip()
+        if not normalized_symbol:
+            raise ValueError("Symbol name cannot be empty.")
+
+        if (
+            isinstance(lookback_days, bool)
+            or not isinstance(lookback_days, int)
+            or not 1 <= lookback_days <= 365
+        ):
+            raise ValueError("lookback_days must be between 1 and 365.")
+
+        if (
+            isinstance(sample_count, bool)
+            or not isinstance(sample_count, int)
+            or not 1 <= sample_count <= 1000
+        ):
+            raise ValueError("sample_count must be between 1 and 1000.")
+
+        with self._lock:
+            mt5 = self._require_connection()
+
+            copy_ticks_from = getattr(mt5, "copy_ticks_from", None)
+            copy_ticks_all = getattr(mt5, "COPY_TICKS_ALL", None)
+            copy_ticks_info = getattr(mt5, "COPY_TICKS_INFO", None)
+
+            if (
+                not callable(copy_ticks_from)
+                or copy_ticks_all is None
+                or copy_ticks_info is None
+            ):
+                raise MT5AdapterError(
+                    "The installed MetaTrader5 module does not expose "
+                    "the required historical tick API."
+                )
+
+            checked_at = datetime.now(timezone.utc)
+            lookback_start = checked_at - timedelta(days=lookback_days)
+
+            try:
+                all_ticks = copy_ticks_from(
+                    normalized_symbol,
+                    lookback_start,
+                    sample_count,
+                    copy_ticks_all,
+                )
+                if all_ticks is None:
+                    raise MT5AdapterError(
+                        "MT5 all-ticks history request returned no result. "
+                        f"{self._last_error_message(mt5)}"
+                    )
+
+                quote_ticks = copy_ticks_from(
+                    normalized_symbol,
+                    lookback_start,
+                    sample_count,
+                    copy_ticks_info,
+                )
+                if quote_ticks is None:
+                    raise MT5AdapterError(
+                        "MT5 Bid/Ask history request returned no result. "
+                        f"{self._last_error_message(mt5)}"
+                    )
+
+                def summarize(rows, label: str):
+                    try:
+                        count = len(rows)
+                        if count > sample_count:
+                            raise ValueError(
+                                "MT5 returned more rows than requested."
+                            )
+
+                        field_names = getattr(
+                            getattr(rows, "dtype", None),
+                            "names",
+                            None,
+                        )
+                        if not field_names or "time_msc" not in field_names:
+                            raise ValueError(
+                                "MT5 tick history is missing the time_msc field."
+                            )
+
+                        timestamps = []
+                        for row in rows:
+                            raw_timestamp = row["time_msc"]
+                            if isinstance(raw_timestamp, bool):
+                                raise ValueError(
+                                    "MT5 returned a boolean tick timestamp."
+                                )
+                            timestamp = index(raw_timestamp)
+                            if timestamp <= 0:
+                                raise ValueError(
+                                    "MT5 returned a non-positive tick timestamp."
+                                )
+                            timestamps.append(timestamp)
+
+                        if timestamps != sorted(timestamps):
+                            raise ValueError(
+                                "MT5 tick history timestamps are not ordered."
+                            )
+
+                        return (
+                            count,
+                            timestamps[0] if timestamps else None,
+                            timestamps[-1] if timestamps else None,
+                        )
+                    except Exception as exc:
+                        raise MT5AdapterError(
+                            f"MT5 {label} history response failed validation: "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+
+                all_count, all_first, all_last = summarize(
+                    all_ticks,
+                    "all-ticks",
+                )
+                quote_count, quote_first, quote_last = summarize(
+                    quote_ticks,
+                    "Bid/Ask",
+                )
+
+                return MT5TickHistoryProbeResult(
+                    symbol=normalized_symbol,
+                    checked_at_utc=checked_at,
+                    lookback_start_utc=lookback_start,
+                    lookback_days=lookback_days,
+                    requested_count_per_query=sample_count,
+                    all_ticks_count=all_count,
+                    quote_ticks_count=quote_count,
+                    all_ticks_first_time_msc=all_first,
+                    all_ticks_last_time_msc=all_last,
+                    quote_ticks_first_time_msc=quote_first,
+                    quote_ticks_last_time_msc=quote_last,
+                )
+
+            except MT5AdapterError:
+                raise
+            except Exception as exc:
+                raise MT5AdapterError(
+                    "MT5 historical tick probe failed: "
+                    f"{type(exc).__name__}."
                 ) from exc
 
     def get_symbol_info(self, symbol: str) -> MT5SymbolInfo:
