@@ -12,6 +12,10 @@ import backend.main as main
 from backend.config import Settings
 from backend.database import Database
 from backend.database_models import DatabaseBase
+from backend.market_data.broker_offset_detector import BrokerOffsetDetector
+from backend.market_data.broker_offset_registry import BrokerOffsetRegistry
+from backend.market_data.clock_history import MT5ClockHistorySample
+
 from backend.market_data.broker_candle_clock import (
     BrokerCandleClockCalibrator,
 )
@@ -131,6 +135,56 @@ def make_mt5_module(
     return mt5
 
 
+
+def make_real_offset_decision(
+    *,
+    offset_seconds: int,
+    first_gmt_epoch: int,
+    identity: tuple[int, str, str, int],
+    run_id: str,
+):
+    verifier = NtpTimeVerifier(
+        servers=("ntp-a", "ntp-b", "ntp-c"),
+        wall_clock=lambda: datetime.now(UTC).timestamp(),
+        monotonic_clock=lambda: 100.0,
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+    assert verifier.verify().verified is True
+
+    detector = BrokerOffsetDetector(verifier)
+    decision = None
+
+    for sequence in range(1, 4):
+        gmt_epoch = first_gmt_epoch + (sequence - 1) * 3
+        sample = MT5ClockHistorySample(
+            schema_version=1,
+            run_id=run_id,
+            sample_sequence=sequence,
+            monotonic_ms=1000 + (sequence - 1) * 3000,
+            time_gmt_epoch=gmt_epoch,
+            time_trade_server_epoch=gmt_epoch + offset_seconds,
+            time_current_quote_epoch=gmt_epoch + offset_seconds,
+            time_local_epoch=gmt_epoch,
+            server_utc_offset_seconds=offset_seconds,
+            account_login=identity[0],
+            broker_server=identity[1],
+            symbol=identity[2],
+            terminal_build=identity[3],
+            terminal_connected=True,
+        )
+        decision = detector.observe(sample)
+
+    assert decision is not None
+    assert decision.candidate_ready is True
+    assert decision.offset_seconds == offset_seconds
+    return decision
+
+
 def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
     tmp_path,
     monkeypatch,
@@ -159,6 +213,55 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 
     raw_closed_timestamps: list[int] = []
     mt5 = make_mt5_module(raw_closed_timestamps)
+
+    # Use two genuine registry records with different historical offsets.
+    # The two M5 candle opens are 5 minutes apart and each falls inside
+    # its own independently verified evidence interval.
+    now_epoch = int(datetime.now(UTC).timestamp())
+    latest_closed_utc = (now_epoch // 300) * 300 - 300
+    first_candle_utc = latest_closed_utc - 300
+    second_candle_utc = latest_closed_utc
+    identity = (123456, "Demo-Server", "XAUUSD", 6316)
+
+    registry = BrokerOffsetRegistry(
+        tmp_path / "real-broker-offsets.jsonl"
+    )
+    baseline = registry.append_candidate(
+        make_real_offset_decision(
+            offset_seconds=7200,
+            first_gmt_epoch=first_candle_utc - 3,
+            identity=identity,
+            run_id="integration-baseline",
+        ),
+        recorded_at_utc=datetime.now(UTC),
+    )
+    offset_change = registry.append_candidate(
+        make_real_offset_decision(
+            offset_seconds=3600,
+            first_gmt_epoch=second_candle_utc - 3,
+            identity=identity,
+            run_id="integration-offset-change",
+        ),
+        recorded_at_utc=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    assert baseline.event_type == "BASELINE"
+    assert offset_change.event_type == "OFFSET_CHANGE"
+
+    original_copy_rates = mt5.copy_rates_from_pos.side_effect
+
+    def copy_rates_with_historical_offsets(symbol, timeframe, position, count):
+        if timeframe == mt5.TIMEFRAME_M5 and position == 1:
+            rates = [
+                make_rate(first_candle_utc + 7200),
+                make_rate(second_candle_utc + 3600),
+            ]
+            raw_closed_timestamps.extend(
+                [first_candle_utc + 7200, second_candle_utc + 3600]
+            )
+            return rates
+        return original_copy_rates(symbol, timeframe, position, count)
+
+    mt5.copy_rates_from_pos.side_effect = copy_rates_with_historical_offsets
 
     adapter = MT5Adapter(
         settings=make_settings(),
@@ -204,33 +307,17 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
 
         adapter.set_candle_clock_calibrator(calibrator)
 
-        # Require a valid independent broker-offset confirmation.
-        confirmation = SimpleNamespace(
-            event_type="CONFIRMATION",
-            offset_seconds=BROKER_OFFSET_SECONDS,
-            evidence_sample_count=3,
-            evidence_samples=({}, {}, {}),
-            ntp_evidence={
-                "verified": True,
-                "sample_count": 3,
-                "servers": [
-                    "ntp-a",
-                    "ntp-b",
-                    "ntp-c",
-                ],
-            },
-        )
-
-        registry = Mock()
-        registry.for_broker_times.side_effect = (
-            lambda identity, timestamps: tuple(
-                confirmation for _ in timestamps
-            )
-        )
-
+        # The adapter must resolve each raw candle timestamp against
+        # the actual append-only registry, not a mocked latest offset.
         adapter.set_broker_offset_registry(registry)
 
-        registry.latest.assert_not_called()
+        assert registry.for_broker_times(
+            identity,
+            (
+                first_candle_utc + 7200,
+                second_candle_utc + 3600,
+            ),
+        ) == (baseline, offset_change)
 
         database = Database(
             f"sqlite:///{(tmp_path / 'candle_utc.db').as_posix()}"
@@ -270,8 +357,7 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             assert len(raw_closed_timestamps) == 2
 
             expected_utc_epochs = sorted(
-                raw_timestamp - BROKER_OFFSET_SECONDS
-                for raw_timestamp in raw_closed_timestamps
+                (first_candle_utc, second_candle_utc)
             )
 
             stored_utc_epochs = []
@@ -293,6 +379,53 @@ def test_mt5_candle_clock_is_calibrated_converted_and_persisted_as_utc(
             assert stored_candles[0].timestamp < (
                 stored_candles[1].timestamp
             )
+
+            # Both candles were converted with their own historical
+            # offsets, including the offset-change record.
+            assert int(stored_candles[0].timestamp.timestamp()) == (
+                first_candle_utc
+            )
+            assert int(stored_candles[1].timestamp.timestamp()) == (
+                second_candle_utc
+            )
+
+            # The API serializes the same UTC instants without applying
+            # another broker-offset conversion.
+            monkeypatch.setattr(
+                main,
+                "get_settings",
+                lambda: SimpleNamespace(
+                    APP_NAME="GOLD BOT",
+                    DEFAULT_TIMEFRAME="M5",
+                    MT5_SYMBOL="XAUUSD",
+                ),
+            )
+            application = main.create_app()
+            application.state.market_data_service = service
+            application.state.market_data_repository = repository
+            application.dependency_overrides[
+                main.verify_api_token
+            ] = lambda: None
+            client = TestClient(application)
+
+            api_response = client.get(
+                "/api/v1/market-data/candles",
+                params={
+                    "symbol": "XAUUSD",
+                    "timeframe": "M5",
+                    "count": 2,
+                },
+            )
+            assert api_response.status_code == 200
+            api_timestamps = [
+                datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00"))
+                for item in api_response.json()["batch"]["candles"]
+            ]
+            assert [
+                int(value.timestamp()) for value in api_timestamps
+            ] == expected_utc_epochs
+            assert all(value.utcoffset().total_seconds() == 0 for value in api_timestamps)
+            client.close()
 
             # Losing independent NTP trust must block further
             # candle collection and prevent additional persistence.
