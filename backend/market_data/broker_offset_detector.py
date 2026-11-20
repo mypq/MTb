@@ -158,6 +158,11 @@ class BrokerOffsetDetector:
             ]
         ] = deque(maxlen=required_samples)
 
+    @property
+    def has_trusted_ntp(self) -> bool:
+        """Whether the verifier currently has a trusted NTP result."""
+        return self._ntp.is_trusted()
+
     def observe(
         self,
         sample: MT5ClockHistorySample,
