@@ -49,6 +49,72 @@ from backend.security import verify_api_token
 logger = logging.getLogger(__name__)
 
 BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
+SESSION_CALENDAR_RELOAD_INTERVAL_SECONDS = 60
+
+
+async def _session_calendar_reload_loop(
+    path: str,
+    validator: MarketDataValidator,
+    expected_symbol: str,
+    max_age_seconds: int,
+    stop_event: asyncio.Event,
+) -> None:
+    """Reload valid broker sessions without replacing the last good snapshot."""
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=SESSION_CALENDAR_RELOAD_INTERVAL_SECONDS,
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            candidate = await asyncio.to_thread(
+                MarketSessionCalendar.load,
+                path,
+                max_age_seconds=max_age_seconds,
+            )
+
+            if candidate.symbol.strip().casefold() != expected_symbol.strip().casefold():
+                raise MarketSessionCalendarError(
+                    "Session calendar symbol changed while Backend was running."
+                )
+
+            current = validator.session_calendar
+            if (
+                current is not None
+                and candidate.generated_at_utc <= current.generated_at_utc
+            ):
+                logger.debug(
+                    "Ignoring unchanged or older broker session calendar: file=%s",
+                    path,
+                )
+                continue
+
+            validator.set_session_calendar(candidate)
+            logger.info(
+                "Broker session calendar refreshed: symbol=%s file=%s generated_at=%s",
+                candidate.symbol,
+                path,
+                candidate.generated_at_utc.isoformat(),
+            )
+        except MarketSessionCalendarError as exc:
+            logger.warning(
+                "Broker session calendar refresh rejected; keeping last valid "
+                "calendar: file=%s reason=%s",
+                path,
+                exc,
+            )
+        except Exception:
+            logger.exception(
+                "Broker session calendar refresh failed; keeping last valid "
+                "calendar: file=%s",
+                path,
+            )
+
+
 
 
 async def _database_backup_loop(
@@ -342,6 +408,25 @@ async def lifespan(app: FastAPI):
         session_calendar=session_calendar
     )
 
+    session_calendar_stop_event = asyncio.Event()
+    session_calendar_task = None
+
+    if sessions_file and session_calendar is not None:
+        session_calendar_task = asyncio.create_task(
+            _session_calendar_reload_loop(
+                sessions_file,
+                market_data_validator,
+                session_calendar.symbol,
+                getattr(
+                    settings,
+                    "MT5_SESSIONS_MAX_AGE_SECONDS",
+                    604800,
+                ),
+                session_calendar_stop_event,
+            ),
+            name="broker-session-calendar-reload",
+        )
+
     market_data_service = MarketDataService(
         source=adapter,
         validator=market_data_validator,
@@ -550,9 +635,18 @@ async def lifespan(app: FastAPI):
     finally:
         try:
             startup_stop_event.set()
+            session_calendar_stop_event.set()
             broker_offset_stop_event.set()
             ntp_stop_event.set()
             candle_clock_stop_event.set()
+
+            if session_calendar_task is not None:
+                try:
+                    await session_calendar_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop broker session calendar reload task."
+                    )
 
             if broker_offset_task is not None:
                 try:
