@@ -215,8 +215,8 @@ class DatabaseBackupService:
                         database_disposed = False
                     except Exception as recovery_exc:
                         raise DatabaseBackupError(
-                            "Restore or migration failed and the original "
-                            "primary database could not be recovered."
+                            "Restore or migration failed and the original primary "
+                            "database could not be reinitialized."
                         ) from recovery_exc
                     raise
 
