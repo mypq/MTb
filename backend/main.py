@@ -411,22 +411,6 @@ async def lifespan(app: FastAPI):
     session_calendar_stop_event = asyncio.Event()
     session_calendar_task = None
 
-    if sessions_file and session_calendar is not None:
-        session_calendar_task = asyncio.create_task(
-            _session_calendar_reload_loop(
-                sessions_file,
-                market_data_validator,
-                session_calendar.symbol,
-                getattr(
-                    settings,
-                    "MT5_SESSIONS_MAX_AGE_SECONDS",
-                    604800,
-                ),
-                session_calendar_stop_event,
-            ),
-            name="broker-session-calendar-reload",
-        )
-
     market_data_service = MarketDataService(
         source=adapter,
         validator=market_data_validator,
@@ -465,6 +449,22 @@ async def lifespan(app: FastAPI):
     try:
         database.initialize()
         upgrade_database()
+
+        if sessions_file and session_calendar is not None:
+            session_calendar_task = asyncio.create_task(
+                _session_calendar_reload_loop(
+                    sessions_file,
+                    market_data_validator,
+                    session_calendar.symbol,
+                    getattr(
+                        settings,
+                        "MT5_SESSIONS_MAX_AGE_SECONDS",
+                        604800,
+                    ),
+                    session_calendar_stop_event,
+                ),
+                name="broker-session-calendar-reload",
+            )
 
         ntp_task = asyncio.create_task(
             ntp_verification_monitor.run(ntp_stop_event),
