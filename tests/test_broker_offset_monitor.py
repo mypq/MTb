@@ -267,10 +267,10 @@ def test_monitor_pauses_stale_history_and_resumes_when_file_updates(
 ):
     async def scenario():
         monitor = make_monitor(tmp_path)
-        monitor._clock_history_max_age_seconds = 1
+        monitor._clock_history_max_age_seconds = 5
         history_path = monitor._clock_history_path
         history_path.write_text("header\\n", encoding="utf-8")
-        old_time = time.time() - 10
+        old_time = time.time() - 20
         os.utime(history_path, (old_time, old_time))
 
         stop_event = asyncio.Event()
@@ -296,9 +296,11 @@ def test_monitor_pauses_stale_history_and_resumes_when_file_updates(
             assert monitor.source_freshness().state == "STALE"
             assert poll_calls == 0
 
-            fresh_time = time.time()
-            os.utime(history_path, (fresh_time, fresh_time))
-            await asyncio.sleep(0.03)
+            history_path.write_text("header resumed\\n", encoding="utf-8")
+            for _ in range(100):
+                if poll_calls:
+                    break
+                await asyncio.sleep(0.01)
             assert poll_calls == 1
             assert monitor.source_freshness().state == "FRESH"
         finally:
