@@ -39,8 +39,11 @@ def make_monitor(tmp_path, interval=0.01):
         ),
     )
 
+    history_path = tmp_path / "clock_history.csv"
+    history_path.write_text("invalid\\n", encoding="utf-8")
+
     service = BrokerOffsetEvidenceService(
-        tmp_path / "clock_history.csv",
+        history_path,
         BrokerOffsetDetector(verifier),
         BrokerOffsetRegistry(tmp_path / "offsets.jsonl"),
     )
@@ -139,6 +142,7 @@ def test_unexpected_poll_failure_is_visible_in_monitor_snapshot(
 ):
     async def scenario():
         monitor = make_monitor(tmp_path)
+        monitor._clock_history_path.write_text("fresh invalid\\n", encoding="utf-8")
 
         def fail_poll():
             raise RuntimeError("Simulated unexpected poll failure.")
@@ -233,6 +237,7 @@ def test_monitor_logs_all_recorded_event_states(
 def test_monitor_reports_missing_history_without_polling(tmp_path, monkeypatch):
     async def scenario():
         monitor = make_monitor(tmp_path)
+        monitor._clock_history_path.unlink()
         stop_event = asyncio.Event()
 
         def unexpected_poll():
