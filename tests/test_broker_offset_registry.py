@@ -301,32 +301,48 @@ def test_v1_and_v3_records_can_coexist(tmp_path) -> None:
     assert records[1] == new_record
 
 
-def test_overlapping_confirmation_evidence_is_rejected(
+def test_same_run_sliding_confirmation_extends_contiguous_coverage(
     tmp_path,
 ) -> None:
-    registry = BrokerOffsetRegistry(
-        tmp_path / "offsets.jsonl"
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+    detector = BrokerOffsetDetector(make_verifier())
+    decisions = []
+    for sequence in range(1, 5):
+        decision = detector.observe(make_sample(sequence))
+        if decision.candidate_ready:
+            decisions.append(decision)
+
+    assert len(decisions) == 2
+    first = registry.append_candidate(
+        decisions[0],
+        recorded_at_utc=BASE_TIME + timedelta(minutes=2),
+    )
+    second = registry.append_candidate(
+        decisions[1],
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
     )
 
+    assert second.event_type == "CONFIRMATION"
+    assert second.evidence_start_utc == first.evidence_samples[1]["time_gmt_epoch"] * 0 + first.evidence_start_utc + timedelta(seconds=60)
+    assert second.evidence_end_utc > first.evidence_end_utc
+    assert registry.load() == (first, second)
+
+
+def test_overlapping_confirmation_from_another_run_is_rejected(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
     first = registry.append_candidate(
         make_decision(),
         recorded_at_utc=BASE_TIME,
     )
+    unrelated = decision_with_run_id(make_decision(), "different-run-id")
 
-    overlapping = decision_with_run_id(
-        make_decision(),
-        "different-run-id",
-    )
-
-    with pytest.raises(
-        BrokerOffsetRegistryError,
-        match="overlaps or precedes",
-    ):
+    with pytest.raises(BrokerOffsetRegistryError, match="overlaps or precedes"):
         registry.append_candidate(
-            overlapping,
+            unrelated,
             recorded_at_utc=BASE_TIME + timedelta(minutes=1),
         )
-
     assert registry.load() == (first,)
 
 

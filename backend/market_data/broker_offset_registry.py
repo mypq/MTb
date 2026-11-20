@@ -375,6 +375,15 @@ class BrokerOffsetRegistry:
                 if (
                     latest_evidence_end is not None
                     and start <= latest_evidence_end
+                    and not self._is_sliding_same_offset_confirmation(
+                        previous,
+                        run_id=decision.run_id,
+                        offset_seconds=offset,
+                        evidence_samples=samples,
+                        evidence_start_utc=start,
+                        evidence_end_utc=end,
+                        latest_evidence_end_utc=latest_evidence_end,
+                    )
                 ):
                     raise BrokerOffsetRegistryError(
                         "New evidence overlaps or precedes previously stored evidence."
@@ -1017,6 +1026,50 @@ class BrokerOffsetRegistry:
                     "NTP summary does not match the final evidence sample."
                 )
 
+    @staticmethod
+    def _is_sliding_same_offset_confirmation(
+        previous: BrokerOffsetRecord | None,
+        *,
+        run_id: str,
+        offset_seconds: int,
+        evidence_samples: tuple[dict[str, Any], ...],
+        evidence_start_utc: datetime,
+        evidence_end_utc: datetime,
+        latest_evidence_end_utc: datetime | None,
+    ) -> bool:
+        """Allow only a one-sample slide over the same verified clock run."""
+        if (
+            previous is None
+            or previous.schema_version != 3
+            or previous.evidence_end_utc is None
+            or latest_evidence_end_utc is None
+            or previous.run_id != run_id
+            or previous.offset_seconds != offset_seconds
+            or len(previous.evidence_samples) != 3
+            or len(evidence_samples) != 3
+        ):
+            return False
+
+        old = previous.evidence_samples
+        new = evidence_samples
+        try:
+            old_sequences = [item["sample_sequence"] for item in old]
+            new_sequences = [item["sample_sequence"] for item in new]
+        except (KeyError, TypeError):
+            return False
+
+        return (
+            all(isinstance(value, int) and not isinstance(value, bool)
+                for value in old_sequences + new_sequences)
+            and new_sequences == [
+                old_sequences[1], old_sequences[2], old_sequences[2] + 1
+            ]
+            and old[1:] == new[:2]
+            and evidence_start_utc <= latest_evidence_end_utc
+            and evidence_end_utc > latest_evidence_end_utc
+            and evidence_end_utc > previous.evidence_end_utc
+        )
+
     @classmethod
     def _validate_event_history(
         cls,
@@ -1024,12 +1077,22 @@ class BrokerOffsetRegistry:
         previous: BrokerOffsetRecord | None,
         latest_evidence_end_utc: datetime | None = None,
     ) -> None:
-        # Evidence windows must never overlap any earlier evidence
-        # for the same identity, even when legacy v1 records intervene.
-        if (
+        # Overlap is allowed only for a same-run, same-offset sliding
+        # confirmation sharing the exact two prior samples. Legacy records,
+        # new runs, offset changes, and non-identical overlap remain blocked.
+        overlaps = (
             latest_evidence_end_utc is not None
             and record.evidence_start_utc is not None
             and record.evidence_start_utc <= latest_evidence_end_utc
+        )
+        if overlaps and not cls._is_sliding_same_offset_confirmation(
+            previous,
+            run_id=record.run_id,
+            offset_seconds=record.offset_seconds,
+            evidence_samples=record.evidence_samples,
+            evidence_start_utc=record.evidence_start_utc,
+            evidence_end_utc=record.evidence_end_utc,
+            latest_evidence_end_utc=latest_evidence_end_utc,
         ):
             raise BrokerOffsetRegistryError(
                 "Stored evidence overlaps or precedes the previous identity evidence."

@@ -185,7 +185,7 @@ def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
     assert len(registry.load()) == 1
 
 
-def test_overlapping_same_offset_candidate_does_not_record_confirmation(
+def test_overlapping_same_offset_candidate_extends_registry_coverage(
     tmp_path,
 ):
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
@@ -195,17 +195,16 @@ def test_overlapping_same_offset_candidate_does_not_record_confirmation(
     assert first.error is None
     assert len(registry.load()) == 1
 
-    # Sequence 4 creates a sliding candidate window of 2, 3, 4.
-    # It overlaps the baseline window 1, 2, 3 and must not be stored.
+    # The rolling 2,3,4 window shares exactly two immutable samples.
     append_rows(history_path, [make_row(4, 7200)])
-
     second = service.poll_once()
     records = registry.load()
 
     assert second.error is None
-    assert second.state == "WAITING_FOR_NEW_EVIDENCE"
-    assert len(records) == 1
-    assert records[0].event_type == "BASELINE"
+    assert second.state == "CONFIRMATION_RECORDED"
+    assert len(records) == 2
+    assert records[1].evidence_start_utc <= records[0].evidence_end_utc
+    assert records[1].evidence_end_utc > records[0].evidence_end_utc
 
 
 def test_three_independent_same_offset_samples_record_confirmation(

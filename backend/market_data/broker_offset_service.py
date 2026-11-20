@@ -192,7 +192,50 @@ class BrokerOffsetEvidenceService:
         ):
             return False
 
-        return min(candidate_sequences) > max(previous_sequences)
+        if decision.offset_seconds != latest.offset_seconds:
+            return False
+
+        # A normal non-overlapping window remains valid.
+        if min(candidate_sequences) > max(previous_sequences):
+            return True
+
+        # A rolling window may advance by one sample only when its two
+        # shared samples are byte-for-byte equivalent evidence.
+        return (
+            decision.run_id == latest.run_id
+            and candidate_sequences == [
+                previous_sequences[1],
+                previous_sequences[2],
+                previous_sequences[2] + 1,
+            ]
+            and tuple(
+                self._detector_sample_dict(item)
+                for item in decision.evidence_samples[:2]
+            ) == tuple(previous_samples[1:])
+        )
+
+    @staticmethod
+    def _detector_sample_dict(sample) -> dict:
+        """Serialize detector evidence exactly as the registry stores it."""
+        return {
+            "run_id": sample.run_id,
+            "sample_sequence": sample.sample_sequence,
+            "monotonic_ms": sample.monotonic_ms,
+            "time_gmt_epoch": sample.time_gmt_epoch,
+            "time_trade_server_epoch": sample.time_trade_server_epoch,
+            "time_current_quote_epoch": sample.time_current_quote_epoch,
+            "time_local_epoch": sample.time_local_epoch,
+            "server_utc_offset_seconds": sample.server_utc_offset_seconds,
+            "account_login": sample.account_login,
+            "broker_server": sample.broker_server,
+            "symbol": sample.symbol,
+            "terminal_build": sample.terminal_build,
+            "terminal_connected": sample.terminal_connected,
+            "calculated_offset_seconds": sample.calculated_offset_seconds,
+            "ntp_offset_seconds": sample.ntp_offset_seconds,
+            "ntp_uncertainty_seconds": sample.ntp_uncertainty_seconds,
+            "ntp_checked_at_unix": sample.ntp_checked_at_unix,
+        }
 
     def _process_sample(
         self,
