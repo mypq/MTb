@@ -351,16 +351,21 @@ async def lifespan(app: FastAPI):
             interval_seconds=(
                 settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS
             ),
+            clock_history_max_age_seconds=(
+                settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS
+            ),
         )
 
         logger.info(
             "Broker offset evidence pipeline configured: "
             "history_file=%s registry_file=%s "
-            "interval_seconds=%s historical_candle_conversion=ENABLED "
+            "interval_seconds=%s clock_history_max_age_seconds=%s "
+            "historical_candle_conversion=ENABLED "
             "market_calendar_authorization=DISABLED trading_authorization=DISABLED",
             clock_history_file,
             settings.BROKER_OFFSET_REGISTRY_FILE,
             settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS,
+            settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS,
         )
     else:
         logger.warning(
