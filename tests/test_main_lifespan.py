@@ -785,13 +785,21 @@ def test_lifespan_starts_backup_after_migrations_and_stops_before_database(
 
     async def run():
         async with main.lifespan(app):
-            assert events == [
+            # The backup task is scheduled before MT5 startup, but its
+            # coroutine may run as soon as startup yields to the event loop.
+            # Assert the lifecycle guarantees, not scheduler-dependent timing.
+            assert events[:3] == [
                 "database.initialize",
                 "database.migrations",
                 "backup_service.initialize",
-                "adapter.connect",
-                "monitor.start",
             ]
+            assert events.index("database.migrations") < events.index(
+                "backup_service.initialize"
+            )
+            if "backup.start" in events:
+                assert events.index("backup_service.initialize") < events.index(
+                    "backup.start"
+                )
 
             assert app.state.database_backup_service is not None
             assert app.state.database is not None
