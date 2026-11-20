@@ -60,3 +60,33 @@ class MT5SymbolInfo(BaseModel):
     volume_step: float = Field(gt=0)
     spread: int = Field(ge=0)
     visible: bool
+
+
+
+class MT5TickHistoryProbeResult(BaseModel):
+    """Bounded, non-persistent result from MT5 historical tick APIs.
+
+    Historical API timestamps are retained as raw millisecond values in
+    this result. The probe does not feed them into broker-clock calibration.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    checked_at_utc: datetime
+    lookback_start_utc: datetime
+    lookback_days: int = Field(ge=1, le=365)
+    requested_count_per_query: int = Field(ge=1, le=1000)
+    all_ticks_count: int = Field(ge=0)
+    quote_ticks_count: int = Field(ge=0)
+    all_ticks_first_time_msc: int | None = Field(default=None, gt=0)
+    all_ticks_last_time_msc: int | None = Field(default=None, gt=0)
+    quote_ticks_first_time_msc: int | None = Field(default=None, gt=0)
+    quote_ticks_last_time_msc: int | None = Field(default=None, gt=0)
+
+    @field_validator("checked_at_utc", "lookback_start_utc")
+    @classmethod
+    def require_utc_datetime(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+            raise ValueError("Probe datetimes must be timezone-aware UTC.")
+        return value
