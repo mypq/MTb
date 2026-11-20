@@ -514,6 +514,7 @@ async def lifespan(app: FastAPI):
             initial_status = adapter.connect()
 
             monitor.start()
+
             selected_symbol = settings.MT5_SYMBOL.strip()
 
             if selected_symbol:
@@ -762,6 +763,7 @@ async def lifespan(app: FastAPI):
                 logger.exception(
                     "Failed to dispose database engine."
                 )
+
 
 def create_app() -> FastAPI:
     settings = get_settings()
