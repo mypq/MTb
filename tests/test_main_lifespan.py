@@ -1988,3 +1988,27 @@ def test_lifespan_skips_mt5_shutdown_while_real_broker_worker_is_blocked(
 
     assert not worker_instances[0].is_running
     assert not adapter_shutdown_called.is_set()
+
+
+
+def test_lifespan_attaches_historical_offset_registry_to_adapter(
+    monkeypatch,
+):
+    from backend.market_data.broker_offset_registry import (
+        BrokerOffsetRegistry,
+    )
+
+    app, _ = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            registry = app.state.mt5_adapter.broker_offset_registry
+
+            assert isinstance(registry, BrokerOffsetRegistry)
+            assert app.state.broker_offset_service is None
+            assert app.state.broker_offset_monitor is None
+
+    asyncio.run(run())
