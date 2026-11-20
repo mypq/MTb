@@ -210,7 +210,7 @@ class BrokerOffsetEvidenceService:
                 previous_sequences[2] + 1,
             ]
             and tuple(
-                self._detector_sample_dict(item)
+                BrokerOffsetEvidenceService._detector_sample_dict(item)
                 for item in decision.evidence_samples[:2]
             ) == tuple(previous_samples[1:])
         )
