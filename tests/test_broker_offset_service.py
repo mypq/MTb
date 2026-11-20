@@ -207,7 +207,7 @@ def test_overlapping_same_offset_candidate_extends_registry_coverage(
     assert records[1].evidence_end_utc > records[0].evidence_end_utc
 
 
-def test_three_independent_same_offset_samples_record_confirmation(
+def test_sliding_same_offset_windows_extend_coverage_for_each_sample(
     tmp_path,
 ):
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
@@ -217,7 +217,7 @@ def test_three_independent_same_offset_samples_record_confirmation(
     assert first.error is None
     assert len(registry.load()) == 1
 
-    # The next two samples complete the independent window 4, 5, 6.
+    # Each new sample advances the verified three-sample window by one.
     append_rows(
         history_path,
         [
@@ -232,23 +232,28 @@ def test_three_independent_same_offset_samples_record_confirmation(
 
     assert snapshot.error is None
     assert snapshot.state == "CONFIRMATION_RECORDED"
-    assert len(records) == 2
+    assert len(records) == 4
 
-    baseline, confirmation = records
-
+    baseline, *confirmations = records
     assert baseline.event_type == "BASELINE"
     assert baseline.offset_seconds == 7200
 
-    assert confirmation.event_type == "CONFIRMATION"
-    assert confirmation.offset_seconds == 7200
-    assert confirmation.previous_offset_seconds == 7200
-    assert confirmation.evidence_sample_count == 3
-
-    sequences = [
-        item["sample_sequence"]
-        for item in confirmation.evidence_samples
+    expected_windows = ([2, 3, 4], [3, 4, 5], [4, 5, 6])
+    actual_windows = [
+        [item["sample_sequence"] for item in record.evidence_samples]
+        for record in confirmations
     ]
-    assert sequences == [4, 5, 6]
+    assert actual_windows == [list(window) for window in expected_windows]
+
+    previous_end = baseline.evidence_end_utc
+    for confirmation in confirmations:
+        assert confirmation.event_type == "CONFIRMATION"
+        assert confirmation.offset_seconds == 7200
+        assert confirmation.previous_offset_seconds == 7200
+        assert confirmation.evidence_sample_count == 3
+        assert confirmation.evidence_start_utc <= previous_end
+        assert confirmation.evidence_end_utc > previous_end
+        previous_end = confirmation.evidence_end_utc
 
 
 def test_three_new_samples_record_offset_change(tmp_path, monkeypatch):
