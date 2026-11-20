@@ -552,6 +552,7 @@ async def lifespan(app: FastAPI):
                             selected_symbol,
                             settings.DEFAULT_TIMEFRAME,
                             include_live_quote=False,
+                            timeframes=SUPPORTED_TIMEFRAMES,
                         )
                         logger.info(
                             "MT5 market-data capability probe completed: "
