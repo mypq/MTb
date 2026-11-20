@@ -11,6 +11,7 @@ from uuid import uuid4
 from sqlalchemy.engine import make_url
 
 from backend.database import Database
+from backend.database_migrations import upgrade_database
 
 
 class DatabaseBackupError(RuntimeError):
@@ -154,6 +155,10 @@ class DatabaseBackupService:
             self._database_path.parent
             / f".{self._database_path.name}.restore.{uuid4().hex}.tmp"
         )
+        rollback_path = (
+            self._database_path.parent
+            / f".{self._database_path.name}.rollback.{uuid4().hex}.tmp"
+        )
 
         try:
             self._database_path.parent.mkdir(
@@ -173,6 +178,11 @@ class DatabaseBackupService:
                 database_disposed = False
 
                 try:
+                    # Preserve the current primary database so a failed
+                    # migration can roll back the complete restore operation.
+                    self._write_backup(rollback_path)
+                    self._verify_backup(rollback_path)
+
                     self._database.dispose()
                     database_disposed = True
 
@@ -184,29 +194,44 @@ class DatabaseBackupService:
                     self._database.initialize()
                     database_disposed = False
 
+                    # A structurally valid SQLite backup may still carry an
+                    # older schema. Bring that restored database to the
+                    # application's current Alembic head before returning.
+                    upgrade_database(str(self._database.engine.url))
+
                 except Exception:
-                    if database_disposed:
-                        try:
-                            self._database.initialize()
-                            database_disposed = False
-                        except Exception as recovery_exc:
-                            raise DatabaseBackupError(
-                                "Restore failed and the primary database "
-                                "could not be reinitialized."
-                            ) from recovery_exc
+                    try:
+                        if not database_disposed:
+                            self._database.dispose()
+                            database_disposed = True
+
+                        if rollback_path.is_file():
+                            os.replace(
+                                rollback_path,
+                                self._database_path,
+                            )
+
+                        self._database.initialize()
+                        database_disposed = False
+                    except Exception as recovery_exc:
+                        raise DatabaseBackupError(
+                            "Restore or migration failed and the original "
+                            "primary database could not be recovered."
+                        ) from recovery_exc
                     raise
 
         except DatabaseBackupError:
             raise
         except Exception as exc:
             raise DatabaseBackupError(
-                "Failed to restore the primary database."
+                "Failed to restore and migrate the primary database."
             ) from exc
         finally:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            for path in (temporary_path, rollback_path):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _prune_backups(self) -> None:
         backups = sorted(
