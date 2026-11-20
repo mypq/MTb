@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 from math import isfinite
 from typing import TYPE_CHECKING
 
+from backend.market_data.capabilities import (
+    CapabilityRegistry,
+    CapabilityStatus,
+    MarketDataCapability,
+)
 from backend.market_data.repository import (
     MarketDataRepository,
     MarketDataSaveResult,
@@ -77,6 +82,7 @@ class MarketDataCollector:
         symbol: str,
         timeframe: str,
         count: int = 300,
+        capability_registry: CapabilityRegistry | None = None,
     ) -> None:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
@@ -96,6 +102,7 @@ class MarketDataCollector:
         self._timeframe = normalized_timeframe
         self._count = count
         self._timeframe_seconds = frame_seconds
+        self._capability_registry = capability_registry
 
     @property
     def symbol(self) -> str:
@@ -119,6 +126,11 @@ class MarketDataCollector:
         )
 
         if not snapshot.analysis_eligible:
+            self._record_candle_capability(
+                snapshot,
+                CapabilityStatus.PARTIAL,
+                "MT5 returned candles, but market-data validation did not mark the batch analysis-eligible.",
+            )
             logger.warning(
                 "Market data collection rejected: "
                 "symbol=%s timeframe=%s issues=%s",
@@ -132,6 +144,11 @@ class MarketDataCollector:
             return None
 
         result = self._repository.save_snapshot(snapshot)
+        self._record_candle_capability(
+            snapshot,
+            CapabilityStatus.AVAILABLE,
+            "MT5 returned clock-verified candles; validation passed and persistence completed.",
+        )
 
         logger.info(
             "Market data collection completed: "
@@ -143,6 +160,43 @@ class MarketDataCollector:
         )
 
         return result
+
+    def _record_candle_capability(
+        self,
+        snapshot,
+        status: CapabilityStatus,
+        evidence: str,
+    ) -> None:
+        if self._capability_registry is None:
+            return
+
+        batch = snapshot.batch
+        clock = batch.clock_evidence
+        if (
+            batch.source != "MT5"
+            or clock is None
+            or clock.verified is not True
+        ):
+            return
+
+        limitations = ()
+        if status is CapabilityStatus.PARTIAL:
+            limitations = tuple(
+                sorted({issue.code.value for issue in snapshot.validation.issues})
+            )
+
+        self._capability_registry.record(MarketDataCapability(
+            capability="candle_history",
+            status=status,
+            source="MT5",
+            checked_at=datetime.now(timezone.utc),
+            symbol=batch.symbol,
+            timeframe=batch.timeframe,
+            account_login=clock.account_login,
+            broker_server=clock.broker_server,
+            evidence=(evidence,),
+            limitations=limitations,
+        ))
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Collect immediately, then align each cycle with candle closes."""

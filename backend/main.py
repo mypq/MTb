@@ -11,6 +11,8 @@ from backend.database_backup import DatabaseBackupService
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.collector import MarketDataCollector
+from backend.market_data.capabilities import CapabilityRegistry
+from backend.market_data.mt5_capability_probe import MT5CapabilityProbe
 from backend.market_data.ntp_monitor import NtpVerificationMonitor
 from backend.market_data.ntp_time import NtpTimeVerifier
 from backend.market_data.repository import (
@@ -437,11 +439,15 @@ async def lifespan(app: FastAPI):
         validator=market_data_validator,
     )
 
+    capability_registry = CapabilityRegistry()
+    capability_probe = MT5CapabilityProbe(adapter, capability_registry)
+
     backup_service = None
     backup_stop_event = asyncio.Event()
     backup_task = None
 
     collector = None
+    capability_probe_task = None
     collector_stop_event = asyncio.Event()
     collector_task = None
 
@@ -455,6 +461,7 @@ async def lifespan(app: FastAPI):
     app.state.broker_tick_worker = None
     app.state.market_data_service = market_data_service
     app.state.market_data_repository = market_data_repository
+    app.state.market_data_capability_registry = capability_registry
     app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
     app.state.ntp_verification_monitor = ntp_verification_monitor
@@ -529,9 +536,33 @@ async def lifespan(app: FastAPI):
                     nonlocal collector
                     nonlocal collector_task
                     nonlocal candle_clock_task
+                    nonlocal capability_probe_task
 
                     if broker_tick_worker is not None:
                         return
+
+                    async def run_capability_probe():
+                        try:
+                            observations = await asyncio.to_thread(
+                                capability_probe.probe,
+                                selected_symbol,
+                                settings.DEFAULT_TIMEFRAME,
+                            )
+                            logger.info(
+                                "MT5 market-data capability probe completed: "
+                                "symbol=%s observations=%d",
+                                selected_symbol,
+                                len(observations),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "MT5 market-data capability probe failed."
+                            )
+
+                    capability_probe_task = asyncio.create_task(
+                        run_capability_probe(),
+                        name="mt5-market-data-capability-probe",
+                    )
 
                     broker_tick_worker = BrokerTickMonitorWorker(
                         adapter=adapter,
@@ -570,6 +601,7 @@ async def lifespan(app: FastAPI):
                         symbol=selected_symbol,
                         timeframe=settings.DEFAULT_TIMEFRAME,
                         count=300,
+                        capability_registry=capability_registry,
                     )
 
                     app.state.market_data_collector = collector
@@ -691,6 +723,14 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     logger.exception(
                         "Failed to stop MT5 market-data startup coordinator."
+                    )
+
+            if capability_probe_task is not None:
+                try:
+                    await capability_probe_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop MT5 market-data capability probe."
                     )
 
             if candle_clock_task is not None:
@@ -957,6 +997,10 @@ def create_app() -> FastAPI:
                 "broker_time_verified": False,
             },
             "ntp_verification": ntp_verification_monitor.snapshot(),
+            "market_data_capabilities": [
+                item.model_dump(mode="json")
+                for item in application.state.market_data_capability_registry.snapshot()
+            ],
         }
 
     @application.get(

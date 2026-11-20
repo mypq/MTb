@@ -1,5 +1,6 @@
 """Market data models, validation, and capability contracts."""
 
+from backend.market_data.mt5_capability_probe import MT5CapabilityProbe
 from backend.market_data.capabilities import (
     CapabilityRegistry,
     CapabilityStatus,
@@ -20,4 +21,5 @@ __all__ = [
     "CapabilityRegistry",
     "CapabilityStatus",
     "MarketDataCapability",
+    "MT5CapabilityProbe",
 ]
