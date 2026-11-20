@@ -323,7 +323,9 @@ def test_same_run_sliding_confirmation_extends_contiguous_coverage(
     )
 
     assert second.event_type == "CONFIRMATION"
-    assert second.evidence_start_utc == first.evidence_samples[1]["time_gmt_epoch"] * 0 + first.evidence_start_utc + timedelta(seconds=60)
+    assert second.evidence_start_utc == (
+        first.evidence_start_utc + timedelta(seconds=60)
+    )
     assert second.evidence_end_utc > first.evidence_end_utc
     assert registry.load() == (first, second)
 

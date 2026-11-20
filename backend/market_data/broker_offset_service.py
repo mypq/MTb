@@ -192,12 +192,13 @@ class BrokerOffsetEvidenceService:
         ):
             return False
 
-        if decision.offset_seconds != latest.offset_seconds:
-            return False
-
-        # A normal non-overlapping window remains valid.
+        # A normal non-overlapping window remains valid, including a
+        # genuinely new offset-change window after the previous evidence.
         if min(candidate_sequences) > max(previous_sequences):
             return True
+
+        if decision.offset_seconds != latest.offset_seconds:
+            return False
 
         # A rolling window may advance by one sample only when its two
         # shared samples are byte-for-byte equivalent evidence.
