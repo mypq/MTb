@@ -197,7 +197,11 @@ class BrokerOffsetDetector:
                 "Raw MT5 clock difference conflicts with recorded server offset.",
             )
 
-        candidate = float(raw_offset)
+        # TimeGMT() is derived from the terminal computer's clock.
+        # Convert that clock reading to NTP-corrected UTC before deriving
+        # the broker offset; otherwise sub-second host skew can shift the
+        # integer-second broker offset by one second.
+        candidate = float(raw_offset) - ntp_offset
 
         if not isfinite(candidate) or abs(candidate) > 14 * 60 * 60:
             self._window.clear()
