@@ -105,6 +105,20 @@ class MarketDataValidator:
 
         self._session_calendar = session_calendar
 
+    @property
+    def session_calendar(self) -> MarketSessionCalendar | None:
+        return self._session_calendar
+
+    def set_session_calendar(
+        self,
+        session_calendar: MarketSessionCalendar,
+    ) -> None:
+        if not isinstance(session_calendar, MarketSessionCalendar):
+            raise TypeError(
+                "session_calendar must be a MarketSessionCalendar."
+            )
+        self._session_calendar = session_calendar
+
     def validate(
         self,
         batch: CandleBatch,
