@@ -1552,6 +1552,36 @@ def test_offset_change_leaves_unresolved_gap_between_evidence_windows(
     ).offset_seconds == 3600
 
 
+def test_raw_broker_timestamp_in_offset_change_gap_is_unresolved(
+    tmp_path,
+) -> None:
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+
+    old_record = registry.append_candidate(
+        make_decision(),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=3),
+    )
+    new_record = registry.append_candidate(
+        decision_with_offset_and_time(3600, 600),
+        recorded_at_utc=BASE_TIME + timedelta(minutes=15),
+    )
+
+    assert new_record.event_type == "OFFSET_CHANGE"
+
+    gap_utc = old_record.evidence_end_utc + timedelta(minutes=4)
+    raw_broker_epoch = int(gap_utc.timestamp()) + old_record.offset_seconds
+
+    assert registry.for_broker_time(
+        IDENTITY,
+        raw_broker_epoch,
+    ) is None
+
+    assert registry.for_broker_times(
+        IDENTITY,
+        (raw_broker_epoch,),
+    ) == (None,)
+
+
 def test_offset_change_after_v1_does_not_invent_transition_bounds(
     tmp_path,
 ) -> None:
