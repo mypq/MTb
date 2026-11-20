@@ -1996,7 +1996,7 @@ def test_historical_tick_probe_requests_bounded_all_and_bid_ask_history():
     result = adapter.probe_tick_history(" XAUUSD ")
 
     assert result.symbol == "XAUUSD"
-    assert result.lookback_days == 30
+    assert result.lookback_days == 1
     assert result.requested_count_per_query == 1000
     assert result.all_ticks_count == 2
     assert result.quote_ticks_count == 1
