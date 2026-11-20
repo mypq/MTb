@@ -53,7 +53,7 @@ def test_capability_normalizes_identity_fields():
     assert capability.capability == "tick_history"
     assert capability.source == "MT5"
     assert capability.symbol == "XAUUSD"
-    assert capability.timeframe == "m5"
+    assert capability.timeframe == "M5"
     assert capability.broker_server == "Demo-Server"
 
 
@@ -74,6 +74,7 @@ def test_registry_records_and_retrieves_by_scope():
         status=CapabilityStatus.PARTIAL,
         symbol="XAUUSD",
         timeframe="M5",
+        evidence=("limited historical response observed",),
     )
 
     registry.record(capability)
@@ -135,3 +136,13 @@ def test_registry_rejects_untyped_values():
     registry = CapabilityRegistry()
     with pytest.raises(TypeError):
         registry.record({"capability": "tick_history"})
+
+
+def test_observed_status_requires_evidence():
+    with pytest.raises(ValidationError):
+        make_capability(status=CapabilityStatus.AVAILABLE)
+
+
+def test_account_identity_must_be_complete():
+    with pytest.raises(ValidationError):
+        make_capability(account_login=123456)
