@@ -15,6 +15,7 @@ class MT5CapabilitySource(Protocol):
     def get_account_info(self): ...
     def get_symbol_info(self, symbol: str): ...
     def get_broker_time_sample(self, symbol: str): ...
+    def probe_tick_history(self, symbol: str, *, lookback_days: int = 30, sample_count: int = 1000): ...
 
 
 def _normalize_timeframe(value: str) -> str:
@@ -27,10 +28,12 @@ def _normalize_timeframe(value: str) -> str:
 
 
 class MT5CapabilityProbe:
-    """Record point-in-time MT5 capabilities without probing historical data.
+    """Record point-in-time MT5 source capabilities without persisting data.
 
-    Broker tick timestamps remain raw values. Historical candle availability
-    is established only by the normal clock-verified collection pipeline.
+    Historical tick probing is bounded and read-only. Broker tick timestamps
+    remain raw values and are not fed into candle-clock calibration.
+    Historical candle availability is established only by the normal
+    clock-verified collection pipeline.
     """
 
     def __init__(
@@ -170,6 +173,98 @@ class MT5CapabilityProbe:
                 broker_server=broker_server,
             ))
 
+        try:
+            tick_history = self._source.probe_tick_history(
+                normalized_symbol,
+                lookback_days=30,
+                sample_count=1000,
+            )
+            tick_status = (
+                CapabilityStatus.AVAILABLE
+                if tick_history.all_ticks_count > 0
+                else CapabilityStatus.PARTIAL
+            )
+            quote_status = (
+                CapabilityStatus.AVAILABLE
+                if tick_history.quote_ticks_count > 0
+                else CapabilityStatus.PARTIAL
+            )
+            history_identity = {
+                "account_login": account_login,
+                "broker_server": broker_server,
+            }
+            observations.append(self._record(
+                capability="tick_history_source",
+                status=tick_status,
+                checked_at=checked_at,
+                symbol=normalized_symbol,
+                evidence=(
+                    "MT5 copy_ticks_from(COPY_TICKS_ALL) returned "
+                    f"{tick_history.all_ticks_count} records from a "
+                    f"{tick_history.lookback_days}-day bounded lookback "
+                    f"(maximum {tick_history.requested_count_per_query}).",
+                    "Historical API time_msc values are retained as probe evidence; "
+                    "they are not used to calibrate the broker clock.",
+                ),
+                limitations=(
+                    ()
+                    if tick_status is CapabilityStatus.AVAILABLE
+                    else (
+                        "The bounded request returned no ticks. This does not "
+                        "prove the broker has no history; market closure, symbol "
+                        "history synchronization, or the requested window may "
+                        "explain the empty result.",
+                    )
+                ),
+                **history_identity,
+            ))
+            observations.append(self._record(
+                capability="quote_history_source",
+                status=quote_status,
+                checked_at=checked_at,
+                symbol=normalized_symbol,
+                evidence=(
+                    "MT5 copy_ticks_from(COPY_TICKS_INFO) returned "
+                    f"{tick_history.quote_ticks_count} Bid/Ask-change records "
+                    f"from a {tick_history.lookback_days}-day bounded lookback "
+                    f"(maximum {tick_history.requested_count_per_query}).",
+                ),
+                limitations=(
+                    ()
+                    if quote_status is CapabilityStatus.AVAILABLE
+                    else (
+                        "The bounded Bid/Ask request returned no records. "
+                        "Retry during an active market session before treating "
+                        "this as a broker history restriction.",
+                    )
+                ),
+                **history_identity,
+            ))
+        except Exception as exc:
+            failure_evidence = (
+                "The bounded MT5 historical tick probe did not complete: "
+                f"{type(exc).__name__}.",
+            )
+            retry_limitations = (
+                "This is a point-in-time probe failure, not proof that the "
+                "broker permanently withholds historical ticks. Retry after "
+                "confirming the MT5 terminal and symbol connection.",
+            )
+            for capability in (
+                "tick_history_source",
+                "quote_history_source",
+            ):
+                observations.append(self._record(
+                    capability=capability,
+                    status=CapabilityStatus.PARTIAL,
+                    checked_at=checked_at,
+                    symbol=normalized_symbol,
+                    evidence=failure_evidence,
+                    limitations=retry_limitations,
+                    account_login=account_login,
+                    broker_server=broker_server,
+                ))
+
         observations.extend(
             self._record(
                 capability="candle_history",
@@ -190,8 +285,8 @@ class MT5CapabilityProbe:
                 status=CapabilityStatus.UNAVAILABLE,
                 checked_at=checked_at,
                 symbol=normalized_symbol,
-                evidence=("No historical tick retrieval and persistence pipeline is currently configured.",),
-                limitations=("This describes the application pipeline, not the broker's full MT5 data offering.",),
+                evidence=("The MT5 source can be probed, but the application does not yet ingest or persist historical ticks.",),
+                limitations=("Source availability and persistent archive availability are separate capabilities.",),
                 account_login=account_login,
                 broker_server=broker_server,
             ),
@@ -200,8 +295,8 @@ class MT5CapabilityProbe:
                 status=CapabilityStatus.UNAVAILABLE,
                 checked_at=checked_at,
                 symbol=normalized_symbol,
-                evidence=("Live quote samples are monitored but no persistent quote archive is configured.",),
-                limitations=("This describes the application pipeline, not the broker's full MT5 data offering.",),
+                evidence=("Live quotes are monitored and historical Bid/Ask source probing is available, but no persistent quote archive is configured.",),
+                limitations=("Source availability and persistent archive availability are separate capabilities.",),
                 account_login=account_login,
                 broker_server=broker_server,
             ),
