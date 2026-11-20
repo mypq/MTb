@@ -81,3 +81,43 @@ def test_probe_rejects_empty_scope_before_calling_source():
     with pytest.raises(ValueError):
         probe.probe(" ", "M5")
     assert source.calls == []
+
+
+
+def test_probe_initializes_candle_capability_for_every_configured_timeframe():
+    source = FakeMT5Source()
+    registry = CapabilityRegistry()
+    frames = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+
+    observations = MT5CapabilityProbe(source, registry).probe(
+        "XAUUSD",
+        "M5",
+        include_live_quote=False,
+        timeframes=frames,
+    )
+
+    candle_observations = [
+        item for item in observations
+        if item.capability == "candle_history"
+    ]
+    assert [item.timeframe for item in candle_observations] == list(frames)
+    assert all(item.status is CapabilityStatus.UNKNOWN for item in candle_observations)
+    assert source.calls == ["account", ("symbol", "XAUUSD")]
+
+
+def test_probe_rejects_duplicate_or_incomplete_timeframe_scope():
+    import pytest
+
+    probe = MT5CapabilityProbe(FakeMT5Source(), CapabilityRegistry())
+    with pytest.raises(ValueError, match="duplicates"):
+        probe.probe(
+            "XAUUSD",
+            "M5",
+            timeframes=("M5", "m5"),
+        )
+    with pytest.raises(ValueError, match="primary timeframe"):
+        probe.probe(
+            "XAUUSD",
+            "M5",
+            timeframes=("M1", "M15"),
+        )
