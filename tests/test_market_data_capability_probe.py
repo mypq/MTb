@@ -28,7 +28,7 @@ class FakeMT5Source:
         self,
         symbol,
         *,
-        lookback_days=30,
+        lookback_days=1,
         sample_count=1000,
     ):
         self.calls.append(("tick_history", symbol, lookback_days, sample_count))
@@ -70,7 +70,7 @@ def test_probe_records_only_observed_live_capabilities():
         "account",
         ("symbol", "XAUUSD"),
         ("quote", "XAUUSD"),
-        ("tick_history", "XAUUSD", 30, 1000),
+        ("tick_history", "XAUUSD", 1, 1000),
     ]
 
 
@@ -85,7 +85,7 @@ def test_probe_records_transient_failures_without_claiming_permanent_broker_limi
         def get_broker_time_sample(self, symbol):
             raise RuntimeError("offline")
 
-        def probe_tick_history(self, symbol, *, lookback_days=30, sample_count=1000):
+        def probe_tick_history(self, symbol, *, lookback_days=1, sample_count=1000):
             raise RuntimeError("offline")
 
     registry = CapabilityRegistry()
