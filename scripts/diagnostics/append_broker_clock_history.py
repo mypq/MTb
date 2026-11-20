@@ -302,7 +302,7 @@ def exclusive_file_lock(lock_path):
     try:
         os.write(
             descriptor,
-            f"pid={os.getpid()}\\n".encode("ascii"),
+            f"pid={os.getpid()}\n".encode("ascii"),
         )
         os.fsync(descriptor)
         os.close(descriptor)
