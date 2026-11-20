@@ -180,12 +180,22 @@ class ClockHistoryIncrementalReader:
             for run_id, value in checkpoint.last_by_run.items()
         }
 
-        # Once this process has verified the durable prefix, the history
-        # contract guarantees that the MT5 writer only appends while holding
-        # the same cross-process lock. Re-hashing the entire prefix on every
-        # poll needlessly holds that lock longer as the file grows and blocks
-        # the EA. Reuse the verified digest and validate file identity/size;
-        # a same-size rewrite is still rejected through its changed mtime.
+        # The writer is append-only while holding the shared lock. Before
+        # reusing the verified prefix digest, verify that the saved offset is
+        # still a physical CSV record boundary. This catches rewrites whose
+        # changed field lengths shift the old checkpoint into the middle of
+        # a row, even when filesystem timestamp resolution is coarse.
+        if self._checkpoint_verified and checkpoint.offset:
+            handle.seek(checkpoint.offset - 1)
+            if handle.read(1) != b"\\n":
+                raise ClockHistoryFileChangedError(
+                    "Clock history prefix was modified before the checkpoint."
+                )
+
+        # Re-hashing the entire verified prefix on every poll needlessly
+        # holds the cross-process writer lock longer as the file grows and
+        # blocks the EA. Reuse the verified digest; detect in-place rewrites
+        # that preserve file size through the saved modification timestamp.
         if self._checkpoint_verified:
             if (
                 stat_result.st_size == checkpoint.file_size
