@@ -73,6 +73,7 @@ class NtpTimeVerifier:
         max_offset_spread_seconds: float = 0.5,
         max_uncertainty_seconds: float = 1.0,
         max_age_seconds: float = 6 * 60 * 60,
+        max_clock_jump_seconds: float = 0.250,
         wall_clock: Callable[[], float] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         query: Callable[[str], NtpSample] | None = None,
@@ -133,6 +134,9 @@ class NtpTimeVerifier:
         self._max_age_seconds = self._positive(
             max_age_seconds, "max_age_seconds"
         )
+        self._max_clock_jump_seconds = self._positive(
+            max_clock_jump_seconds, "max_clock_jump_seconds"
+        )
 
         self._wall_clock = wall_clock or time.time
         self._monotonic_clock = monotonic_clock or time.monotonic
@@ -148,6 +152,7 @@ class NtpTimeVerifier:
         self._last_success_monotonic: float | None = None
         self._last_success_unix: float | None = None
         self._last_verification: NtpVerification | None = None
+        self._last_trust_clock_pair: tuple[float, float] | None = None
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -191,13 +196,36 @@ class NtpTimeVerifier:
             + fraction / (2**32)
         )
 
-    def _query_server(self, server: str) -> NtpSample:
-        t1 = self._wall_clock()
+    def _read_clock_pair(self) -> tuple[float, float]:
+        wall_time = self._wall_clock()
+        monotonic_time = self._monotonic_clock()
 
-        if not math.isfinite(t1) or t1 <= 0:
-            raise RuntimeError(
-                "Local system clock returned an invalid time."
-            )
+        if (
+            not math.isfinite(wall_time)
+            or wall_time <= 0
+            or not math.isfinite(monotonic_time)
+        ):
+            raise RuntimeError("Local clock readings are invalid.")
+
+        return wall_time, monotonic_time
+
+    def _clock_interval_is_stable(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> bool:
+        wall_elapsed = end[0] - start[0]
+        monotonic_elapsed = end[1] - start[1]
+
+        return (
+            monotonic_elapsed >= 0
+            and wall_elapsed >= 0
+            and abs(wall_elapsed - monotonic_elapsed)
+            <= self._max_clock_jump_seconds
+        )
+
+    def _query_server(self, server: str) -> NtpSample:
+        t1, monotonic_t1 = self._read_clock_pair()
 
         packet = bytearray(NTP_PACKET_SIZE)
         packet[0] = 0x23
@@ -215,7 +243,18 @@ class NtpTimeVerifier:
             client.send(packet)
             response = client.recv(512)
 
-        t4 = self._wall_clock()
+        wall_t4, monotonic_t4 = self._read_clock_pair()
+        clock_start = (t1, monotonic_t1)
+        clock_end = (wall_t4, monotonic_t4)
+        if not self._clock_interval_is_stable(clock_start, clock_end):
+            raise RuntimeError(
+                "Local wall clock jump detected during the NTP request."
+            )
+
+        monotonic_elapsed = monotonic_t4 - monotonic_t1
+        # Use monotonic elapsed time to reconstruct the local receive time.
+        # This keeps wall-clock adjustments from distorting the NTP math.
+        t4 = t1 + monotonic_elapsed
 
         if len(response) < NTP_PACKET_SIZE:
             raise RuntimeError(
@@ -261,7 +300,7 @@ class NtpTimeVerifier:
                 "NTP timestamps are inconsistent."
             )
 
-        round_trip = (t4 - t1) - (t3 - t2)
+        round_trip = monotonic_elapsed - (t3 - t2)
 
         if (
             not math.isfinite(round_trip)
@@ -323,10 +362,78 @@ class NtpTimeVerifier:
         errors: list[str] = []
         used_servers: set[str] = set()
 
+        try:
+            previous_clock_pair = self._read_clock_pair()
+        except Exception as exc:
+            return self._failed(
+                "Unable to read local clocks before NTP verification: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
         for server in self._servers:
             try:
-                sample = self._query(server)
+                request_clock_start = self._read_clock_pair()
+            except Exception as exc:
+                return self._failed(
+                    "Unable to read local clocks before an NTP request: "
+                    f"{type(exc).__name__}: {exc}"
+                )
 
+            if not self._clock_interval_is_stable(
+                previous_clock_pair,
+                request_clock_start,
+            ):
+                return self._failed(
+                    "Local wall clock jump detected between NTP server "
+                    "requests; verification was rejected."
+                )
+
+            try:
+                sample = self._query(server)
+            except Exception as exc:
+                try:
+                    request_clock_end = self._read_clock_pair()
+                except Exception as clock_exc:
+                    return self._failed(
+                        "Unable to read local clocks after an NTP request: "
+                        f"{type(clock_exc).__name__}: {clock_exc}"
+                    )
+
+                if not self._clock_interval_is_stable(
+                    request_clock_start,
+                    request_clock_end,
+                ):
+                    return self._failed(
+                        "Local wall clock jump detected during an NTP "
+                        "request; verification was rejected."
+                    )
+
+                previous_clock_pair = request_clock_end
+                errors.append(
+                    f"{server}: {type(exc).__name__}: {exc}"
+                )
+                continue
+
+            try:
+                request_clock_end = self._read_clock_pair()
+            except Exception as exc:
+                return self._failed(
+                    "Unable to read local clocks after an NTP request: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            if not self._clock_interval_is_stable(
+                request_clock_start,
+                request_clock_end,
+            ):
+                return self._failed(
+                    "Local wall clock jump detected during an NTP "
+                    "request; verification was rejected."
+                )
+
+            previous_clock_pair = request_clock_end
+
+            try:
                 if not isinstance(sample, NtpSample):
                     raise RuntimeError(
                         "NTP query returned an invalid sample."
@@ -342,11 +449,8 @@ class NtpTimeVerifier:
                     )
 
                 normalized_server = sample.server.strip().lower()
-
                 if normalized_server in used_servers:
-                    raise RuntimeError(
-                        "Duplicate NTP sample server."
-                    )
+                    raise RuntimeError("Duplicate NTP sample server.")
 
                 if not all(
                     math.isfinite(value)
@@ -386,11 +490,11 @@ class NtpTimeVerifier:
 
                 used_servers.add(normalized_server)
                 samples.append(sample)
-
             except Exception as exc:
                 errors.append(
                     f"{server}: {type(exc).__name__}: {exc}"
                 )
+
 
         if len(samples) < 3:
             return self._failed(
@@ -451,17 +555,21 @@ class NtpTimeVerifier:
                     "independent NTP verification was rejected."
                 )
 
-        checked_at = self._wall_clock()
-        monotonic_now = self._monotonic_clock()
+        try:
+            final_clock_pair = self._read_clock_pair()
+        except Exception:
+            return self._failed("Local clock readings are invalid.")
 
-        if (
-            not math.isfinite(checked_at)
-            or checked_at <= 0
-            or not math.isfinite(monotonic_now)
+        if not self._clock_interval_is_stable(
+            previous_clock_pair,
+            final_clock_pair,
         ):
             return self._failed(
-                "Local clock readings are invalid."
+                "Local wall clock jump detected before NTP verification "
+                "could be accepted."
             )
+
+        checked_at, monotonic_now = final_clock_pair
 
         result = NtpVerification(
             verified=True,
@@ -478,6 +586,7 @@ class NtpTimeVerifier:
         self._last_success_unix = checked_at
         self._last_success_monotonic = monotonic_now
         self._last_verification = result
+        self._last_trust_clock_pair = final_clock_pair
 
         return result
 
@@ -500,17 +609,34 @@ class NtpTimeVerifier:
             or self._last_success_unix is None
             or self._last_verification is None
             or not self._last_verification.verified
+            or self._last_trust_clock_pair is None
         ):
             return False
 
-        now_monotonic = self._monotonic_clock()
-        elapsed = now_monotonic - self._last_success_monotonic
+        try:
+            current_clock_pair = self._read_clock_pair()
+        except Exception:
+            self.reset()
+            return False
+
+        if not self._clock_interval_is_stable(
+            self._last_trust_clock_pair,
+            current_clock_pair,
+        ):
+            self.reset()
+            return False
+
+        self._last_trust_clock_pair = current_clock_pair
+        elapsed = (
+            current_clock_pair[1] - self._last_success_monotonic
+        )
 
         if (
             not math.isfinite(elapsed)
             or elapsed < 0
             or elapsed > self._max_age_seconds
         ):
+            self.reset()
             return False
 
         return True
@@ -525,3 +651,4 @@ class NtpTimeVerifier:
         self._last_success_monotonic = None
         self._last_success_unix = None
         self._last_verification = None
+        self._last_trust_clock_pair = None

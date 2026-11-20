@@ -250,6 +250,9 @@ def test_invalid_configuration_is_rejected():
         NtpTimeVerifier(max_age_seconds=-1)
 
     with pytest.raises(ValueError):
+        NtpTimeVerifier(max_clock_jump_seconds=0)
+
+    with pytest.raises(ValueError):
         NtpTimeVerifier(servers=())
 
 
@@ -421,3 +424,89 @@ def test_failed_nts_quorum_reverification_invalidates_previous_trust():
 def test_non_callable_nts_authentication_check_is_rejected():
     with pytest.raises(ValueError, match="must be callable"):
         NtpTimeVerifier(nts_authentication_check=True)
+
+
+@pytest.mark.parametrize("adjustment", [2.0, -2.0])
+def test_wall_clock_jump_during_server_query_rejects_entire_verification(
+    adjustment: float,
+):
+    clock = FakeClock()
+    samples = valid_samples()
+
+    def query(server):
+        if server == "time.cloudflare.com":
+            clock.wall += adjustment
+        return samples[server]
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=query,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert "wall clock jump" in result.error.lower()
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+
+def test_wall_clock_jump_between_server_requests_rejects_verification():
+    clock = FakeClock()
+    samples = valid_samples()
+    wall_reads = {"count": 0}
+
+    def wall_clock():
+        wall_reads["count"] += 1
+        if wall_reads["count"] == 4:
+            clock.wall += 2.0
+        return clock.wall
+
+    verifier = NtpTimeVerifier(
+        wall_clock=wall_clock,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: samples[server],
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert "wall clock jump" in result.error.lower()
+    assert verifier.is_trusted() is False
+
+
+def test_normal_wall_and_monotonic_progress_still_verifies():
+    clock = FakeClock()
+    samples = valid_samples()
+
+    def query(server):
+        clock.advance(0.05)
+        return samples[server]
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=query,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is True
+    assert verifier.is_trusted() is True
+
+
+@pytest.mark.parametrize("adjustment", [2.0, -2.0])
+def test_wall_clock_jump_after_success_invalidates_existing_trust(
+    adjustment: float,
+):
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+    clock.wall += adjustment
+
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
