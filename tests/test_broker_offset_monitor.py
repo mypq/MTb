@@ -306,3 +306,14 @@ def test_monitor_pauses_stale_history_and_resumes_when_file_updates(
             await asyncio.wait_for(task, timeout=1.0)
 
     asyncio.run(scenario())
+
+
+def test_monitor_rejects_invalid_clock_history_max_age(tmp_path):
+    monitor = make_monitor(tmp_path)
+
+    for value in (0, -1, True, 1.5):
+        with pytest.raises(ValueError):
+            BrokerOffsetEvidenceMonitor(
+                monitor._service,
+                clock_history_max_age_seconds=value,
+            )
