@@ -35,6 +35,8 @@ class MT5CapabilityProbe:
         self,
         symbol: str,
         timeframe: str,
+        *,
+        include_live_quote: bool = True,
     ) -> tuple[MarketDataCapability, ...]:
         normalized_symbol = symbol.strip()
         normalized_timeframe = timeframe.strip().upper()
@@ -98,28 +100,39 @@ class MT5CapabilityProbe:
                 broker_server=broker_server,
             ))
 
-        try:
-            sample = self._source.get_broker_time_sample(normalized_symbol)
+        if include_live_quote:
+            try:
+                sample = self._source.get_broker_time_sample(normalized_symbol)
+                observations.append(self._record(
+                    capability="live_quote_sample",
+                    status=CapabilityStatus.AVAILABLE,
+                    checked_at=checked_at,
+                    symbol=normalized_symbol,
+                    evidence=(
+                        "MT5 symbol_info_tick returned a validated live quote sample.",
+                        "broker_time_msc is retained as a raw broker timestamp, not asserted to be UTC.",
+                    ),
+                    account_login=sample.account_login,
+                    broker_server=sample.broker_server,
+                ))
+            except Exception as exc:
+                observations.append(self._record(
+                    capability="live_quote_sample",
+                    status=CapabilityStatus.UNAVAILABLE,
+                    checked_at=checked_at,
+                    symbol=normalized_symbol,
+                    evidence=(f"MT5 live quote probe failed: {type(exc).__name__}.",),
+                    limitations=("Retry the live quote probe later; a later quote may become available and this is not a permanent broker restriction.",),
+                    account_login=account_login,
+                    broker_server=broker_server,
+                ))
+        else:
             observations.append(self._record(
                 capability="live_quote_sample",
-                status=CapabilityStatus.AVAILABLE,
+                status=CapabilityStatus.UNKNOWN,
                 checked_at=checked_at,
                 symbol=normalized_symbol,
-                evidence=(
-                    "MT5 symbol_info_tick returned a validated live quote sample.",
-                    "broker_time_msc is retained as a raw broker timestamp, not asserted to be UTC.",
-                ),
-                account_login=sample.account_login,
-                broker_server=sample.broker_server,
-            ))
-        except Exception as exc:
-            observations.append(self._record(
-                capability="live_quote_sample",
-                status=CapabilityStatus.UNAVAILABLE,
-                checked_at=checked_at,
-                symbol=normalized_symbol,
-                evidence=(f"MT5 live quote probe failed: {type(exc).__name__}.",),
-                limitations=("Retry the live quote probe later; a later quote may become available and this is not a permanent broker restriction.",),
+                limitations=("The broker tick monitor records this capability when its first live sample arrives.",),
                 account_login=account_login,
                 broker_server=broker_server,
             ))
