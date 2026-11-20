@@ -348,6 +348,51 @@ def test_next_collection_time_supports_zero_delay():
     )
 
 
+def test_next_collection_time_aligns_daily_close_to_verified_broker_offset():
+    now = datetime(
+        2026, 11, 15, 20, 30, 0,
+        tzinfo=timezone.utc,
+    )
+
+    result = next_collection_time(
+        timeframe_seconds=86400,
+        now=now,
+        alignment_offset_seconds=7200,
+    )
+
+    assert result == datetime(
+        2026, 11, 15, 22, 0, 2,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_next_collection_time_aligns_h4_close_to_verified_broker_offset():
+    now = datetime(
+        2026, 11, 15, 22, 30, 0,
+        tzinfo=timezone.utc,
+    )
+
+    result = next_collection_time(
+        timeframe_seconds=14400,
+        now=now,
+        alignment_offset_seconds=7200,
+    )
+
+    assert result == datetime(
+        2026, 11, 16, 2, 0, 2,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_next_collection_time_rejects_invalid_alignment_offset():
+    for offset in (True, float("inf"), float("nan"), 14 * 60 * 60 + 1):
+        with pytest.raises(ValueError, match="alignment_offset_seconds"):
+            next_collection_time(
+                timeframe_seconds=300,
+                alignment_offset_seconds=offset,
+            )
+
+
 def test_next_collection_time_rejects_naive_datetime():
     now = datetime(2026, 11, 15, 10, 2, 30)
 
@@ -380,4 +425,65 @@ def test_next_collection_time_rejects_invalid_delay(delay_seconds):
         next_collection_time(
             timeframe_seconds=300,
             delay_seconds=delay_seconds,
+        )
+
+
+
+def test_multi_timeframe_collection_uses_one_service_and_repository():
+    class VerifiedClockCalibrator:
+        def trusted_evidence(self):
+            return (
+                SimpleNamespace(
+                    status="VERIFIED",
+                    offset_seconds=7200,
+                ),
+                object(),
+            )
+
+    service = FakeMarketDataService(snapshot=make_snapshot())
+    repository = FakeMarketDataRepository()
+    timeframes = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+    collector = MarketDataCollector(
+        service,
+        repository,
+        symbol="XAUUSD",
+        timeframe="M5",
+        count=300,
+        timeframes=timeframes,
+        clock_calibrator=VerifiedClockCalibrator(),
+    )
+
+    results = collector.collect_all_once()
+
+    assert collector.timeframes == timeframes
+    assert tuple(results) == timeframes
+    assert [request["timeframe"] for request in service.requests] == list(
+        timeframes
+    )
+    assert len(repository.saved_snapshots) == len(timeframes)
+
+
+def test_multi_timeframe_collection_requires_clock_calibrator():
+    with pytest.raises(
+        ValueError,
+        match="clock calibrator is required",
+    ):
+        MarketDataCollector(
+            FakeMarketDataService(snapshot=make_snapshot()),
+            FakeMarketDataRepository(),
+            symbol="XAUUSD",
+            timeframe="M5",
+            timeframes=("M1", "M5"),
+        )
+
+
+def test_multi_timeframe_collection_rejects_duplicate_frames():
+    with pytest.raises(ValueError, match="duplicates"):
+        MarketDataCollector(
+            FakeMarketDataService(snapshot=make_snapshot()),
+            FakeMarketDataRepository(),
+            symbol="XAUUSD",
+            timeframe="M5",
+            timeframes=("M5", "m5"),
+            clock_calibrator=object(),
         )
