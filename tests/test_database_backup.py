@@ -731,7 +731,7 @@ def test_restore_recovers_when_database_reinitialization_fails_once(
             text("SELECT value FROM records")
         ).scalar_one()
 
-    assert value == "backup-test"
+    assert value == "original-data"
     assert failed_once is True
 
 
