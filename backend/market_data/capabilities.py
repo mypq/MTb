@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from threading import RLock
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CapabilityStatus(str, Enum):
@@ -55,6 +55,11 @@ class MarketDataCapability(BaseModel):
             raise ValueError("Optional text values cannot be blank.")
         return value
 
+    @field_validator("timeframe")
+    @classmethod
+    def normalize_timeframe(cls, value: str | None) -> str | None:
+        return value.upper() if value is not None else None
+
     @field_validator("checked_at")
     @classmethod
     def require_utc_checked_at(cls, value: datetime) -> datetime:
@@ -78,6 +83,18 @@ class MarketDataCapability(BaseModel):
         if len(normalized) != len(values):
             raise ValueError("Evidence and limitation entries cannot be blank.")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_observation_evidence(self) -> MarketDataCapability:
+        if self.status is not CapabilityStatus.UNKNOWN and not self.evidence:
+            raise ValueError(
+                "A non-UNKNOWN capability status requires supporting evidence."
+            )
+        if (self.account_login is None) != (self.broker_server is None):
+            raise ValueError(
+                "account_login and broker_server must be supplied together."
+            )
+        return self
 
     @classmethod
     def registry_key(
