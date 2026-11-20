@@ -89,8 +89,25 @@ class BrokerOffsetEvidenceService:
 
                 self._state = "COLLECTING"
 
+                # The NTP monitor verifies asynchronously at startup and
+                # periodically. Never advance the durable history checkpoint
+                # while no trusted NTP result is available: doing so would
+                # permanently discard the samples needed for detection.
+                if batch.samples and not self._detector.has_trusted_ntp:
+                    return self._defer_batch_until_ntp()
+
                 for sample in batch.samples:
+                    if not self._detector.has_trusted_ntp:
+                        return self._defer_batch_until_ntp()
+
                     self._process_sample(sample)
+
+                    if not self._detector.has_trusted_ntp:
+                        return self._defer_batch_until_ntp()
+
+                # Recheck immediately before committing the source position.
+                if batch.samples and not self._detector.has_trusted_ntp:
+                    return self._defer_batch_until_ntp()
 
                 # Commit only after every sample was processed successfully.
                 self._reader.commit(batch)
@@ -134,6 +151,15 @@ class BrokerOffsetEvidenceService:
                     pass
 
             return self._snapshot_unlocked()
+
+    def _defer_batch_until_ntp(self) -> BrokerOffsetServiceSnapshot:
+        """Discard the in-memory read batch without advancing its checkpoint."""
+        self._detector.reset()
+        self._reader = self._create_reader()
+        self._last_decision = None
+        self._last_error = None
+        self._state = "WAITING_FOR_NTP"
+        return self._snapshot_unlocked()
 
     def snapshot(self) -> BrokerOffsetServiceSnapshot:
         with self._lock:
