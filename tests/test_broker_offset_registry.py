@@ -242,7 +242,9 @@ def test_registry_uses_raw_offset_and_corrects_evidence_utc(
 
     for sample in record.evidence_samples:
         assert sample["ntp_offset_seconds"] == 0.25
-        assert sample["calculated_offset_seconds"] == 7200.0
+        assert sample["calculated_offset_seconds"] == pytest.approx(
+            7199.75
+        )
 
     assert record.evidence_start_utc.timestamp() == pytest.approx(
         BASE_EPOCH + 0.25
