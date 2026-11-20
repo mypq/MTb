@@ -132,7 +132,7 @@ def test_probe_initializes_candle_capability_for_every_configured_timeframe():
     assert source.calls == [
         "account",
         ("symbol", "XAUUSD"),
-        ("tick_history", "XAUUSD", 30, 1000),
+        ("tick_history", "XAUUSD", 1, 1000),
     ]
 
 
@@ -161,7 +161,7 @@ def test_probe_keeps_empty_history_partial_not_permanently_unavailable():
             self,
             symbol,
             *,
-            lookback_days=30,
+            lookback_days=1,
             sample_count=1000,
         ):
             self.calls.append(("tick_history", symbol, lookback_days, sample_count))
