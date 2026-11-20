@@ -336,7 +336,7 @@ class ChronyStatusService:
 
     @classmethod
     def _parse_authdata(cls, output: str) -> frozenset[str]:
-        """Count healthy NTS records from the three approved providers.
+        """Return healthy NTS provider identities from approved records.
 
         Netnod endpoint names may vary, but must belong to the exact
         nts.netnod.se DNS suffix. Only one authenticated record per
@@ -512,7 +512,9 @@ class ChronyStatusService:
                         f"{healthy_sources} healthy Chrony sources "
                         f"(required exactly {REQUIRED_NTS_SOURCES}); "
                         f"{authenticated_sources} authenticated NTS providers "
-                        f"(required exactly {REQUIRED_NTS_SOURCES})."
+                        f"(required exactly {REQUIRED_NTS_SOURCES}); "
+                        "healthy-source provider identities must exactly match "
+                        "authenticated NTS provider identities."
                     )
                 ),
             )
