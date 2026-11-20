@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import math
 import os
 import sys
@@ -192,9 +193,46 @@ def observation_key(row):
     )
 
 
+def _lock_owner_is_running(lock_path):
+    """Return True/False when the recorded owner PID can be checked.
+
+    Unknown or malformed lock metadata is treated conservatively as active.
+    """
+    try:
+        metadata = lock_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+
+    if not metadata.startswith("pid="):
+        return None
+
+    try:
+        pid = int(metadata[4:])
+    except ValueError:
+        return None
+
+    if pid <= 0:
+        return None
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return None
+
+    return True
+
+
 @contextmanager
 def exclusive_file_lock(lock_path):
-    """Cross-process lock using atomic file creation."""
+    """Cross-process lock using atomic file creation and dead-owner recovery."""
     lock_path = Path(lock_path)
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
     descriptor = None
@@ -206,6 +244,15 @@ def exclusive_file_lock(lock_path):
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
             )
         except FileExistsError:
+            # Recover only when the operating system confirms the recorded
+            # owner process no longer exists. Unknown metadata fails closed.
+            if _lock_owner_is_running(lock_path) is False:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"Timed out waiting for archive lock: {lock_path}"
@@ -215,8 +262,9 @@ def exclusive_file_lock(lock_path):
     try:
         os.write(
             descriptor,
-            f"pid={os.getpid()}\n".encode("ascii"),
+            f"pid={os.getpid()}\\n".encode("ascii"),
         )
+        os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
         yield
