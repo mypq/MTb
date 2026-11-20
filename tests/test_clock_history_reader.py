@@ -335,14 +335,15 @@ def test_max_samples_per_read_limits_appended_batch(tmp_path):
     assert [sample.sample_sequence for sample in third.samples] == [3]
 
 
-def test_verified_checkpoint_hashes_only_new_rows_on_subsequent_reads(
+def test_verified_checkpoint_revalidates_prefix_when_file_changes(
     tmp_path,
     monkeypatch,
 ):
     import backend.market_data.clock_history_reader as reader_module
 
     history, _, reader = make_reader(tmp_path)
-    write_history(history, [make_row(1), make_row(2)])
+    rows = [make_row(1), make_row(2)]
+    write_history(history, rows)
 
     first = reader.read_new()
     reader.commit(first)
@@ -356,14 +357,47 @@ def test_verified_checkpoint_hashes_only_new_rows_on_subsequent_reads(
 
     monkeypatch.setattr(reader_module, "_next_hash", count_hash)
 
+    appended_row = row_bytes(make_row(3))
     with history.open("ab") as handle:
-        handle.write(row_bytes(make_row(3)))
+        handle.write(appended_row)
 
     second = reader.read_new()
 
     assert [sample.sample_sequence for sample in second.samples] == [3]
-    assert len(hashed_lines) == 1
-    assert hashed_lines[0] == row_bytes(make_row(3))
+    assert hashed_lines == [
+        header_bytes(),
+        row_bytes(rows[0]),
+        row_bytes(rows[1]),
+        appended_row,
+    ]
+
+
+def test_verified_checkpoint_rejects_modified_prefix_with_appended_rows(
+    tmp_path,
+):
+    history, _, reader = make_reader(tmp_path)
+    write_history(history, [make_row(1), make_row(2)])
+
+    first = reader.read_new()
+    reader.commit(first)
+
+    content = history.read_bytes()
+    original = b"XMGlobal-MT5 9"
+    replacement = b"XMGlobal-MT5 8"
+    assert original in content
+
+    # Change an already-processed row and append a valid new row before
+    # the next read, reproducing the modification-plus-append failure.
+    history.write_bytes(
+        content.replace(original, replacement, 1)
+        + row_bytes(make_row(3))
+    )
+
+    with pytest.raises(
+        ClockHistoryFileChangedError,
+        match="Previously processed clock history was modified",
+    ):
+        reader.read_new()
 
 
 def test_verified_checkpoint_rejects_same_size_prefix_rewrite(tmp_path):
