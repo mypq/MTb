@@ -402,6 +402,11 @@ class MarketDataCollector:
         while not stop_event.is_set():
             alignment_offset = self._verified_alignment_offset()
             if alignment_offset is None:
+                # Do not keep broker-aligned deadlines after clock trust is
+                # lost. Rebuild every deadline only after trusted evidence
+                # becomes available again.
+                next_runs.clear()
+                last_alignment_offset = None
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
@@ -450,15 +455,24 @@ class MarketDataCollector:
 
                 alignment_offset = self._verified_alignment_offset()
                 if alignment_offset is None:
-                    next_runs.pop(timeframe, None)
-                    continue
+                    next_runs.clear()
+                    last_alignment_offset = None
+                    break
+
+                if (
+                    last_alignment_offset is None
+                    or abs(alignment_offset - last_alignment_offset) > 0.5
+                ):
+                    # A broker offset transition changes H4/D1 boundaries.
+                    # Recalculate all deadlines on the next scheduler pass.
+                    last_alignment_offset = None
+                    break
 
                 next_runs[timeframe] = next_collection_time(
                     timeframe_seconds=timeframe_seconds(timeframe),
                     now=datetime.now(timezone.utc),
                     alignment_offset_seconds=alignment_offset,
                 )
-                last_alignment_offset = alignment_offset
 
             if stop_event.is_set():
                 break
