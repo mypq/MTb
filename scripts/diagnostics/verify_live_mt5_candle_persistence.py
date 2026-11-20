@@ -6,6 +6,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+
+# Make the repository root importable when this diagnostic is launched by file path.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from backend.config import get_settings
 from backend.database import Database
 from backend.database_migrations import upgrade_database
