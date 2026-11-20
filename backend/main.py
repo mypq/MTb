@@ -913,7 +913,7 @@ def create_app() -> FastAPI:
                 "source_freshness": {
                     "state": "DISABLED",
                     "age_seconds": None,
-                    "max_age_seconds": settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS,
+                    "max_age_seconds": getattr(settings, "MT5_CLOCK_HISTORY_MAX_AGE_SECONDS", 180),
                     "last_modified_unix": None,
                     "error": None,
                 },
