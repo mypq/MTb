@@ -173,6 +173,54 @@ def test_first_three_supported_samples_record_baseline(tmp_path):
     assert records[0].ntp_evidence["verified"] is True
 
 
+def test_service_preserves_history_until_initial_ntp_verification(
+    tmp_path,
+):
+    history_path = tmp_path / "clock_history.csv"
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+    write_history(
+        history_path,
+        [make_row(sequence, 7200) for sequence in range(1, 4)],
+    )
+
+    verifier = NtpTimeVerifier(
+        servers=("ntp-a", "ntp-b", "ntp-c"),
+        wall_clock=lambda: float(BASE_EPOCH),
+        monotonic_clock=lambda: 100.0,
+        query=lambda server: NtpSample(
+            server=server,
+            offset_seconds=0.0,
+            round_trip_seconds=0.02,
+            root_dispersion_seconds=0.01,
+        ),
+    )
+    service = BrokerOffsetEvidenceService(
+        history_path,
+        BrokerOffsetDetector(verifier),
+        registry,
+    )
+
+    waiting = service.poll_once()
+
+    assert waiting.state == "WAITING_FOR_NTP"
+    assert waiting.error is None
+    assert waiting.samples_processed == 0
+    assert not history_path.with_suffix(".checkpoint.json").exists()
+    assert registry.load() == ()
+
+    # Once the independent NTP monitor establishes trust, the same source
+    # samples must still be available and produce the initial baseline.
+    assert verifier.verify().verified
+
+    ready = service.poll_once()
+
+    assert ready.state == "BASELINE_RECORDED"
+    assert ready.error is None
+    assert ready.samples_processed == 3
+    assert len(registry.load()) == 1
+    assert registry.load()[0].offset_seconds == 7200
+
+
 def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
     service, registry, _ = make_service(tmp_path, rows)
