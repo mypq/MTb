@@ -29,6 +29,7 @@ class ClockHistoryFreshnessSnapshot:
     max_age_seconds: int
     error: str | None = None
 
+
 RECORDED_EVENT_STATES = frozenset(
     {
         "BASELINE_RECORDED",
