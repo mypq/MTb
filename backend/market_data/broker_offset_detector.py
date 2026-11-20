@@ -159,9 +159,14 @@ class BrokerOffsetDetector:
         ] = deque(maxlen=required_samples)
 
     @property
+    def trusted_ntp_snapshot(self) -> NtpVerification | None:
+        """Return the exact currently trusted NTP snapshot, if any."""
+        return self._ntp.last_verification()
+
+    @property
     def has_trusted_ntp(self) -> bool:
         """Whether the verifier currently has a trusted NTP result."""
-        return self._ntp.is_trusted()
+        return self.trusted_ntp_snapshot is not None
 
     def observe(
         self,
