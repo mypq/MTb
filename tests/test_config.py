@@ -208,3 +208,15 @@ def test_mt5_sessions_file_is_normalized(
 def test_mt5_sessions_file_rejects_non_string_values() -> None:
     with pytest.raises(ValidationError):
         make_settings(MT5_SESSIONS_FILE=123)
+
+
+@pytest.mark.parametrize("value", [0, -1, True])
+def test_invalid_mt5_clock_history_max_age_is_rejected(value: object) -> None:
+    with pytest.raises(ValidationError):
+        make_settings(MT5_CLOCK_HISTORY_MAX_AGE_SECONDS=value)
+
+
+def test_mt5_clock_history_max_age_defaults_to_three_minutes() -> None:
+    settings = make_settings()
+
+    assert settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS == 180
