@@ -250,6 +250,9 @@ def test_invalid_configuration_is_rejected():
         NtpTimeVerifier(max_age_seconds=-1)
 
     with pytest.raises(ValueError):
+        NtpTimeVerifier(max_clock_jump_seconds=0)
+
+    with pytest.raises(ValueError):
         NtpTimeVerifier(servers=())
 
 
@@ -491,3 +494,19 @@ def test_normal_wall_and_monotonic_progress_still_verifies():
 
     assert result.verified is True
     assert verifier.is_trusted() is True
+
+
+@pytest.mark.parametrize("adjustment", [2.0, -2.0])
+def test_wall_clock_jump_after_success_invalidates_existing_trust(
+    adjustment: float,
+):
+    clock = FakeClock()
+    verifier = make_verifier(clock)
+
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+    clock.wall += adjustment
+
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
