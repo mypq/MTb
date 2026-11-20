@@ -13,6 +13,15 @@ from backend.market_data.broker_candle_clock import (
     BrokerCandleClockCalibrator,
 )
 from backend.market_data.ntp_time import NtpSample, NtpTimeVerifier
+from test_broker_offset_registry import (
+    BASE_EPOCH as REGISTRY_BASE_EPOCH,
+    IDENTITY as REGISTRY_IDENTITY,
+    decision_with_identity,
+    decision_with_offset_and_time,
+    make_decision,
+)
+from backend.market_data.broker_offset_registry import BrokerOffsetRegistry
+
 from backend.mt5 import (
     MT5Adapter,
     MT5AdapterError,
@@ -1825,3 +1834,123 @@ def test_shutdown_waits_until_active_mt5_operation_finishes():
 
         if not shutdown_finished.is_set():
             adapter.shutdown()
+
+
+
+def _make_real_registry_for_adapter(tmp_path, *, now_utc, identity):
+    registry = BrokerOffsetRegistry(tmp_path / "broker-offsets.jsonl")
+    shift = int(now_utc.timestamp()) - REGISTRY_BASE_EPOCH - 1800
+
+    baseline = registry.append_candidate(
+        decision_with_identity(
+            decision_with_offset_and_time(7200, shift),
+            identity,
+        ),
+        recorded_at_utc=now_utc,
+    )
+    confirmation = registry.append_candidate(
+        decision_with_identity(
+            decision_with_offset_and_time(7200, shift + 180),
+            identity,
+        ),
+        recorded_at_utc=now_utc + timedelta(minutes=4),
+    )
+    offset_change = registry.append_candidate(
+        decision_with_identity(
+            decision_with_offset_and_time(3600, shift + 600),
+            identity,
+        ),
+        recorded_at_utc=now_utc + timedelta(minutes=12),
+    )
+    return registry, baseline, confirmation, offset_change
+
+
+def test_adapter_converts_candles_using_real_registry_records_per_period(
+    tmp_path,
+):
+    now = datetime.now(timezone.utc)
+    adapter, mt5 = make_connected_adapter(broker_offset_seconds=7200)
+    identity = (123456, "Demo-Server", "XAUUSD", 6316)
+    registry, baseline, confirmation, offset_change = (
+        _make_real_registry_for_adapter(
+            tmp_path,
+            now_utc=now,
+            identity=identity,
+        )
+    )
+    adapter.set_broker_offset_registry(registry)
+
+    cases = (
+        (baseline, 7200),
+        (confirmation, 7200),
+        (offset_change, 3600),
+    )
+    for record, expected_offset in cases:
+        expected_utc = int(
+            (record.evidence_start_utc + timedelta(seconds=30)).timestamp()
+        )
+        raw_broker_time = expected_utc + expected_offset
+        mt5.copy_rates_from_pos.return_value = [
+            make_rate(timestamp=raw_broker_time),
+        ]
+
+        batch = adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+        assert len(batch.candles) == 1
+        assert batch.candles[0].timestamp == datetime.fromtimestamp(
+            expected_utc,
+            tz=timezone.utc,
+        )
+        assert batch.candles[0].timestamp.utcoffset() == timedelta(0)
+
+
+def test_adapter_rejects_real_registry_offset_change_gap_atomically(
+    tmp_path,
+):
+    now = datetime.now(timezone.utc)
+    adapter, mt5 = make_connected_adapter(broker_offset_seconds=7200)
+    identity = (123456, "Demo-Server", "XAUUSD", 6316)
+    registry, baseline, _, _ = _make_real_registry_for_adapter(
+        tmp_path,
+        now_utc=now,
+        identity=identity,
+    )
+    adapter.set_broker_offset_registry(registry)
+
+    gap_utc = baseline.evidence_end_utc + timedelta(minutes=4)
+    valid_utc = baseline.evidence_start_utc + timedelta(seconds=30)
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=int(valid_utc.timestamp()) + 7200),
+        make_rate(timestamp=int(gap_utc.timestamp()) + 7200),
+    ]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="No valid historical broker-offset evidence",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 2)
+
+
+def test_adapter_rejects_real_registry_times_outside_all_evidence(
+    tmp_path,
+):
+    now = datetime.now(timezone.utc)
+    adapter, mt5 = make_connected_adapter(broker_offset_seconds=7200)
+    identity = (123456, "Demo-Server", "XAUUSD", 6316)
+    registry, baseline, _, _ = _make_real_registry_for_adapter(
+        tmp_path,
+        now_utc=now,
+        identity=identity,
+    )
+    adapter.set_broker_offset_registry(registry)
+
+    outside_utc = baseline.evidence_start_utc - timedelta(minutes=5)
+    mt5.copy_rates_from_pos.return_value = [
+        make_rate(timestamp=int(outside_utc.timestamp()) + 7200),
+    ]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="No valid historical broker-offset evidence",
+    ):
+        adapter.get_closed_candles("XAUUSD", "M5", 1)
