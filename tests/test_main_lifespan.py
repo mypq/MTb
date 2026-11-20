@@ -567,12 +567,16 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             symbol,
             timeframe,
             count,
+            timeframes=("M5",),
+            clock_calibrator=None,
         ):
             self.service = service
             self.repository = repository
             self.symbol = symbol
             self.timeframe = timeframe
             self.count = count
+            self.timeframes = tuple(timeframes)
+            self.clock_calibrator = clock_calibrator
             self.interval_seconds = 300.0
 
         async def run(self, stop_event):
@@ -1745,12 +1749,16 @@ def test_lifespan_waits_for_blocked_collector_and_backup_before_database_dispose
             symbol,
             timeframe,
             count,
+            timeframes=("M5",),
+            clock_calibrator=None,
         ):
             self.service = service
             self.repository = repository
             self.symbol = symbol
             self.timeframe = timeframe
             self.count = count
+            self.timeframes = tuple(timeframes)
+            self.clock_calibrator = clock_calibrator
 
         async def run(self, stop_event):
             events.append("collector.start")
