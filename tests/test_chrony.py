@@ -18,9 +18,9 @@ Leap status     : Normal
 SOURCES_OUTPUT = """
 MS Name/IP address         Stratum Poll Reach LastRx Last sample
 ===============================================================================
-^* 162.159.200.123               3   7   377   227  +1095us[+1133us] +/- 46ms
-^+ 194.58.203.196                1   7   377    32  -1710us[-1710us] +/- 45ms
-^+ 94.198.159.15                 1   7   377   228    +72us[ +110us] +/- 45ms
+^* time.cloudflare.com               3   7   377   227  +1095us[+1133us] +/- 46ms
+^+ mmo1-ts.nts.netnod.se                1   7   377    32  -1710us[-1710us] +/- 45ms
+^+ ntppool1.time.nl                 1   7   377   228    +72us[ +110us] +/- 45ms
 """
 
 AUTHDATA_OUTPUT = """
@@ -487,3 +487,25 @@ def test_chrony_rejects_more_than_three_healthy_sources():
     assert status.synchronized is False
     assert status.healthy_sources == 4
     assert status.quorum_met is False
+
+
+
+def test_chrony_rejects_quorum_when_healthy_source_identities_do_not_match():
+    service = ChronyStatusService(command=["chronyc"])
+    mismatched_sources = SOURCES_OUTPUT.replace(
+        "^* time.cloudflare.com",
+        "^* unrelated.example.net",
+    )
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(sources=mismatched_sources),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is False
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 3
+    assert status.quorum_met is False
+    assert "identities must exactly match" in status.error
