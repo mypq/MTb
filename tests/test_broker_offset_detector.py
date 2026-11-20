@@ -444,7 +444,8 @@ def test_candidate_corrects_raw_clock_difference_with_ntp(
     assert result.offset_seconds == 7200
 
     assert all(
-        sample.calculated_offset_seconds == pytest.approx(7200.0 - 0.25 if ntp_offset_seconds == -0.75 else 7200.25)
+        sample.calculated_offset_seconds
+        == pytest.approx(raw_offset_seconds - ntp_offset_seconds)
         for sample in result.evidence_samples
     )
 
