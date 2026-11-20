@@ -103,9 +103,16 @@ class FakeBrokerOffsetService:
 
 
 class FakeBrokerOffsetMonitor:
-    def __init__(self, service, *, interval_seconds):
+    def __init__(
+        self,
+        service,
+        *,
+        interval_seconds,
+        clock_history_max_age_seconds=180,
+    ):
         self.service = service
         self.interval_seconds = interval_seconds
+        self.clock_history_max_age_seconds = clock_history_max_age_seconds
         self.started_event = asyncio.Event()
         self.stopped = False
         self.running = False
@@ -166,10 +173,16 @@ def test_lifespan_starts_and_stops_configured_broker_offset_pipeline(
         created["service"] = service
         return service
 
-    def create_offset_monitor(service, *, interval_seconds):
+    def create_offset_monitor(
+        service,
+        *,
+        interval_seconds,
+        clock_history_max_age_seconds,
+    ):
         monitor = FakeBrokerOffsetMonitor(
             service,
             interval_seconds=interval_seconds,
+            clock_history_max_age_seconds=clock_history_max_age_seconds,
         )
         created["monitor"] = monitor
         return monitor
@@ -284,6 +297,7 @@ def test_lifespan_starts_and_stops_configured_broker_offset_pipeline(
                 "runtime/broker_offsets.jsonl"
             )
             assert monitor.interval_seconds == 2.5
+            assert monitor.clock_history_max_age_seconds == 180
             assert monitor.is_running is True
             assert monitor.stopped is False
 
