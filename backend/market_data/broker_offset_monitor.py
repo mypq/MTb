@@ -96,10 +96,8 @@ class BrokerOffsetEvidenceMonitor:
         return self._service.snapshot()
 
     def source_freshness(self) -> ClockHistoryFreshnessSnapshot:
-        """Return file freshness without changing evidence or registry state."""
-        snapshot = self._read_source_freshness()
-        self._last_source_freshness = snapshot
-        return snapshot
+        """Return current file freshness without changing monitor state."""
+        return self._read_source_freshness()
 
     def _read_source_freshness(self) -> ClockHistoryFreshnessSnapshot:
         try:
