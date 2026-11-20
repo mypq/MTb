@@ -10,6 +10,7 @@ from backend.mt5.models import (
     MT5ConnectionState,
     MT5ConnectionStatus,
     MT5SymbolInfo,
+    MT5TickHistoryProbeResult,
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "MT5ConnectionState",
     "MT5ConnectionStatus",
     "MT5SymbolInfo",
+    "MT5TickHistoryProbeResult",
 ]
