@@ -3,9 +3,12 @@ import sqlite3
 from threading import Event, Thread
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
 
 from backend.database import Database
+from backend.database_migrations import upgrade_database
 from backend.database_backup import (
     DatabaseBackupError,
     DatabaseBackupService,
@@ -785,3 +788,57 @@ def test_restore_reports_error_when_database_recovery_fails(
         ).scalar_one()
 
     assert value == "backup-test"
+
+
+
+def test_restore_upgrades_an_older_schema_to_current_head(
+    database,
+    tmp_path,
+):
+    database_url = str(database.engine.url)
+    project_root = Path(__file__).resolve().parents[1]
+    config = Config(str(project_root / "alembic.ini"))
+    config.set_main_option(
+        "script_location",
+        str(project_root / "migrations"),
+    )
+    config.set_main_option(
+        "sqlalchemy.url",
+        database_url.replace("%", "%%"),
+    )
+
+    # Create the current schema, then deliberately downgrade the backup
+    # source to the previous supported revision.
+    upgrade_database(database_url)
+    command.downgrade(config, "0001_market_data")
+
+    service = DatabaseBackupService(
+        database,
+        tmp_path / "backups",
+    )
+    old_schema_backup = service.create_backup()
+
+    command.upgrade(config, "head")
+
+    with database.engine.connect() as connection:
+        current_before_restore = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+    assert current_before_restore == "0002_clock_evidence"
+
+    service.restore_backup(old_schema_backup)
+
+    with database.engine.connect() as connection:
+        restored_revision = connection.exec_driver_sql(
+            "SELECT version_num FROM alembic_version"
+        ).scalar_one()
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(market_data_batches)"
+            ).fetchall()
+        }
+
+    assert restored_revision == "0002_clock_evidence"
+    assert "clock_verified" in columns
+    assert "clock_ntp_servers" in columns
