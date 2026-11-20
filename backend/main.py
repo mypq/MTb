@@ -876,11 +876,19 @@ def create_app() -> FastAPI:
 
         if broker_offset_monitor is not None:
             offset_snapshot = broker_offset_monitor.snapshot()
+            source_freshness = broker_offset_monitor.source_freshness()
 
             broker_offset_status = {
                 "enabled": True,
                 "running": broker_offset_monitor.is_running,
                 "state": offset_snapshot.state,
+                "source_freshness": {
+                    "state": source_freshness.state,
+                    "age_seconds": source_freshness.age_seconds,
+                    "max_age_seconds": source_freshness.max_age_seconds,
+                    "last_modified_unix": source_freshness.last_modified_unix,
+                    "error": source_freshness.error,
+                },
                 "samples_processed": offset_snapshot.samples_processed,
                 "last_decision": (
                     offset_snapshot.last_decision.status.value
@@ -902,6 +910,13 @@ def create_app() -> FastAPI:
                 "last_decision": None,
                 "last_error": None,
                 "candidate_recorded": False,
+                "source_freshness": {
+                    "state": "DISABLED",
+                    "age_seconds": None,
+                    "max_age_seconds": settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS,
+                    "last_modified_unix": None,
+                    "error": None,
+                },
                 "authorization": "DISABLED",
             }
 
