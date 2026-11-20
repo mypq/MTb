@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import time
 
 import pytest
+import numpy as np
 
 from backend.config import Settings
 from backend.market_data import VolumeSource
@@ -88,6 +89,8 @@ def make_mt5_module(
     mt5.last_error.return_value = (1, "Test error")
     mt5.TIMEFRAME_M1 = 1
     mt5.TIMEFRAME_M5 = 5
+    mt5.COPY_TICKS_ALL = 0
+    mt5.COPY_TICKS_INFO = 1
 
     return mt5
 
@@ -1954,3 +1957,123 @@ def test_adapter_rejects_real_registry_times_outside_all_evidence(
         match="No valid historical broker-offset evidence",
     ):
         adapter.get_closed_candles("XAUUSD", "M5", 1)
+
+
+
+def make_historical_ticks(timestamps):
+    dtype = [
+        ("time", "i8"),
+        ("bid", "f8"),
+        ("ask", "f8"),
+        ("last", "f8"),
+        ("volume", "i8"),
+        ("time_msc", "i8"),
+        ("flags", "i8"),
+        ("volume_real", "f8"),
+    ]
+    rows = []
+    for timestamp in timestamps:
+        rows.append((
+            timestamp // 1000,
+            4100.10,
+            4100.20,
+            0.0,
+            0,
+            timestamp,
+            134,
+            0.0,
+        ))
+    return np.array(rows, dtype=dtype)
+
+
+def test_historical_tick_probe_requests_bounded_all_and_bid_ask_history():
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_ticks_from.side_effect = [
+        make_historical_ticks([1794700000000, 1794700001000]),
+        make_historical_ticks([1794700000500]),
+    ]
+
+    result = adapter.probe_tick_history(" XAUUSD ")
+
+    assert result.symbol == "XAUUSD"
+    assert result.lookback_days == 30
+    assert result.requested_count_per_query == 1000
+    assert result.all_ticks_count == 2
+    assert result.quote_ticks_count == 1
+    assert result.all_ticks_first_time_msc == 1794700000000
+    assert result.all_ticks_last_time_msc == 1794700001000
+    assert result.quote_ticks_first_time_msc == 1794700000500
+
+    assert mt5.copy_ticks_from.call_count == 2
+    all_call, quote_call = mt5.copy_ticks_from.call_args_list
+    assert all_call.args[0] == "XAUUSD"
+    assert quote_call.args[0] == "XAUUSD"
+    assert all_call.args[1].tzinfo == timezone.utc
+    assert quote_call.args[1] == all_call.args[1]
+    assert all_call.args[2:] == (1000, mt5.COPY_TICKS_ALL)
+    assert quote_call.args[2:] == (1000, mt5.COPY_TICKS_INFO)
+
+
+def test_historical_tick_probe_reports_empty_history_without_fabricating_data():
+    adapter, mt5 = make_connected_adapter()
+    empty = make_historical_ticks([])
+    mt5.copy_ticks_from.side_effect = [empty, empty]
+
+    result = adapter.probe_tick_history("XAUUSD")
+
+    assert result.all_ticks_count == 0
+    assert result.quote_ticks_count == 0
+    assert result.all_ticks_first_time_msc is None
+    assert result.quote_ticks_last_time_msc is None
+
+
+def test_historical_tick_probe_rejects_mt5_none_result():
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_ticks_from.return_value = None
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="all-ticks history request returned no result",
+    ):
+        adapter.probe_tick_history("XAUUSD")
+
+
+@pytest.mark.parametrize(
+    ("lookback_days", "sample_count"),
+    [
+        (0, 1000),
+        (366, 1000),
+        (True, 1000),
+        (30, 0),
+        (30, 1001),
+        (30, True),
+    ],
+)
+def test_historical_tick_probe_rejects_unbounded_or_invalid_limits(
+    lookback_days,
+    sample_count,
+):
+    adapter, mt5 = make_connected_adapter()
+
+    with pytest.raises(ValueError):
+        adapter.probe_tick_history(
+            "XAUUSD",
+            lookback_days=lookback_days,
+            sample_count=sample_count,
+        )
+
+    mt5.copy_ticks_from.assert_not_called()
+
+
+def test_historical_tick_probe_rejects_unordered_timestamps():
+    adapter, mt5 = make_connected_adapter()
+    mt5.copy_ticks_from.side_effect = [
+        make_historical_ticks([1794700001000, 1794700000000]),
+        make_historical_ticks([]),
+    ]
+
+    with pytest.raises(
+        MT5AdapterError,
+        match="timestamps are not ordered",
+    ):
+        adapter.probe_tick_history("XAUUSD")
