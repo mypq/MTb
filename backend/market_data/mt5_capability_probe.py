@@ -15,7 +15,7 @@ class MT5CapabilitySource(Protocol):
     def get_account_info(self): ...
     def get_symbol_info(self, symbol: str): ...
     def get_broker_time_sample(self, symbol: str): ...
-    def probe_tick_history(self, symbol: str, *, lookback_days: int = 30, sample_count: int = 1000): ...
+    def probe_tick_history(self, symbol: str, *, lookback_days: int = 1, sample_count: int = 1000): ...
 
 
 def _normalize_timeframe(value: str) -> str:
@@ -176,7 +176,7 @@ class MT5CapabilityProbe:
         try:
             tick_history = self._source.probe_tick_history(
                 normalized_symbol,
-                lookback_days=30,
+                lookback_days=1,
                 sample_count=1000,
             )
             tick_status = (
@@ -205,6 +205,8 @@ class MT5CapabilityProbe:
                     f"(maximum {tick_history.requested_count_per_query}).",
                     "Historical API time_msc values are retained as probe evidence; "
                     "they are not used to calibrate the broker clock.",
+                    "The request is bounded to one day and may synchronize "
+                    "that period into the MT5 terminal's own history cache.",
                 ),
                 limitations=(
                     ()
