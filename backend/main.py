@@ -352,7 +352,7 @@ async def lifespan(app: FastAPI):
                 settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS
             ),
             clock_history_max_age_seconds=(
-                settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS
+                getattr(settings, "MT5_CLOCK_HISTORY_MAX_AGE_SECONDS", 180)
             ),
         )
 
@@ -365,7 +365,7 @@ async def lifespan(app: FastAPI):
             clock_history_file,
             settings.BROKER_OFFSET_REGISTRY_FILE,
             settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS,
-            settings.MT5_CLOCK_HISTORY_MAX_AGE_SECONDS,
+            getattr(settings, "MT5_CLOCK_HISTORY_MAX_AGE_SECONDS", 180),
         )
     else:
         logger.warning(
