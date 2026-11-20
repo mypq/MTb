@@ -114,6 +114,15 @@ class Settings(BaseSettings):
         value = value.strip()
         return value or None
 
+    @field_validator("MT5_CLOCK_HISTORY_MAX_AGE_SECONDS", mode="before")
+    @classmethod
+    def reject_boolean_clock_history_max_age(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError(
+                "MT5_CLOCK_HISTORY_MAX_AGE_SECONDS must be an integer, not a boolean."
+            )
+        return value
+
     @field_validator("MT5_CLOCK_HISTORY_MAX_AGE_SECONDS")
     @classmethod
     def validate_mt5_clock_history_max_age(cls, value: int) -> int:
