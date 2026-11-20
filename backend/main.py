@@ -46,6 +46,7 @@ from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
 from backend.mt5.models import MT5ConnectionState
 from backend.mt5.monitor import MT5ConnectionMonitor
+from backend.mt5.timeframes import SUPPORTED_TIMEFRAMES
 from backend.security import verify_api_token
 
 logger = logging.getLogger(__name__)
@@ -602,6 +603,8 @@ async def lifespan(app: FastAPI):
                         symbol=selected_symbol,
                         timeframe=settings.DEFAULT_TIMEFRAME,
                         count=300,
+                        timeframes=SUPPORTED_TIMEFRAMES,
+                        clock_calibrator=broker_candle_clock_calibrator,
                     )
                     # Attach the optional registry after construction so
                     # existing collector factories and test doubles that
@@ -620,10 +623,11 @@ async def lifespan(app: FastAPI):
                     )
 
                     logger.info(
-                        "Automatic market data collection enabled: "
-                        "symbol=%s timeframe=%s schedule=candle_close+2s",
+                        "Automatic multi-timeframe market data collection "
+                        "enabled: symbol=%s timeframes=%s count=300 "
+                        "schedule=broker_candle_close+2s",
                         selected_symbol,
-                        settings.DEFAULT_TIMEFRAME,
+                        ",".join(SUPPORTED_TIMEFRAMES),
                     )
 
                 initial_state = getattr(
