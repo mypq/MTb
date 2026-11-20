@@ -485,14 +485,15 @@ class MT5Adapter:
         self,
         symbol: str,
         *,
-        lookback_days: int = 30,
+        lookback_days: int = 1,
         sample_count: int = 1000,
     ) -> MT5TickHistoryProbeResult:
         """Probe bounded historical tick and Bid/Ask history without saving it.
 
         The two MT5 requests are capped independently. This is a source
-        availability check only; it does not create an archive or establish
-        broker-clock calibration.
+        availability check only; it does not create an application archive
+        or establish broker-clock calibration. MT5 may synchronize missing
+        records for this bounded period into its own terminal history cache.
         """
         if not isinstance(symbol, str):
             raise ValueError("Symbol name must be a string.")
