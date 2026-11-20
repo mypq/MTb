@@ -93,20 +93,33 @@ class BrokerOffsetEvidenceService:
                 # periodically. Never advance the durable history checkpoint
                 # while no trusted NTP result is available: doing so would
                 # permanently discard the samples needed for detection.
-                if batch.samples and not self._detector.has_trusted_ntp:
+                ntp_snapshot = self._detector.trusted_ntp_snapshot
+
+                if batch.samples and ntp_snapshot is None:
                     return self._defer_batch_until_ntp()
 
                 for sample in batch.samples:
-                    if not self._detector.has_trusted_ntp:
+                    # Do not mix evidence collected under different NTP
+                    # verifications inside one durable source batch.
+                    if (
+                        self._detector.trusted_ntp_snapshot
+                        is not ntp_snapshot
+                    ):
                         return self._defer_batch_until_ntp()
 
                     self._process_sample(sample)
 
-                    if not self._detector.has_trusted_ntp:
+                    if (
+                        self._detector.trusted_ntp_snapshot
+                        is not ntp_snapshot
+                    ):
                         return self._defer_batch_until_ntp()
 
                 # Recheck immediately before committing the source position.
-                if batch.samples and not self._detector.has_trusted_ntp:
+                if (
+                    batch.samples
+                    and self._detector.trusted_ntp_snapshot is not ntp_snapshot
+                ):
                     return self._defer_batch_until_ntp()
 
                 # Commit only after every sample was processed successfully.
