@@ -725,12 +725,13 @@ def test_lock_recovers_file_owned_by_dead_process(tmp_path, monkeypatch):
     lock_path = tmp_path / "history.csv.lock"
     lock_path.write_text("pid=424242\\n", encoding="ascii")
 
-    def dead_process(pid, signal):
+    def dead_process(pid):
         assert pid == 424242
-        assert signal == 0
-        raise ProcessLookupError
+        return False
 
-    monkeypatch.setattr(history_module.os, "kill", dead_process)
+    monkeypatch.setattr(
+        history_module, "_process_is_running", dead_process
+    )
 
     with history_module.exclusive_file_lock(lock_path):
         assert lock_path.read_text(encoding="ascii") == (
@@ -747,7 +748,7 @@ def test_lock_does_not_recover_file_owned_by_running_process(
     lock_path.write_text("pid=424242\\n", encoding="ascii")
 
     monkeypatch.setattr(
-        history_module.os, "kill", lambda pid, signal: None
+        history_module, "_process_is_running", lambda pid: True
     )
     monkeypatch.setattr(
         history_module, "LOCK_TIMEOUT_SECONDS", 0.01
