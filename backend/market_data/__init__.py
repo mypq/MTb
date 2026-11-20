@@ -1,5 +1,10 @@
-"""Market data models and validation contracts."""
+"""Market data models, validation, and capability contracts."""
 
+from backend.market_data.capabilities import (
+    CapabilityRegistry,
+    CapabilityStatus,
+    MarketDataCapability,
+)
 from backend.market_data.models import (
     CandleBatch,
     CandleQuality,
@@ -12,4 +17,7 @@ __all__ = [
     "CandleQuality",
     "MarketCandle",
     "VolumeSource",
+    "CapabilityRegistry",
+    "CapabilityStatus",
+    "MarketDataCapability",
 ]
