@@ -25,6 +25,8 @@ Timeframe = Literal[
     "D1",
 ]
 
+SUPPORTED_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
