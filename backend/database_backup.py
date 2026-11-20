@@ -176,6 +176,7 @@ class DatabaseBackupService:
 
             with self._database.maintenance():
                 database_disposed = False
+                primary_replaced = False
 
                 try:
                     # Preserve the current primary database so a failed
@@ -190,6 +191,7 @@ class DatabaseBackupService:
                         temporary_path,
                         self._database_path,
                     )
+                    primary_replaced = True
 
                     self._database.initialize()
                     database_disposed = False
@@ -205,7 +207,7 @@ class DatabaseBackupService:
                             self._database.dispose()
                             database_disposed = True
 
-                        if rollback_path.is_file():
+                        if primary_replaced and rollback_path.is_file():
                             os.replace(
                                 rollback_path,
                                 self._database_path,
