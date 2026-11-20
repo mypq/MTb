@@ -259,7 +259,8 @@ async def _run_collector_after_clock_verification(
             continue
 
 
-@asynccontextmanagerasync def lifespan(app: FastAPI):
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     settings = get_settings()
 
     adapter = MT5Adapter(settings=settings)
