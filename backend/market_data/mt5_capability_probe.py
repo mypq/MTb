@@ -119,7 +119,7 @@ class MT5CapabilityProbe:
                 checked_at=checked_at,
                 symbol=normalized_symbol,
                 evidence=(f"MT5 live quote probe failed: {type(exc).__name__}.",),
-                limitations=("A later quote may become available; this is not a permanent broker restriction.",),
+                limitations=("Retry the live quote probe later; a later quote may become available and this is not a permanent broker restriction.",),
                 account_login=account_login,
                 broker_server=broker_server,
             ))
