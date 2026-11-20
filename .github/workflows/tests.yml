@@ -37,8 +37,11 @@ jobs:
     # Enable automatic compilation by setting the repository variable
     # MQL5_COMPILE_ENABLED=true. Manual runs can opt in explicitly.
     if: >-
-      vars.MQL5_COMPILE_ENABLED == 'true' ||
-      (github.event_name == 'workflow_dispatch' && inputs.run_mql5_compile == true)
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/main' &&
+       vars.MQL5_COMPILE_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' &&
+       inputs.run_mql5_compile == true)
 
     steps:
       - name: Checkout repository
