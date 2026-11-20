@@ -16,6 +16,11 @@ on:
         required: true
         type: boolean
         default: true
+      run_mql5_compile:
+        description: "Compile MQL5 experts on a configured self-hosted MQL5 runner"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +30,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mql5-compile:
+    name: MQL5 Expert Advisor Compilation
+    runs-on: [self-hosted, Windows, MQL5]
+    timeout-minutes: 10
+    # Enable automatic compilation by setting the repository variable
+    # MQL5_COMPILE_ENABLED=true. Manual runs can opt in explicitly.
+    if: >-
+      vars.MQL5_COMPILE_ENABLED == 'true' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_mql5_compile == true)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile MQL5 Expert Advisors
+        env:
+          MQL5_METAEDITOR_PATH: ${{ vars.MQL5_METAEDITOR_PATH }}
+        shell: pwsh
+        run: ./scripts/ci/compile_mql5.ps1
+
   tests:
     name: Python and NTP Unit Tests
     runs-on: windows-latest
