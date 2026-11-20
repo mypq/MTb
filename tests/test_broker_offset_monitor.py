@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 
 import pytest
 
@@ -226,3 +228,76 @@ def test_monitor_logs_all_recorded_event_states(
         and f"state={state}" in record.message
         for record in caplog.records
     )
+
+
+def test_monitor_reports_missing_history_without_polling(tmp_path, monkeypatch):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
+
+        def unexpected_poll():
+            raise AssertionError("Evidence polling must pause for a missing file.")
+
+        monkeypatch.setattr(monitor._service, "poll_once", unexpected_poll)
+        task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            for _ in range(100):
+                if monitor.source_freshness().state == "MISSING":
+                    break
+                await asyncio.sleep(0.005)
+
+            assert monitor.source_freshness().state == "MISSING"
+            assert monitor.snapshot().state == "NOT_STARTED"
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(scenario())
+
+
+def test_monitor_pauses_stale_history_and_resumes_when_file_updates(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        monitor._clock_history_max_age_seconds = 1
+        history_path = monitor._clock_history_path
+        history_path.write_text("header\\n", encoding="utf-8")
+        old_time = time.time() - 10
+        os.utime(history_path, (old_time, old_time))
+
+        stop_event = asyncio.Event()
+        poll_calls = 0
+
+        def record_poll():
+            nonlocal poll_calls
+            poll_calls += 1
+            stop_event.set()
+            return BrokerOffsetServiceSnapshot(
+                state="COLLECTING",
+                samples_processed=0,
+                last_decision=None,
+                last_record=None,
+                error=None,
+            )
+
+        monkeypatch.setattr(monitor._service, "poll_once", record_poll)
+        task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            await asyncio.sleep(0.03)
+            assert monitor.source_freshness().state == "STALE"
+            assert poll_calls == 0
+
+            fresh_time = time.time()
+            os.utime(history_path, (fresh_time, fresh_time))
+            await asyncio.sleep(0.03)
+            assert poll_calls == 1
+            assert monitor.source_freshness().state == "FRESH"
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(scenario())
