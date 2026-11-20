@@ -193,6 +193,60 @@ def observation_key(row):
     )
 
 
+def _process_is_running(pid):
+    """Return True/False when the OS can determine whether a PID exists."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        ERROR_INVALID_PARAMETER = 87
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            error = ctypes.get_last_error()
+            if error == ERROR_INVALID_PARAMETER:
+                return False
+            if error == 5:  # Access denied: process may exist; fail closed.
+                return True
+            return None
+
+        try:
+            exit_code = wintypes.DWORD()
+            if not get_exit_code(handle, ctypes.byref(exit_code)):
+                return None
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            close_handle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return False
+        if exc.errno == errno.EPERM:
+            return True
+        return None
+
+    return True
+
+
 def _lock_owner_is_running(lock_path):
     """Return True/False when the recorded owner PID can be checked.
 
@@ -214,21 +268,7 @@ def _lock_owner_is_running(lock_path):
     if pid <= 0:
         return None
 
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return False
-        if exc.errno == errno.EPERM:
-            return True
-        return None
-
-    return True
-
+    return _process_is_running(pid)
 
 @contextmanager
 def exclusive_file_lock(lock_path):
