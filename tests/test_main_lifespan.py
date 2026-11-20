@@ -175,12 +175,16 @@ class FakeMarketDataCollector:
         symbol,
         timeframe,
         count,
+        timeframes=("M5",),
+        clock_calibrator=None,
     ):
         self.service = service
         self.repository = repository
         self.symbol = symbol
         self.timeframe = timeframe
         self.count = count
+        self.timeframes = tuple(timeframes)
+        self.clock_calibrator = clock_calibrator
         self.interval_seconds = 300.0
         self.events = []
 
@@ -282,13 +286,24 @@ def configure_lifecycle(
     workers = []
     broker_monitors = []
 
-    def create_collector(service, repository, *, symbol, timeframe, count):
+    def create_collector(
+        service,
+        repository,
+        *,
+        symbol,
+        timeframe,
+        count,
+        timeframes=("M5",),
+        clock_calibrator=None,
+    ):
         collector = FakeMarketDataCollector(
             service,
             repository,
             symbol=symbol,
             timeframe=timeframe,
             count=count,
+            timeframes=timeframes,
+            clock_calibrator=clock_calibrator,
         )
         collector.events = events
         collectors.append(collector)
