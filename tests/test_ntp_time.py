@@ -62,6 +62,63 @@ def make_verifier(clock, samples=None):
     )
 
 
+def test_root_delay_is_included_in_conservative_uncertainty():
+    clock = FakeClock()
+    samples = {
+        name: NtpSample(
+            server=name,
+            offset_seconds=0.05,
+            round_trip_seconds=0.08,
+            root_dispersion_seconds=0.01,
+            root_delay_seconds=0.40,
+        )
+        for name in valid_samples()
+    }
+
+    result = make_verifier(clock, samples).verify()
+
+    assert result.verified is True
+    assert result.uncertainty_seconds == pytest.approx(0.25)
+
+
+def test_negative_root_delay_is_counted_by_absolute_magnitude():
+    clock = FakeClock()
+    samples = {
+        name: NtpSample(
+            server=name,
+            offset_seconds=0.05,
+            round_trip_seconds=0.08,
+            root_dispersion_seconds=0.01,
+            root_delay_seconds=-0.40,
+        )
+        for name in valid_samples()
+    }
+
+    result = make_verifier(clock, samples).verify()
+
+    assert result.verified is True
+    assert result.uncertainty_seconds == pytest.approx(0.25)
+
+
+def test_root_delay_outside_limit_invalidates_verification():
+    clock = FakeClock()
+    samples = {
+        name: NtpSample(
+            server=name,
+            offset_seconds=0.05,
+            round_trip_seconds=0.08,
+            root_dispersion_seconds=0.01,
+            root_delay_seconds=2.01,
+        )
+        for name in valid_samples()
+    }
+
+    verifier = make_verifier(clock, samples)
+
+    assert verifier.verify().verified is False
+    assert verifier.last_verification() is None
+
+
 def test_verification_requires_three_valid_samples():
     clock = FakeClock()
     verifier = make_verifier(clock)

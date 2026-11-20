@@ -12,6 +12,7 @@ from backend.database_migrations import upgrade_database
 from backend.market_data.broker_candle_clock import (
     BrokerCandleClockCalibrator,
 )
+from backend.market_data.broker_offset_registry import BrokerOffsetRegistry
 from backend.market_data.collector import MarketDataCollector
 from backend.market_data.ntp_time import NtpTimeVerifier
 from backend.market_data.repository import MarketDataRepository
@@ -85,6 +86,13 @@ def main() -> int:
             )
 
         adapter.set_candle_clock_calibrator(calibrator)
+
+        # Use the same append-only historical evidence registry as production.
+        # The live calibration offset is never substituted for historical records.
+        offset_registry = BrokerOffsetRegistry(
+            settings.BROKER_OFFSET_REGISTRY_FILE
+        )
+        adapter.set_broker_offset_registry(offset_registry)
 
         # 3. Calibrate broker candle time from real M1/M5 boundaries.
         for number in range(CALIBRATION_SAMPLES):
@@ -179,12 +187,48 @@ def main() -> int:
                 f"last_error={mt5.last_error()}"
             )
 
-        offset_seconds = int(round(clock.offset_seconds))
+        account = mt5.account_info()
+        terminal = mt5.terminal_info()
 
-        expected_utc_epochs = sorted(
-            int(rate["time"]) - offset_seconds
-            for rate in raw_rates
+        if account is None or terminal is None:
+            raise RuntimeError(
+                "MT5 account or terminal identity is unavailable."
+            )
+
+        identity = (
+            int(account.login),
+            str(account.server).strip(),
+            symbol,
+            int(terminal.build),
         )
+        raw_epochs = tuple(int(rate["time"]) for rate in raw_rates)
+        historical_records = offset_registry.for_broker_times(
+            identity,
+            raw_epochs,
+        )
+
+        if any(record is None for record in historical_records):
+            unresolved = [
+                raw_epoch
+                for raw_epoch, record in zip(raw_epochs, historical_records)
+                if record is None
+            ]
+            raise RuntimeError(
+                "Historical broker-offset evidence does not cover every "
+                "requested MT5 candle. No live offset fallback is permitted. "
+                f"Unresolved raw timestamps: {unresolved}"
+            )
+
+        expected_pairs = sorted(
+            (
+                raw_epoch,
+                raw_epoch - record.offset_seconds,
+                record.offset_seconds,
+                record.record_sequence,
+            )
+            for raw_epoch, record in zip(raw_epochs, historical_records)
+        , key=lambda item: item[1])
+        expected_utc_epochs = [item[1] for item in expected_pairs]
 
         if any(value <= 0 for value in expected_utc_epochs):
             raise RuntimeError(
@@ -272,17 +316,15 @@ def main() -> int:
             },
             "candles": [
                 {
-                    "raw_mt5_epoch": int(rate["time"]),
+                    "raw_mt5_epoch": raw_epoch,
+                    "historical_offset_seconds": historical_offset,
+                    "registry_record_sequence": record_sequence,
                     "expected_utc_epoch": expected_epoch,
                     "stored_utc_epoch": stored_epoch,
                     "stored_timestamp_utc": candle.timestamp.isoformat(),
                 }
-                for rate, expected_epoch, stored_epoch, candle in zip(
-                    sorted(
-                        raw_rates,
-                        key=lambda item: int(item["time"]),
-                    ),
-                    expected_utc_epochs,
+                for (raw_epoch, expected_epoch, historical_offset, record_sequence), stored_epoch, candle in zip(
+                    expected_pairs,
                     stored_utc_epochs,
                     stored,
                 )

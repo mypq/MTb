@@ -20,6 +20,7 @@ class NtpSample:
     offset_seconds: float
     round_trip_seconds: float
     root_dispersion_seconds: float
+    root_delay_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,7 @@ class NtpTimeVerifier:
         timeout_seconds: float = 2.0,
         max_round_trip_seconds: float = 2.0,
         max_root_dispersion_seconds: float = 1.0,
+        max_root_delay_seconds: float = 2.0,
         max_offset_seconds: float = 1.0,
         max_offset_spread_seconds: float = 0.5,
         max_uncertainty_seconds: float = 1.0,
@@ -107,6 +109,10 @@ class NtpTimeVerifier:
         self._max_root_dispersion_seconds = self._positive(
             max_root_dispersion_seconds,
             "max_root_dispersion_seconds",
+        )
+        self._max_root_delay_seconds = self._positive(
+            max_root_delay_seconds,
+            "max_root_delay_seconds",
         )
         self._max_offset_seconds = self._positive(
             max_offset_seconds, "max_offset_seconds"
@@ -277,14 +283,10 @@ class NtpTimeVerifier:
             or not math.isfinite(root_dispersion)
             or root_dispersion < 0
             or root_dispersion > self._max_root_dispersion_seconds
+            or abs(root_delay) > self._max_root_delay_seconds
         ):
             raise RuntimeError(
                 "NTP response uncertainty is outside the limit."
-            )
-
-        if root_delay < -self._max_round_trip_seconds:
-            raise RuntimeError(
-                "NTP root delay is outside the supported limit."
             )
 
         return NtpSample(
@@ -292,6 +294,7 @@ class NtpTimeVerifier:
             offset_seconds=offset,
             round_trip_seconds=round_trip,
             root_dispersion_seconds=root_dispersion,
+            root_delay_seconds=root_delay,
         )
 
     def verify(self) -> NtpVerification:
@@ -334,6 +337,7 @@ class NtpTimeVerifier:
                         sample.offset_seconds,
                         sample.round_trip_seconds,
                         sample.root_dispersion_seconds,
+                        sample.root_delay_seconds,
                     )
                 ):
                     raise RuntimeError(
@@ -356,6 +360,11 @@ class NtpTimeVerifier:
                 ):
                     raise RuntimeError(
                         "NTP sample dispersion is invalid."
+                    )
+
+                if abs(sample.root_delay_seconds) > self._max_root_delay_seconds:
+                    raise RuntimeError(
+                        "NTP sample root delay is outside the limit."
                     )
 
                 used_servers.add(normalized_server)
@@ -394,6 +403,7 @@ class NtpTimeVerifier:
         # rather than the median, then include inter-server disagreement.
         uncertainty = max(
             sample.round_trip_seconds / 2.0
+            + abs(sample.root_delay_seconds) / 2.0
             + sample.root_dispersion_seconds
             for sample in samples
         ) + spread / 2.0

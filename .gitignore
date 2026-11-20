@@ -35,6 +35,18 @@ htmlcov/
 secrets/
 credentials/
 
+# Runtime broker-offset registry and its process lock (contains account identity/evidence)
+/data/broker_offsets.jsonl
+/data/broker_offsets.jsonl.lock
+/data/broker_offsets.jsonl.tmp
+/data/*.checkpoint.json
+/data/*.lock
+
+# Collected MT5 clock evidence and append-only archives (runtime data, not source)
+/diagnostics/broker_clock_history.csv
+/diagnostics/mt5_clock_evidence*.csv
+/diagnostics/mt5_live_candle_persistence.json
+
 # Local databases
 *.db
 *.sqlite

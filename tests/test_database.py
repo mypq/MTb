@@ -44,6 +44,45 @@ def test_initialize_creates_sqlite_directory(tmp_path: Path):
         database.dispose()
 
 
+def test_sqlite_foreign_keys_are_enabled_and_enforced(tmp_path: Path):
+    from sqlalchemy.exc import IntegrityError
+
+    database = Database(
+        f"sqlite:///{(tmp_path / 'foreign-keys.db').as_posix()}"
+    )
+
+    try:
+        database.initialize()
+
+        with database.session() as session:
+            assert session.execute(
+                text("PRAGMA foreign_keys")
+            ).scalar_one() == 1
+            session.execute(
+                text("CREATE TABLE parent_records (id INTEGER PRIMARY KEY)")
+            )
+            session.execute(
+                text(
+                    "CREATE TABLE child_records ("
+                    "parent_id INTEGER NOT NULL REFERENCES parent_records(id)"
+                    ")"
+                )
+            )
+
+        with pytest.raises(IntegrityError):
+            with database.session() as session:
+                session.execute(
+                    text("INSERT INTO child_records (parent_id) VALUES (999)")
+                )
+
+        with database.session() as session:
+            assert session.execute(
+                text("SELECT COUNT(*) FROM child_records")
+            ).scalar_one() == 0
+    finally:
+        database.dispose()
+
+
 def test_session_commits_successful_transaction(tmp_path: Path):
     database = Database(
         f"sqlite:///{(tmp_path / 'commit.db').as_posix()}"

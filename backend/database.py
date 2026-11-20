@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Condition, RLock, get_ident
 from typing import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -58,6 +58,13 @@ class Database:
                     pool_pre_ping=True,
                 )
 
+                if url.get_backend_name() == "sqlite":
+                    event.listen(
+                        engine,
+                        "connect",
+                        self._enable_sqlite_foreign_keys,
+                    )
+
                 factory = sessionmaker(
                     bind=engine,
                     autoflush=False,
@@ -71,6 +78,15 @@ class Database:
                 raise DatabaseError(
                     "Failed to initialize the database."
                 ) from exc
+
+    @staticmethod
+    def _enable_sqlite_foreign_keys(connection, _record) -> None:
+        """Enable SQLite foreign-key enforcement on every DBAPI connection."""
+        cursor = connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
     @staticmethod
     def _prepare_sqlite_directory(url) -> None:
