@@ -67,6 +67,7 @@ class Settings(BaseSettings):
 
     # MT5 broker clock evidence
     MT5_CLOCK_HISTORY_FILE: str | None = None
+    MT5_CLOCK_HISTORY_MAX_AGE_SECONDS: int = 180
     BROKER_OFFSET_REGISTRY_FILE: str = "data/broker_offsets.jsonl"
     BROKER_OFFSET_POLL_INTERVAL_SECONDS: float = 1.0
 
@@ -112,6 +113,15 @@ class Settings(BaseSettings):
             raise ValueError("Configured file paths must be strings.")
         value = value.strip()
         return value or None
+
+    @field_validator("MT5_CLOCK_HISTORY_MAX_AGE_SECONDS")
+    @classmethod
+    def validate_mt5_clock_history_max_age(cls, value: int) -> int:
+        if isinstance(value, bool) or value < 1:
+            raise ValueError(
+                "MT5_CLOCK_HISTORY_MAX_AGE_SECONDS must be a positive integer."
+            )
+        return value
 
     @field_validator("BROKER_OFFSET_REGISTRY_FILE")
     @classmethod
