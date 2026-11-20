@@ -606,9 +606,8 @@ async def lifespan(app: FastAPI):
                         timeframes=SUPPORTED_TIMEFRAMES,
                         clock_calibrator=broker_candle_clock_calibrator,
                     )
-                    # Attach the optional registry after construction so
-                    # existing collector factories and test doubles that
-                    # implement the original constructor remain compatible.
+                    # All configured timeframes report through the same
+                    # lifecycle-owned capability registry.
                     collector._capability_registry = capability_registry
 
                     app.state.market_data_collector = collector
