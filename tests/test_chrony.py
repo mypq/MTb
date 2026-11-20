@@ -78,7 +78,7 @@ def test_chrony_reports_synchronized_with_three_nts_sources():
     assert status.synchronized is True
     assert status.stratum == 4
     assert status.leap_status == "Normal"
-    assert status.selected_source == "162.159.200.123"
+    assert status.selected_source == "time.cloudflare.com"
     assert status.healthy_sources == 3
     assert status.nts_authenticated_sources == 3
     assert status.quorum_met is True
@@ -100,7 +100,7 @@ def test_chrony_preserves_healthy_sources_when_authdata_is_empty():
 
     assert status.available is True
     assert status.synchronized is False
-    assert status.selected_source == "162.159.200.123"
+    assert status.selected_source == "time.cloudflare.com"
     assert status.healthy_sources == 3
     assert status.nts_authenticated_sources == 0
     assert status.quorum_met is False
