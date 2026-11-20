@@ -1,4 +1,5 @@
 import asyncio
+from threading import Event, current_thread, main_thread
 from types import SimpleNamespace
 
 import backend.main as main
@@ -408,3 +409,52 @@ def test_system_status_reports_unavailable_candle_calibrator(
         "sample_count": 0,
         "reason": "Candle clock calibrator is unavailable.",
     }
+
+
+
+def test_system_status_runs_blocking_checks_without_blocking_event_loop(
+    monkeypatch,
+):
+    chrony_status = make_chrony_status()
+    release_checks = Event()
+    worker_threads = []
+
+    class BlockingAdapter(FakeAdapter):
+        def connection_status(self):
+            worker_threads.append(current_thread())
+            if not release_checks.wait(timeout=5):
+                raise AssertionError("MT5 status check was not released.")
+            return super().connection_status()
+
+    class BlockingChronyService(FakeChronyStatusService):
+        def snapshot(self):
+            worker_threads.append(current_thread())
+            if not release_checks.wait(timeout=5):
+                raise AssertionError("Chrony status check was not released.")
+            return self.status
+
+    endpoint = create_status_endpoint(monkeypatch, chrony_status)
+    application = endpoint.__globals__["application"]
+    application.state.mt5_adapter = BlockingAdapter()
+    application.state.chrony_status_service = BlockingChronyService(
+        chrony_status
+    )
+
+    async def scenario():
+        endpoint_task = asyncio.create_task(endpoint())
+
+        try:
+            # This coroutine must keep running while both synchronous
+            # status checks are blocked in worker threads.
+            await asyncio.sleep(0.05)
+            assert not endpoint_task.done()
+            assert len(worker_threads) == 2
+            assert all(thread is not main_thread() for thread in worker_threads)
+        finally:
+            release_checks.set()
+
+        result = await asyncio.wait_for(endpoint_task, timeout=2)
+        assert result["time_sync"]["available"] is True
+        assert result["mt5_connection"]["connected"] is False
+
+    asyncio.run(scenario())
