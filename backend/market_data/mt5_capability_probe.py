@@ -8,13 +8,22 @@ from backend.market_data.capabilities import (
     CapabilityStatus,
     MarketDataCapability,
 )
-from backend.mt5.timeframes import normalize_timeframe
+from backend.config import SUPPORTED_TIMEFRAMES
 
 
 class MT5CapabilitySource(Protocol):
     def get_account_info(self): ...
     def get_symbol_info(self, symbol: str): ...
     def get_broker_time_sample(self, symbol: str): ...
+
+
+def _normalize_timeframe(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("Timeframe must be a string.")
+    normalized = value.strip().upper()
+    if normalized not in SUPPORTED_TIMEFRAMES:
+        raise ValueError(f"Unsupported timeframe: {value!r}.")
+    return normalized
 
 
 class MT5CapabilityProbe:
@@ -41,7 +50,7 @@ class MT5CapabilityProbe:
         timeframes: tuple[str, ...] | list[str] | None = None,
     ) -> tuple[MarketDataCapability, ...]:
         normalized_symbol = symbol.strip()
-        normalized_timeframe = normalize_timeframe(timeframe)
+        normalized_timeframe = _normalize_timeframe(timeframe)
         if not normalized_symbol:
             raise ValueError("Symbol cannot be empty.")
 
@@ -59,7 +68,7 @@ class MT5CapabilityProbe:
                 "timeframes must be a non-empty tuple or list."
             )
         normalized_timeframes = tuple(
-            normalize_timeframe(value)
+            _normalize_timeframe(value)
             for value in configured_timeframes
         )
         if len(set(normalized_timeframes)) != len(normalized_timeframes):
