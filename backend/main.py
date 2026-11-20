@@ -241,8 +241,9 @@ async def lifespan(app: FastAPI):
     )
 
     # Broker-offset evidence pipeline.
-    # This pipeline records candidates only. It does not authorize
-    # offsets for candle timestamps, market calendars, or trading.
+    # The registry is consumed by MT5Adapter for per-candle historical
+    # UTC conversion. Evidence does not authorize market-calendar
+    # decisions or trading; those remain independently gated.
     broker_offset_service = None
     broker_offset_monitor = None
 
@@ -273,7 +274,8 @@ async def lifespan(app: FastAPI):
         logger.info(
             "Broker offset evidence pipeline configured: "
             "history_file=%s registry_file=%s "
-            "interval_seconds=%s authorization=DISABLED",
+            "interval_seconds=%s historical_candle_conversion=ENABLED "
+            "market_calendar_authorization=DISABLED trading_authorization=DISABLED",
             clock_history_file,
             settings.BROKER_OFFSET_REGISTRY_FILE,
             settings.BROKER_OFFSET_POLL_INTERVAL_SECONDS,
