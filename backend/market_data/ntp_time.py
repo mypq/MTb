@@ -32,6 +32,7 @@ class NtpVerification:
     sample_count: int
     servers: tuple[str, ...]
     error: str | None = None
+    nts_quorum_verified: bool = False
 
 
 class NtpTimeVerifier:
@@ -39,8 +40,11 @@ class NtpTimeVerifier:
     Verifies the local system clock against multiple NTP servers.
 
     This implementation uses unauthenticated NTP over UDP.
-    It validates the response structure and source endpoint, but
-    does not provide NTS cryptographic authentication.
+    It validates response structure and source endpoint, but does not
+    provide NTS cryptographic authentication for those UDP packets.
+    When configured, an independent NTS quorum callback is a mandatory
+    final acceptance gate; this does not convert UDP samples into NTS-
+    authenticated packets.
 
     A successful verification requires:
     - At least three distinct valid server samples.
@@ -72,6 +76,7 @@ class NtpTimeVerifier:
         wall_clock: Callable[[], float] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
         query: Callable[[str], NtpSample] | None = None,
+        nts_authentication_check: Callable[[], bool] | None = None,
     ) -> None:
         selected_servers = tuple(
             servers if servers is not None else self.DEFAULT_SERVERS
@@ -132,6 +137,13 @@ class NtpTimeVerifier:
         self._wall_clock = wall_clock or time.time
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._query = query or self._query_server
+        if nts_authentication_check is not None and not callable(
+            nts_authentication_check
+        ):
+            raise ValueError(
+                "nts_authentication_check must be callable when configured."
+            )
+        self._nts_authentication_check = nts_authentication_check
 
         self._last_success_monotonic: float | None = None
         self._last_success_unix: float | None = None
@@ -297,6 +309,11 @@ class NtpTimeVerifier:
             root_delay_seconds=root_delay,
         )
 
+    @property
+    def requires_nts_quorum(self) -> bool:
+        """Whether successful verification is gated by a Chrony NTS quorum."""
+        return self._nts_authentication_check is not None
+
     def verify(self) -> NtpVerification:
         # A new verification attempt starts by invalidating previous
         # trust. Only this attempt can establish a new trusted result.
@@ -416,6 +433,24 @@ class NtpTimeVerifier:
                 "NTP uncertainty exceeds the allowed limit."
             )
 
+        nts_quorum_verified = False
+        if self._nts_authentication_check is not None:
+            try:
+                nts_quorum_verified = (
+                    self._nts_authentication_check() is True
+                )
+            except Exception as exc:
+                return self._failed(
+                    "Chrony NTS authentication quorum check failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            if not nts_quorum_verified:
+                return self._failed(
+                    "Chrony NTS authentication quorum is not verified; "
+                    "independent NTP verification was rejected."
+                )
+
         checked_at = self._wall_clock()
         monotonic_now = self._monotonic_clock()
 
@@ -437,6 +472,7 @@ class NtpTimeVerifier:
             servers=tuple(
                 sample.server for sample in samples
             ),
+            nts_quorum_verified=nts_quorum_verified,
         )
 
         self._last_success_unix = checked_at

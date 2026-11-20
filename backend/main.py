@@ -52,6 +52,18 @@ BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
 SESSION_CALENDAR_RELOAD_INTERVAL_SECONDS = 60
 
 
+def _chrony_nts_quorum_verified(
+    chrony_service: ChronyStatusService,
+) -> bool:
+    """Return true only while Chrony's authenticated NTS quorum is healthy."""
+    status = chrony_service.snapshot()
+    return bool(
+        status.available
+        and status.synchronized
+        and status.quorum_met
+    )
+
+
 async def _session_calendar_reload_loop(
     path: str,
     validator: MarketDataValidator,
@@ -247,8 +259,7 @@ async def _run_collector_after_clock_verification(
             continue
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+@asynccontextmanagerasync def lifespan(app: FastAPI):
     settings = get_settings()
 
     adapter = MT5Adapter(settings=settings)
@@ -278,7 +289,11 @@ async def lifespan(app: FastAPI):
 
     chrony_service = ChronyStatusService()
 
-    ntp_verifier = NtpTimeVerifier()
+    ntp_verifier = NtpTimeVerifier(
+        nts_authentication_check=(
+            lambda: _chrony_nts_quorum_verified(chrony_service)
+        ),
+    )
 
     ntp_verification_monitor = NtpVerificationMonitor(
         verifier=ntp_verifier,
@@ -498,7 +513,6 @@ async def lifespan(app: FastAPI):
             initial_status = adapter.connect()
 
             monitor.start()
-
             selected_symbol = settings.MT5_SYMBOL.strip()
 
             if selected_symbol:
@@ -747,7 +761,6 @@ async def lifespan(app: FastAPI):
                 logger.exception(
                     "Failed to dispose database engine."
                 )
-
 
 def create_app() -> FastAPI:
     settings = get_settings()

@@ -339,3 +339,85 @@ def test_large_positive_and_negative_clock_skew_are_rejected(
     assert result.verified is False
     assert verifier.is_trusted() is False
     assert verifier.last_verification() is None
+
+
+
+def test_nts_quorum_gate_is_required_for_successful_verification():
+    clock = FakeClock()
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=lambda: True,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is True
+    assert result.nts_quorum_verified is True
+    assert verifier.requires_nts_quorum is True
+    assert verifier.is_trusted() is True
+
+
+def test_missing_nts_quorum_rejects_otherwise_valid_ntp_samples():
+    clock = FakeClock()
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=lambda: False,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert result.nts_quorum_verified is False
+    assert "NTS authentication quorum" in result.error
+    assert verifier.is_trusted() is False
+
+
+def test_nts_quorum_check_exception_rejects_verification():
+    clock = FakeClock()
+
+    def unavailable_chrony():
+        raise RuntimeError("Chrony unavailable")
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=unavailable_chrony,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert "Chrony NTS authentication quorum check failed" in result.error
+    assert "Chrony unavailable" in result.error
+    assert verifier.is_trusted() is False
+
+
+def test_failed_nts_quorum_reverification_invalidates_previous_trust():
+    clock = FakeClock()
+    gate = {"verified": True}
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=lambda: gate["verified"],
+    )
+
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+    gate["verified"] = False
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+
+def test_non_callable_nts_authentication_check_is_rejected():
+    with pytest.raises(ValueError, match="must be callable"):
+        NtpTimeVerifier(nts_authentication_check=True)
