@@ -115,7 +115,13 @@ class MarketCandle(BaseModel):
 
 
 class MarketDataClockEvidence(BaseModel):
-    """Trusted clock evidence bound to one MT5 candle batch."""
+    """Current live clock-health evidence bound to one MT5 candle batch.
+
+    ``candle_offset_seconds`` describes the live M1/M5 calibration used to
+    verify the current terminal clock. It is not the historical offset used
+    to convert each candle; historical conversion is resolved per raw MT5
+    timestamp through BrokerOffsetRegistry before a MarketCandle is built.
+    """
 
     model_config = ConfigDict(frozen=True)
 
