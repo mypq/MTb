@@ -221,6 +221,51 @@ def test_service_preserves_history_until_initial_ntp_verification(
     assert registry.load()[0].offset_seconds == 7200
 
 
+def test_service_replays_batch_when_ntp_snapshot_changes_mid_poll(
+    tmp_path,
+):
+    history_path = tmp_path / "clock_history.csv"
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+    write_history(
+        history_path,
+        [make_row(sequence, 7200) for sequence in range(1, 4)],
+    )
+
+    verifier = make_verifier()
+    detector = BrokerOffsetDetector(verifier)
+    original_observe = detector.observe
+    refreshed = False
+
+    def observe_and_refresh(sample):
+        nonlocal refreshed
+        decision = original_observe(sample)
+        if not refreshed:
+            refreshed = True
+            assert verifier.verify().verified
+        return decision
+
+    detector.observe = observe_and_refresh
+    service = BrokerOffsetEvidenceService(
+        history_path,
+        detector,
+        registry,
+    )
+
+    first = service.poll_once()
+
+    assert first.state == "WAITING_FOR_NTP"
+    assert first.samples_processed == 0
+    assert not history_path.with_suffix(".checkpoint.json").exists()
+    assert registry.load() == ()
+
+    second = service.poll_once()
+
+    assert second.state == "BASELINE_RECORDED"
+    assert second.samples_processed == 3
+    assert len(registry.load()) == 1
+    assert registry.load()[0].offset_seconds == 7200
+
+
 def test_polling_without_new_samples_does_not_duplicate_record(tmp_path):
     rows = [make_row(sequence, 7200) for sequence in range(1, 4)]
     service, registry, _ = make_service(tmp_path, rows)
