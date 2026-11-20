@@ -221,13 +221,19 @@ def main() -> int:
 
         expected_pairs = sorted(
             (
-                raw_epoch,
-                raw_epoch - record.offset_seconds,
-                record.offset_seconds,
-                record.record_sequence,
-            )
-            for raw_epoch, record in zip(raw_epochs, historical_records)
-        , key=lambda item: item[1])
+                (
+                    raw_epoch,
+                    raw_epoch - record.offset_seconds,
+                    record.offset_seconds,
+                    record.record_sequence,
+                )
+                for raw_epoch, record in zip(
+                    raw_epochs,
+                    historical_records,
+                )
+            ),
+            key=lambda item: item[1],
+        )
         expected_utc_epochs = [item[1] for item in expected_pairs]
 
         if any(value <= 0 for value in expected_utc_epochs):
