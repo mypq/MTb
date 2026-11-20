@@ -131,7 +131,6 @@ class ChronyStatusService:
                         "sudo",
                         "-n",
                         "/usr/bin/chronyc",
-                        "-n",
                         "sources",
                         "-v",
                     ],
@@ -160,7 +159,7 @@ class ChronyStatusService:
 
             return result.stdout
 
-        return self._run("-n", "sources", "-v")
+        return self._run("sources", "-v")
 
     def _run_authdata(self) -> str:
         """Read NTS authentication records with the required WSL privilege."""
@@ -255,9 +254,12 @@ class ChronyStatusService:
         return parsed
 
     @staticmethod
-    def _parse_sources(output: str) -> tuple[str | None, int]:
+    def _parse_sources(
+        output: str,
+    ) -> tuple[str | None, int, frozenset[str]]:
         selected_source: str | None = None
         healthy_sources = 0
+        healthy_source_providers: set[str] = set()
 
         for line in output.splitlines():
             fields = line.split()
@@ -288,6 +290,9 @@ class ChronyStatusService:
                 continue
 
             healthy_sources += 1
+            provider = ChronyStatusService._nts_provider(source)
+            if provider is not None:
+                healthy_source_providers.add(provider)
 
             if mode_state[1] == "*":
                 if selected_source is not None:
@@ -297,7 +302,11 @@ class ChronyStatusService:
 
                 selected_source = source
 
-        return selected_source, healthy_sources
+        return (
+            selected_source,
+            healthy_sources,
+            frozenset(healthy_source_providers),
+        )
 
     @staticmethod
     def _nts_provider(source: str) -> str | None:
@@ -326,7 +335,7 @@ class ChronyStatusService:
         return None
 
     @classmethod
-    def _parse_authdata(cls, output: str) -> int:
+    def _parse_authdata(cls, output: str) -> frozenset[str]:
         """Count healthy NTS records from the three approved providers.
 
         Netnod endpoint names may vary, but must belong to the exact
@@ -423,7 +432,7 @@ class ChronyStatusService:
                 "Chrony authdata output is missing its expected header."
             )
 
-        return len(authenticated_providers)
+        return frozenset(authenticated_providers)
 
     def snapshot(self) -> ChronyStatus:
         """Return current Chrony status; query failures are unavailable."""
@@ -435,13 +444,16 @@ class ChronyStatusService:
             sources_output = self._run_sources()
             authdata_output = self._run_authdata()
 
-            selected_source, healthy_sources = self._parse_sources(
-                sources_output
-            )
+            (
+                selected_source,
+                healthy_sources,
+                healthy_source_providers,
+            ) = self._parse_sources(sources_output)
 
-            authenticated_sources = self._parse_authdata(
+            authenticated_provider_names = self._parse_authdata(
                 authdata_output
             )
+            authenticated_sources = len(authenticated_provider_names)
 
             reference_id = tracking["Reference ID"]
             stratum = int(tracking["Stratum"].split()[0])
@@ -467,6 +479,9 @@ class ChronyStatusService:
             quorum_met = (
                 healthy_sources == REQUIRED_NTS_SOURCES
                 and authenticated_sources == REQUIRED_NTS_SOURCES
+                and healthy_source_providers
+                == authenticated_provider_names
+                and len(healthy_source_providers) == REQUIRED_NTS_SOURCES
             )
 
             synchronized = (
