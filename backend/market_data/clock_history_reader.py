@@ -192,19 +192,16 @@ class ClockHistoryIncrementalReader:
                     "Clock history prefix was modified before the checkpoint."
                 )
 
-        # Re-hashing the entire verified prefix on every poll needlessly
-        # holds the cross-process writer lock longer as the file grows and
-        # blocks the EA. Reuse the verified digest; detect in-place rewrites
-        # that preserve file size through the saved modification timestamp.
-        if self._checkpoint_verified:
-            if (
-                stat_result.st_size == checkpoint.file_size
-                and stat_result.st_mtime_ns != checkpoint.file_mtime_ns
-            ):
-                raise ClockHistoryFileChangedError(
-                    "Clock history file was modified without an append."
-                )
-
+        # The saved digest can be reused only while both file size and
+        # modification time are unchanged. If either changes, re-verify the
+        # complete checkpointed prefix before accepting any appended rows.
+        # Checking only same-size rewrites is insufficient: an old row could
+        # be modified and new rows appended in the same write operation.
+        if (
+            self._checkpoint_verified
+            and stat_result.st_size == checkpoint.file_size
+            and stat_result.st_mtime_ns == checkpoint.file_mtime_ns
+        ):
             handle.seek(checkpoint.offset)
             try:
                 digest = bytes.fromhex(checkpoint.prefix_sha256)
@@ -220,10 +217,10 @@ class ClockHistoryIncrementalReader:
                 checkpoint.offset,
             )
 
+        # First use, or file metadata changed: verify the complete prefix.
         handle.seek(0)
         remaining = checkpoint.offset
         digest = _ZERO_HASH
-        verified_offset = 0
 
         while remaining:
             line = handle.readline(remaining)
@@ -235,7 +232,6 @@ class ClockHistoryIncrementalReader:
                 )
 
             digest = _next_hash(digest, line)
-            verified_offset += len(line)
             remaining -= len(line)
 
         if digest.hex() != checkpoint.prefix_sha256:
