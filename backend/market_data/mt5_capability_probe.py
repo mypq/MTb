@@ -8,6 +8,7 @@ from backend.market_data.capabilities import (
     CapabilityStatus,
     MarketDataCapability,
 )
+from backend.mt5.timeframes import normalize_timeframe
 
 
 class MT5CapabilitySource(Protocol):
@@ -37,13 +38,36 @@ class MT5CapabilityProbe:
         timeframe: str,
         *,
         include_live_quote: bool = True,
+        timeframes: tuple[str, ...] | list[str] | None = None,
     ) -> tuple[MarketDataCapability, ...]:
         normalized_symbol = symbol.strip()
-        normalized_timeframe = timeframe.strip().upper()
+        normalized_timeframe = normalize_timeframe(timeframe)
         if not normalized_symbol:
             raise ValueError("Symbol cannot be empty.")
-        if not normalized_timeframe:
-            raise ValueError("Timeframe cannot be empty.")
+
+        configured_timeframes = (
+            (normalized_timeframe,)
+            if timeframes is None
+            else timeframes
+        )
+        if (
+            isinstance(configured_timeframes, (str, bytes))
+            or not isinstance(configured_timeframes, (tuple, list))
+            or not configured_timeframes
+        ):
+            raise ValueError(
+                "timeframes must be a non-empty tuple or list."
+            )
+        normalized_timeframes = tuple(
+            normalize_timeframe(value)
+            for value in configured_timeframes
+        )
+        if len(set(normalized_timeframes)) != len(normalized_timeframes):
+            raise ValueError("timeframes must not contain duplicates.")
+        if normalized_timeframe not in normalized_timeframes:
+            raise ValueError(
+                "The primary timeframe must be included in timeframes."
+            )
 
         checked_at = datetime.now(timezone.utc)
         account_login = None
@@ -137,15 +161,21 @@ class MT5CapabilityProbe:
                 broker_server=broker_server,
             ))
 
-        observations.extend((
+        observations.extend(
             self._record(
                 capability="candle_history",
                 status=CapabilityStatus.UNKNOWN,
                 checked_at=checked_at,
                 symbol=normalized_symbol,
-                timeframe=normalized_timeframe,
-                limitations=("Only the normal clock-verified and validated collector can establish availability.",),
-            ),
+                timeframe=frame,
+                limitations=(
+                    "Only the normal clock-verified and validated collector "
+                    "can establish availability.",
+                ),
+            )
+            for frame in normalized_timeframes
+        )
+        observations.extend((
             self._record(
                 capability="tick_history_archive",
                 status=CapabilityStatus.UNAVAILABLE,
