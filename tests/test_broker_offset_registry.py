@@ -1638,7 +1638,7 @@ def test_offset_change_after_v1_does_not_invent_transition_bounds(
     ) is None
 
 
-def test_append_rejects_legacy_ntp_adjusted_calculation(
+def test_append_rejects_legacy_raw_calculation(
     tmp_path,
 ) -> None:
     registry = BrokerOffsetRegistry(
@@ -1652,8 +1652,8 @@ def test_append_rejects_legacy_ntp_adjusted_calculation(
     legacy_samples = tuple(
         replace(
             sample,
-            calculated_offset_seconds=(
-                sample.calculated_offset_seconds - 0.25
+            calculated_offset_seconds=float(
+                sample.server_utc_offset_seconds
             ),
         )
         for sample in decision.evidence_samples
@@ -1676,7 +1676,7 @@ def test_append_rejects_legacy_ntp_adjusted_calculation(
     assert registry.load() == ()
 
 
-def test_load_preserves_legacy_ntp_adjusted_records_without_rewriting(
+def test_load_preserves_legacy_raw_calculation_records_without_rewriting(
     tmp_path,
 ) -> None:
     path = tmp_path / "offsets.jsonl"
@@ -1694,7 +1694,10 @@ def test_load_preserves_legacy_ntp_adjusted_records_without_rewriting(
     stored = read_json_lines(path)
 
     for sample in stored[0]["evidence_samples"]:
-        sample["calculated_offset_seconds"] -= 0.25
+        # Older records stored the raw MT5 clock difference.
+        sample["calculated_offset_seconds"] = float(
+            sample["server_utc_offset_seconds"]
+        )
 
     write_json_lines(path, stored)
 
