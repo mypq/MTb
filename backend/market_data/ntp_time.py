@@ -152,6 +152,7 @@ class NtpTimeVerifier:
         self._last_success_monotonic: float | None = None
         self._last_success_unix: float | None = None
         self._last_verification: NtpVerification | None = None
+        self._last_trust_clock_pair: tuple[float, float] | None = None
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -585,6 +586,7 @@ class NtpTimeVerifier:
         self._last_success_unix = checked_at
         self._last_success_monotonic = monotonic_now
         self._last_verification = result
+        self._last_trust_clock_pair = final_clock_pair
 
         return result
 
@@ -607,17 +609,34 @@ class NtpTimeVerifier:
             or self._last_success_unix is None
             or self._last_verification is None
             or not self._last_verification.verified
+            or self._last_trust_clock_pair is None
         ):
             return False
 
-        now_monotonic = self._monotonic_clock()
-        elapsed = now_monotonic - self._last_success_monotonic
+        try:
+            current_clock_pair = self._read_clock_pair()
+        except Exception:
+            self.reset()
+            return False
+
+        if not self._clock_interval_is_stable(
+            self._last_trust_clock_pair,
+            current_clock_pair,
+        ):
+            self.reset()
+            return False
+
+        self._last_trust_clock_pair = current_clock_pair
+        elapsed = (
+            current_clock_pair[1] - self._last_success_monotonic
+        )
 
         if (
             not math.isfinite(elapsed)
             or elapsed < 0
             or elapsed > self._max_age_seconds
         ):
+            self.reset()
             return False
 
         return True
@@ -632,3 +651,4 @@ class NtpTimeVerifier:
         self._last_success_monotonic = None
         self._last_success_unix = None
         self._last_verification = None
+        self._last_trust_clock_pair = None
