@@ -252,6 +252,65 @@ def test_one_outcome_per_signal_and_horizon(session):
     session.rollback()
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"outcome_type": "TRADE"},
+        {"measurement_basis": "TICK_DATA"},
+        {"entry_price_side": "UNKNOWN"},
+        {"spread_accounting": "SEPARATE_COST"},
+        {"slippage_knowledge": "ESTIMATED"},
+        {"net_pnl": Decimal("0.5")},
+        {"slippage_knowledge": "MEASURED"},
+        {"measurement_basis": "OHLC_APPROXIMATION"},
+        {"measurement_basis": "UNAVAILABLE"},
+    ],
+)
+def test_evaluation_outcome_database_constraints_reject_invalid_semantics(session, overrides):
+    run = make_run()
+    period = make_period(run)
+    signal = make_signal(run, period)
+    session.add(run)
+    session.flush()
+    session.add(signal)
+    session.flush()
+
+    outcome = make_outcome(signal)
+    values = {
+        column.name: getattr(outcome, column.name)
+        for column in EvaluationOutcomeRecord.__table__.columns
+    }
+    values.update(run_id=run.id, signal_id=signal.id, period_id=period.id)
+    values.update(overrides)
+
+    with pytest.raises(IntegrityError):
+        with session.no_autoflush:
+            session.execute(insert(EvaluationOutcomeRecord).values(**values))
+    session.rollback()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"direction": "SIDEWAYS"},
+        {"input_available_at": datetime(2026, 11, 21, 10, 0, 2, tzinfo=timezone.utc)},
+        {"filter_reason": None},
+    ],
+)
+def test_evaluation_signal_database_constraints_reject_invalid_semantics(session, overrides):
+    run = make_run()
+    period = make_period(run)
+    signal = make_signal(run, period)
+    for field, value in overrides.items():
+        setattr(signal, field, value)
+    session.add(run)
+    session.add(signal)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
 def test_numeric_fields_use_decimal_storage_type():
     column = EvaluationOutcomeRecord.__table__.c.entry_price
     assert column.type.asdecimal is True
