@@ -230,8 +230,11 @@ def test_outcome_cannot_mismatch_signal_run_or_period(session):
         period_id=period_b.id,
     )
     with pytest.raises(IntegrityError):
-        session.execute(insert(EvaluationOutcomeRecord).values(**values))
-        session.commit()
+        # This Core insert intentionally bypasses ORM relationship synchronization.
+        # Suppress autoflush so the transient ORM object is not flushed indirectly
+        # through signal.outcomes before the database-level composite FK is tested.
+        with session.no_autoflush:
+            session.execute(insert(EvaluationOutcomeRecord).values(**values))
     session.rollback()
 
 
