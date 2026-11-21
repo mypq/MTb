@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
 
 from backend.database import Database
 from backend.database_models import (
@@ -55,6 +54,7 @@ def add_batch(session, *, timeframe, received_at, clock_verified, timestamps, va
             )
         )
     session.add(batch)
+    return batch
 
 
 def test_depth_audit_reports_empty_timeframes_without_claiming_readiness(
@@ -153,7 +153,7 @@ def test_depth_audit_counts_unconfirmed_gaps_and_unknown_volume(repository):
     received = datetime(2026, 1, 1, 10, 6, tzinfo=UTC)
 
     with database.session() as session:
-        add_batch(
+        batch = add_batch(
             session,
             timeframe="M5",
             received_at=received,
@@ -170,12 +170,7 @@ def test_depth_audit_counts_unconfirmed_gaps_and_unknown_volume(repository):
                 ],
             },
         )
-        candle = session.scalar(
-            select(MarketCandleRecord).where(
-                MarketCandleRecord.timeframe == "M5"
-            )
-        )
-        candle.volume_source = "UNKNOWN"
+        batch.candles[0].volume_source = "UNKNOWN"
 
     report = MarketDataDepthAuditor(repo).audit("XAUUSD")
     m5 = next(item for item in report.timeframes if item.timeframe == "M5")
