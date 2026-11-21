@@ -16,16 +16,16 @@ from backend.evaluation.contracts import (
     validate_evaluation_period_set,
     validate_evaluation_relationships,
 )
-from backend.evaluation.service import (
+from backend.evaluation.market_data_series import (\n    EvaluationCandleGap,\n    EvaluationCandleSeriesEvidence,\n    EvaluationCandleSeriesReader,\n    EvaluationMarketDataRepository,\n)\nfrom backend.evaluation.service import (
     EvaluationService,
     HorizonSampleReadiness,
 )
 
 __all__ = [
     "CostKnowledge",
-    "EvaluationDirection",
+    "EvaluationCandleGap",\n    "EvaluationCandleSeriesEvidence",\n    "EvaluationCandleSeriesReader",\n    "EvaluationDirection",
     "EvaluationOutcomeContract",
-    "EvaluationOutcomeStatus",
+    "EvaluationOutcomeStatus",\n    "EvaluationMarketDataRepository",
     "EvaluationPeriodContract",
     "EvaluationRunContract",
     "EvaluationService",
