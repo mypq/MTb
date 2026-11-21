@@ -89,7 +89,9 @@ def test_range_reader_returns_chronological_candles_and_exposes_gap(
     ]
     assert len(evidence.gaps) == 1
     assert evidence.gaps[0].actual_interval_seconds == 600
-    assert evidence.gaps[0].missing_intervals == 1
+    # A timestamp gap is observable, but without a session calendar it
+    # cannot be labelled as a specific number of missing market candles.
+    assert evidence.gaps[0].missing_intervals is None
     assert evidence.is_contiguous is False
     assert evidence.duplicate_event_times == ()
 
