@@ -14,9 +14,11 @@ from backend.database_models import (
     EvaluationRunRecord,
     EvaluationSampleSelectionRecord,
     EvaluationSignalRecord,
+    EvaluationOutcomeRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationHorizon,
+    EvaluationOutcomeContract,
     EvaluationPeriodContract,
     EvaluationRunContract,
     EvaluationSignalContract,
@@ -369,6 +371,75 @@ class EvaluationService:
             ready=ready,
             status="READY" if ready else "NEEDS_MORE_DATA",
         )
+
+    def persist_outcomes(
+        self,
+        run: EvaluationRunContract,
+        periods: tuple[EvaluationPeriodContract, ...],
+        signals: Iterable[EvaluationSignalContract],
+        outcomes: Iterable[EvaluationOutcomeContract],
+    ) -> tuple[EvaluationOutcomeRecord, ...]:
+        """Persist validated counterfactual outcomes for already-persisted signals."""
+        signal_items = tuple(signals)
+        outcome_items = tuple(outcomes)
+        validate_evaluation_relationships(
+            run, periods, signal_items, outcome_items
+        )
+        if not outcome_items:
+            return ()
+
+        signal_ids = {str(item.signal_id) for item in signal_items}
+        if any(str(item.signal_id) not in signal_ids for item in outcome_items):
+            raise ValueError("Every outcome must reference a supplied signal.")
+
+        with self._database.session() as session:
+            stored_run = session.get(EvaluationRunRecord, str(run.run_id))
+            if stored_run is None:
+                raise ValueError("Evaluation run must be persisted before outcomes.")
+            stored_signal_ids = set(session.scalars(
+                select(EvaluationSignalRecord.id).where(
+                    EvaluationSignalRecord.run_id == str(run.run_id),
+                    EvaluationSignalRecord.id.in_(signal_ids),
+                )
+            ).all())
+            if stored_signal_ids != signal_ids:
+                raise ValueError("Every outcome signal must already be persisted for this run.")
+
+            records = [
+                EvaluationOutcomeRecord(
+                    id=str(item.outcome_id),
+                    run_id=str(item.run_id),
+                    signal_id=str(item.signal_id),
+                    period_id=str(item.period_id),
+                    contract_version=item.contract_version,
+                    horizon_minutes=item.horizon_minutes,
+                    outcome_type=item.outcome_type,
+                    direction=item.direction.value,
+                    status=item.status.value,
+                    measurement_basis=item.measurement_basis.value,
+                    entry_at=item.entry_at,
+                    exit_at=item.exit_at,
+                    entry_price=item.entry_price,
+                    exit_price=item.exit_price,
+                    entry_price_side=item.entry_price_side.value,
+                    exit_price_side=item.exit_price_side.value,
+                    gross_pnl=item.gross_pnl,
+                    spread_accounting=item.spread_accounting.value,
+                    spread_cost=item.spread_cost,
+                    slippage_cost=item.slippage_cost,
+                    slippage_knowledge=item.slippage_knowledge.value,
+                    commission_cost=item.commission_cost,
+                    commission_knowledge=item.commission_knowledge.value,
+                    swap_adjustment=item.swap_adjustment,
+                    swap_knowledge=item.swap_knowledge.value,
+                    costs_complete=item.costs_complete,
+                    net_pnl=item.net_pnl,
+                    created_at=item.created_at,
+                )
+                for item in outcome_items
+            ]
+            session.add_all(records)
+        return tuple(records)
 
     def get_run_periods(
         self,
