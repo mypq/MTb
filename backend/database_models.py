@@ -17,8 +17,10 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    and_,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, foreign, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 
 class DatabaseBase(DeclarativeBase):
@@ -100,7 +102,36 @@ class MarketCandleRecord(DatabaseBase):
 
 # This is a storage envelope, not a claim about the broker's tick size or digits.
 # Final instrument-specific precision remains a runtime/data-contract concern.
-EVALUATION_NUMERIC_TYPE = Numeric(precision=38, scale=18, asdecimal=True)
+class EvaluationDecimal(TypeDecorator[Decimal]):
+    """Exact decimal storage: TEXT on SQLite, NUMERIC on production databases."""
+
+    impl = Numeric(precision=38, scale=18, asdecimal=True)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(String(80))
+        return dialect.type_descriptor(
+            Numeric(precision=38, scale=18, asdecimal=True)
+        )
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+        if not decimal_value.is_finite():
+            raise ValueError("Evaluation values must be finite decimals")
+        if dialect.name == "sqlite":
+            return format(decimal_value, "f")
+        return decimal_value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+EVALUATION_NUMERIC_TYPE = EvaluationDecimal()
 
 
 class EvaluationRunRecord(DatabaseBase):
@@ -161,7 +192,14 @@ class EvaluationPeriodRecord(DatabaseBase):
     partition_method: Mapped[str] = mapped_column(String(64), nullable=False)
 
     run: Mapped[EvaluationRunRecord] = relationship(back_populates="periods")
-    signals: Mapped[list[EvaluationSignalRecord]] = relationship(back_populates="period")
+    signals: Mapped[list[EvaluationSignalRecord]] = relationship(
+        back_populates="period",
+        primaryjoin=lambda: and_(
+            EvaluationPeriodRecord.id == foreign(EvaluationSignalRecord.period_id),
+            EvaluationPeriodRecord.run_id == EvaluationSignalRecord.run_id,
+        ),
+        foreign_keys=lambda: [EvaluationSignalRecord.period_id],
+    )
 
 
 class EvaluationSignalRecord(DatabaseBase):
@@ -202,7 +240,12 @@ class EvaluationSignalRecord(DatabaseBase):
     # period_id is written by this relationship; run_id remains owned by run.
     # The composite database FK still enforces that both belong to the same run.
     period: Mapped[EvaluationPeriodRecord] = relationship(
-        back_populates="signals", foreign_keys=[period_id]
+        back_populates="signals",
+        primaryjoin=lambda: and_(
+            EvaluationPeriodRecord.id == foreign(EvaluationSignalRecord.period_id),
+            EvaluationPeriodRecord.run_id == EvaluationSignalRecord.run_id,
+        ),
+        foreign_keys=lambda: [period_id],
     )
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
@@ -224,11 +267,11 @@ class EvaluationOutcomeRecord(DatabaseBase):
         CheckConstraint("horizon_minutes IN (5, 15, 30, 60)", name="ck_evaluation_outcome_horizon"),
         CheckConstraint("status IN ('COMPLETED', 'NEEDS_MORE_DATA', 'INVALID')", name="ck_evaluation_outcome_status"),
         CheckConstraint("direction IN ('BUY', 'SELL')", name="ck_evaluation_outcome_direction"),
-        CheckConstraint("entry_price IS NULL OR entry_price > 0", name="ck_evaluation_outcome_entry_positive"),
-        CheckConstraint("exit_price IS NULL OR exit_price > 0", name="ck_evaluation_outcome_exit_positive"),
-        CheckConstraint("spread_cost IS NULL OR spread_cost >= 0", name="ck_evaluation_outcome_spread_nonnegative"),
-        CheckConstraint("slippage_cost IS NULL OR slippage_cost >= 0", name="ck_evaluation_outcome_slippage_nonnegative"),
-        CheckConstraint("commission_cost IS NULL OR commission_cost >= 0", name="ck_evaluation_outcome_commission_nonnegative"),
+        CheckConstraint("entry_price IS NULL OR CAST(entry_price AS NUMERIC) > 0", name="ck_evaluation_outcome_entry_positive"),
+        CheckConstraint("exit_price IS NULL OR CAST(exit_price AS NUMERIC) > 0", name="ck_evaluation_outcome_exit_positive"),
+        CheckConstraint("spread_cost IS NULL OR CAST(spread_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_spread_nonnegative"),
+        CheckConstraint("slippage_cost IS NULL OR CAST(slippage_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_slippage_nonnegative"),
+        CheckConstraint("commission_cost IS NULL OR CAST(commission_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_commission_nonnegative"),
         CheckConstraint(
             "(status = 'COMPLETED' AND entry_at IS NOT NULL AND exit_at IS NOT NULL AND entry_price IS NOT NULL AND exit_price IS NOT NULL AND gross_pnl IS NOT NULL AND exit_at > entry_at) OR "
             "(status <> 'COMPLETED' AND entry_at IS NULL AND exit_at IS NULL AND entry_price IS NULL AND exit_price IS NULL AND gross_pnl IS NULL AND spread_cost IS NULL AND slippage_cost IS NULL AND commission_cost IS NULL AND swap_adjustment IS NULL AND net_pnl IS NULL AND costs_complete = false)",
