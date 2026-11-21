@@ -278,7 +278,7 @@ class EvaluationOutcomeRecord(DatabaseBase):
             name="ck_evaluation_outcome_completion_fields",
         ),
         CheckConstraint(
-            "costs_complete = 0 OR (status = 'COMPLETED' AND measurement_basis = 'BID_ASK_QUOTES' AND net_pnl IS NOT NULL)",
+            "costs_complete = false OR (status = 'COMPLETED' AND measurement_basis = 'BID_ASK_QUOTES' AND net_pnl IS NOT NULL)",
             name="ck_evaluation_outcome_complete_costs",
         ),
         Index("ix_evaluation_outcomes_run_horizon_status", "run_id", "horizon_minutes", "status"),
