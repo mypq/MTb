@@ -11,7 +11,10 @@ from backend.database_models import (
     MarketCandleRecord,
     MarketDataBatchRecord,
 )
-from backend.market_data.contracts import MarketCandleDataContract
+from backend.market_data.contracts import (
+    MarketCandleDataContract,
+    MarketDataBatchContract,
+)
 from backend.market_data.models import (
     CandleQuality,
     MarketCandle,
@@ -130,6 +133,61 @@ class MarketDataRepository:
             ) from exc
 
         return tuple(candles)
+
+    def get_batch_contract(
+        self,
+        batch_id: int,
+    ) -> MarketDataBatchContract | None:
+        """Return the source, validation evidence, and candle IDs for a batch."""
+        if isinstance(batch_id, bool) or not isinstance(batch_id, int):
+            raise TypeError("batch_id must be an integer.")
+        if batch_id <= 0:
+            raise ValueError("batch_id must be positive.")
+
+        with self._database.session() as session:
+            batch = session.get(MarketDataBatchRecord, batch_id)
+            if batch is None:
+                return None
+
+            candle_ids = tuple(session.scalars(
+                select(MarketCandleRecord.id)
+                .where(MarketCandleRecord.batch_id == batch_id)
+                .order_by(MarketCandleRecord.timestamp)
+            ).all())
+
+            clock_evidence = None
+            if batch.clock_verified is not None:
+                clock_evidence = {
+                    "verified": batch.clock_verified,
+                    "checked_at": (
+                        self._as_utc(batch.clock_checked_at).isoformat()
+                        if batch.clock_checked_at is not None else None
+                    ),
+                    "terminal_build": batch.clock_terminal_build,
+                    "ntp_offset_seconds": batch.clock_ntp_offset_seconds,
+                    "ntp_uncertainty_seconds": batch.clock_ntp_uncertainty_seconds,
+                    "ntp_sample_count": batch.clock_ntp_sample_count,
+                    "ntp_servers": batch.clock_ntp_servers,
+                    "candle_offset_seconds": batch.clock_candle_offset_seconds,
+                    "candle_uncertainty_seconds": batch.clock_candle_uncertainty_seconds,
+                    "calibration_sample_count": batch.clock_calibration_sample_count,
+                }
+
+            return MarketDataBatchContract(
+                batch_id=batch.id,
+                instrument=batch.symbol,
+                timeframe=batch.timeframe,
+                source=batch.source,
+                available_at=self._as_utc(batch.received_at),
+                recorded_at=self._as_utc(batch.created_at),
+                candle_count=len(candle_ids),
+                candle_ids=candle_ids,
+                source_account_login=batch.clock_account_login,
+                source_broker_server=batch.clock_broker_server,
+                clock_verified=batch.clock_verified,
+                clock_evidence=clock_evidence,
+                validation_report=batch.validation_report,
+            )
 
     def get_candle_contract(
         self,
