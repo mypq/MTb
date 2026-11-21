@@ -20,7 +20,7 @@ from backend.market_data.contracts import MarketCandleDataContract
 class EvaluationOHLCOutcomeCalculator:
     """Calculate explicitly approximate counterfactual outcomes from M1 OHLC.
 
-    Entry is the open of the first M1 candle whose start is strictly after the
+    Entry is the open of the first M1 candle whose start is at or after the
     signal. The holding horizon begins at that assumed entry time. Exit is the
     close of the M1 candle ending exactly at entry_time + horizon.
 
@@ -72,7 +72,7 @@ class EvaluationOHLCOutcomeCalculator:
             )
 
         entry_candidates = [
-            candle for candle in items if candle.event_time > signal.signal_at
+            candle for candle in items if candle.event_time >= signal.signal_at
         ]
         if not entry_candidates:
             return self._incomplete(
@@ -95,8 +95,7 @@ class EvaluationOHLCOutcomeCalculator:
                 )
             by_time[candle.event_time] = candle
 
-        expected_count = horizon_minutes
-        if len(window) != expected_count:
+        if len(window) != horizon_minutes:
             return self._incomplete(
                 signal, horizon_minutes, EvaluationOutcomeStatus.NEEDS_MORE_DATA, created
             )
