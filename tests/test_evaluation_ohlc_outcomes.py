@@ -37,9 +37,11 @@ def make_signal(*, direction=EvaluationDirection.BUY, signal_at=BASE + timedelta
 
 
 def candle(minute, *, open_price=2000.0, close_price=2001.0, timeframe="M1",
-           instrument="XAUUSD", low=1999.0, high=2002.0, candle_id=None):
+           instrument="XAUUSD", low=None, high=None, candle_id=None):
     event_time = BASE + timedelta(minutes=minute)
     available = event_time + timedelta(minutes=1, seconds=1)
+    actual_low = min(open_price, close_price) - 1.0 if low is None else low
+    actual_high = max(open_price, close_price) + 1.0 if high is None else high
     return MarketCandleDataContract(
         candle_id=candle_id or minute + 100,
         batch_id=candle_id or minute + 100,
@@ -49,8 +51,8 @@ def candle(minute, *, open_price=2000.0, close_price=2001.0, timeframe="M1",
         available_at=available,
         recorded_at=available + timedelta(seconds=1),
         open=open_price,
-        high=high,
-        low=low,
+        high=actual_high,
+        low=actual_low,
         close=close_price,
         tick_volume=10,
         real_volume=None,
@@ -137,9 +139,20 @@ def test_missing_entry_or_exit_candle_requires_more_data():
     result = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, ())
     assert result.status == EvaluationOutcomeStatus.NEEDS_MORE_DATA
 
-    short = make_window()[:-1]
-    result = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, short)
+    # The 12:05 candle supplies the close at the exact 12:06 horizon boundary.
+    missing_exit = tuple(
+        item for item in make_window()
+        if item.event_time != BASE + timedelta(minutes=5)
+    )
+    result = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, missing_exit)
     assert result.status == EvaluationOutcomeStatus.NEEDS_MORE_DATA
+
+
+def test_candle_start_equal_to_signal_time_is_a_valid_entry_boundary():
+    signal = make_signal(signal_at=BASE + timedelta(minutes=1))
+    result = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, make_window())
+    assert result.status == EvaluationOutcomeStatus.COMPLETED
+    assert result.entry_at == signal.signal_at
 
 
 @pytest.mark.parametrize(
