@@ -245,7 +245,7 @@ class EvaluationSignalRecord(DatabaseBase):
             EvaluationPeriodRecord.id == foreign(EvaluationSignalRecord.period_id),
             EvaluationPeriodRecord.run_id == EvaluationSignalRecord.run_id,
         ),
-        foreign_keys=lambda: [period_id],
+        foreign_keys=lambda: [EvaluationSignalRecord.period_id],
     )
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
