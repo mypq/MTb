@@ -119,6 +119,7 @@ def test_database_models_create_expected_tables(session):
         "market_data_batches", "market_candles",
         "evaluation_runs", "evaluation_periods",
         "evaluation_signals", "evaluation_outcomes",
+        "evaluation_sample_selections",
     }
 
 
