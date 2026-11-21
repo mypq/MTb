@@ -171,3 +171,23 @@ def test_non_chronological_m1_input_is_rejected():
         EvaluationOHLCOutcomeCalculator().calculate(
             signal, 5, (candles[0], candles[2], candles[1], *candles[3:])
         )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"clock_verified": False},
+        {"analysis_eligible": False},
+        {"is_closed": False},
+        {"event_time": BASE + timedelta(minutes=1, seconds=1)},
+    ],
+)
+def test_unverified_or_unaligned_m1_candles_cannot_produce_outcomes(update):
+    signal = make_signal()
+    candles = list(make_window())
+    candles[0] = candles[0].model_copy(update=update)
+    result = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, tuple(candles))
+
+    assert result.status == EvaluationOutcomeStatus.INVALID
+    assert result.entry_price is None
+    assert result.gross_pnl is None
