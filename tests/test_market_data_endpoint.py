@@ -24,9 +24,10 @@ class FakeMarketDataService:
 
 
 class FakeMarketDataRepository:
-    def __init__(self, error=None, contract=None):
+    def __init__(self, error=None, contract=None, batch_contract=None):
         self.error = error
         self.contract = contract
+        self.batch_contract = batch_contract
         self.saved = []
 
     def save_snapshot(self, snapshot):
@@ -37,6 +38,9 @@ class FakeMarketDataRepository:
 
     def get_candle_contract(self, candle_id):
         return self.contract
+
+    def get_batch_contract(self, batch_id):
+        return self.batch_contract
 
 
 class FakeSnapshot:
@@ -302,5 +306,54 @@ def test_candle_contract_endpoint_returns_404_for_missing_candle(monkeypatch):
 
     with pytest.raises(HTTPException) as exc_info:
         route.endpoint(candle_id=999)
+
+    assert exc_info.value.status_code == 404
+
+
+
+def test_batch_contract_endpoint_returns_persisted_lineage(monkeypatch):
+    settings = SimpleNamespace(
+        APP_NAME="GOLD_BOT",
+        DEFAULT_TIMEFRAME="M5",
+        MT5_SYMBOL="XAUUSD",
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    application = main.create_app()
+    repository = FakeMarketDataRepository(
+        batch_contract=FakeDataContract()
+    )
+    application.state.market_data_repository = repository
+
+    route = next(
+        route for route in application.routes
+        if getattr(route, "path", None)
+        == "/api/v1/market-data/batches/{batch_id}/contract"
+    )
+
+    assert route.endpoint(batch_id=12) == {
+        "contract_version": "1.0",
+        "candle_id": 12,
+    }
+
+
+def test_batch_contract_endpoint_returns_404_for_missing_batch(monkeypatch):
+    settings = SimpleNamespace(
+        APP_NAME="GOLD_BOT",
+        DEFAULT_TIMEFRAME="M5",
+        MT5_SYMBOL="XAUUSD",
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    application = main.create_app()
+    repository = FakeMarketDataRepository(batch_contract=None)
+    application.state.market_data_repository = repository
+
+    route = next(
+        route for route in application.routes
+        if getattr(route, "path", None)
+        == "/api/v1/market-data/batches/{batch_id}/contract"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        route.endpoint(batch_id=999)
 
     assert exc_info.value.status_code == 404
