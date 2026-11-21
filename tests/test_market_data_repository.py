@@ -620,3 +620,48 @@ def test_candle_data_contract_rejects_invalid_ids(repository):
 
     with pytest.raises(ValueError):
         repo.get_candle_contract(0)
+
+
+def test_batch_contract_exposes_validation_clock_and_candle_lineage(repository):
+    repo, database = repository
+    snapshot = make_snapshot(count=2)
+
+    result = repo.save_snapshot(snapshot)
+    assert result.batch_id is not None
+
+    contract = repo.get_batch_contract(result.batch_id)
+
+    assert contract is not None
+    assert contract.contract_version == "1.0"
+    assert contract.record_type == "market_data_batch"
+    assert contract.batch_id == result.batch_id
+    assert contract.instrument == "XAUUSD"
+    assert contract.timeframe == "M5"
+    assert contract.source == "MT5"
+    assert contract.available_at == snapshot.batch.received_at
+    assert contract.recorded_at is not None
+    assert contract.candle_count == 2
+    assert len(contract.candle_ids) == 2
+    assert contract.source_account_login == 123456
+    assert contract.source_broker_server == "Test-Broker"
+    assert contract.clock_verified is True
+    assert contract.clock_evidence is not None
+    assert contract.clock_evidence["ntp_sample_count"] == 3
+    assert contract.validation_report is not None
+    assert contract.validation_report["analysis_eligible"] is True
+
+
+def test_batch_contract_returns_none_for_unknown_id(repository):
+    repo, _database = repository
+
+    assert repo.get_batch_contract(999999) is None
+
+
+def test_batch_contract_rejects_invalid_ids(repository):
+    repo, _database = repository
+
+    with pytest.raises(TypeError):
+        repo.get_batch_contract(True)
+
+    with pytest.raises(ValueError):
+        repo.get_batch_contract(0)
