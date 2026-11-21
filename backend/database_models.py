@@ -253,6 +253,9 @@ class EvaluationSignalRecord(DatabaseBase):
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
+    sample_selections: Mapped[list[EvaluationSampleSelectionRecord]] = relationship(
+        back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class EvaluationOutcomeRecord(DatabaseBase):
@@ -348,3 +351,76 @@ class EvaluationOutcomeRecord(DatabaseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     signal: Mapped[EvaluationSignalRecord] = relationship(back_populates="outcomes")
+
+
+
+class EvaluationSampleSelectionRecord(DatabaseBase):
+    """Auditable per-horizon decision for every candidate signal in a run."""
+
+    __tablename__ = "evaluation_sample_selections"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["signal_id", "run_id", "period_id"],
+            [
+                "evaluation_signals.id",
+                "evaluation_signals.run_id",
+                "evaluation_signals.period_id",
+            ],
+            ondelete="CASCADE",
+            name="fk_evaluation_sample_selection_signal_scope",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "horizon_minutes",
+            "signal_id",
+            name="uq_eval_sample_selection_run_horizon_signal",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "horizon_minutes",
+            "candidate_order",
+            name="uq_eval_sample_selection_candidate_order",
+        ),
+        CheckConstraint(
+            "horizon_minutes IN (5, 15, 30, 60)",
+            name="ck_eval_sample_selection_horizon",
+        ),
+        CheckConstraint(
+            "candidate_order > 0",
+            name="ck_eval_sample_selection_order_positive",
+        ),
+        CheckConstraint(
+            "decision_reason IN ('SELECTED', 'INELIGIBLE_REFERENCE', 'OVERLAPPING_HORIZON')",
+            name="ck_eval_sample_selection_reason",
+        ),
+        CheckConstraint(
+            "(selected = true AND decision_reason = 'SELECTED') OR "
+            "(selected = false AND decision_reason IN ('INELIGIBLE_REFERENCE', 'OVERLAPPING_HORIZON'))",
+            name="ck_eval_sample_selection_decision_consistency",
+        ),
+        Index(
+            "ix_eval_sample_selection_run_horizon_selected_order",
+            "run_id",
+            "horizon_minutes",
+            "selected",
+            "candidate_order",
+        ),
+        Index(
+            "ix_eval_sample_selection_period_horizon",
+            "period_id",
+            "horizon_minutes",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    signal_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    period_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    horizon_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    candidate_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    decision_reason: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    signal: Mapped[EvaluationSignalRecord] = relationship(
+        back_populates="sample_selections"
+    )
