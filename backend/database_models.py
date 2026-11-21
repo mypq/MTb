@@ -215,7 +215,10 @@ class EvaluationSignalRecord(DatabaseBase):
         ),
         UniqueConstraint("id", "run_id", "period_id", name="uq_evaluation_signal_identity_scope"),
         CheckConstraint("length(instrument) > 0", name="ck_evaluation_signal_instrument_nonempty"),
+        CheckConstraint("direction IN ('BUY', 'SELL')", name="ck_evaluation_signal_direction"),
+        CheckConstraint("input_available_at <= signal_at", name="ck_evaluation_signal_no_lookahead"),
         CheckConstraint("filter_decision IN ('ALLOWED', 'BLOCKED', 'NOT_APPLICABLE')", name="ck_evaluation_signal_filter_decision"),
+        CheckConstraint("filter_decision <> 'BLOCKED' OR (filter_reason IS NOT NULL AND length(trim(filter_reason)) > 0)", name="ck_evaluation_signal_block_reason"),
         Index("ix_evaluation_signals_run_time", "run_id", "signal_at"),
         Index("ix_evaluation_signals_period_time", "period_id", "signal_at"),
     )
@@ -265,21 +268,51 @@ class EvaluationOutcomeRecord(DatabaseBase):
         ),
         UniqueConstraint("signal_id", "horizon_minutes", name="uq_evaluation_outcome_signal_horizon"),
         CheckConstraint("horizon_minutes IN (5, 15, 30, 60)", name="ck_evaluation_outcome_horizon"),
+        CheckConstraint("outcome_type = 'COUNTERFACTUAL'", name="ck_evaluation_outcome_type"),
         CheckConstraint("status IN ('COMPLETED', 'NEEDS_MORE_DATA', 'INVALID')", name="ck_evaluation_outcome_status"),
         CheckConstraint("direction IN ('BUY', 'SELL')", name="ck_evaluation_outcome_direction"),
+        CheckConstraint("measurement_basis IN ('BID_ASK_QUOTES', 'OHLC_APPROXIMATION', 'UNAVAILABLE')", name="ck_evaluation_outcome_measurement_basis"),
+        CheckConstraint("entry_price_side IN ('BID', 'ASK', 'UNKNOWN')", name="ck_evaluation_outcome_entry_side"),
+        CheckConstraint("exit_price_side IN ('BID', 'ASK', 'UNKNOWN')", name="ck_evaluation_outcome_exit_side"),
+        CheckConstraint("spread_accounting IN ('EMBEDDED_IN_BID_ASK_PRICES', 'SEPARATE_COST', 'UNKNOWN')", name="ck_evaluation_outcome_spread_accounting"),
+        CheckConstraint("slippage_knowledge IN ('MEASURED', 'NOT_APPLICABLE', 'UNKNOWN')", name="ck_evaluation_outcome_slippage_knowledge"),
+        CheckConstraint("commission_knowledge IN ('MEASURED', 'NOT_APPLICABLE', 'UNKNOWN')", name="ck_evaluation_outcome_commission_knowledge"),
+        CheckConstraint("swap_knowledge IN ('MEASURED', 'NOT_APPLICABLE', 'UNKNOWN')", name="ck_evaluation_outcome_swap_knowledge"),
         CheckConstraint("entry_price IS NULL OR CAST(entry_price AS NUMERIC) > 0", name="ck_evaluation_outcome_entry_positive"),
         CheckConstraint("exit_price IS NULL OR CAST(exit_price AS NUMERIC) > 0", name="ck_evaluation_outcome_exit_positive"),
         CheckConstraint("spread_cost IS NULL OR CAST(spread_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_spread_nonnegative"),
         CheckConstraint("slippage_cost IS NULL OR CAST(slippage_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_slippage_nonnegative"),
         CheckConstraint("commission_cost IS NULL OR CAST(commission_cost AS NUMERIC) >= 0", name="ck_evaluation_outcome_commission_nonnegative"),
         CheckConstraint(
-            "(status = 'COMPLETED' AND entry_at IS NOT NULL AND exit_at IS NOT NULL AND entry_price IS NOT NULL AND exit_price IS NOT NULL AND gross_pnl IS NOT NULL AND exit_at > entry_at) OR "
+            "(slippage_knowledge = 'MEASURED' AND slippage_cost IS NOT NULL) OR (slippage_knowledge <> 'MEASURED' AND slippage_cost IS NULL)",
+            name="ck_evaluation_outcome_slippage_knowledge_amount",
+        ),
+        CheckConstraint(
+            "(commission_knowledge = 'MEASURED' AND commission_cost IS NOT NULL) OR (commission_knowledge <> 'MEASURED' AND commission_cost IS NULL)",
+            name="ck_evaluation_outcome_commission_knowledge_amount",
+        ),
+        CheckConstraint(
+            "(swap_knowledge = 'MEASURED' AND swap_adjustment IS NOT NULL) OR (swap_knowledge <> 'MEASURED' AND swap_adjustment IS NULL)",
+            name="ck_evaluation_outcome_swap_knowledge_amount",
+        ),
+        CheckConstraint(
+            "(measurement_basis = 'BID_ASK_QUOTES' AND ((direction = 'BUY' AND entry_price_side = 'ASK' AND exit_price_side = 'BID') OR (direction = 'SELL' AND entry_price_side = 'BID' AND exit_price_side = 'ASK')) AND spread_accounting = 'EMBEDDED_IN_BID_ASK_PRICES' AND spread_cost IS NULL) OR "
+            "(measurement_basis = 'OHLC_APPROXIMATION' AND entry_price_side = 'UNKNOWN' AND exit_price_side = 'UNKNOWN' AND spread_accounting = 'UNKNOWN' AND spread_cost IS NULL) OR "
+            "measurement_basis = 'UNAVAILABLE'",
+            name="ck_evaluation_outcome_measurement_consistency",
+        ),
+        CheckConstraint(
+            "(status = 'COMPLETED' AND measurement_basis <> 'UNAVAILABLE' AND entry_at IS NOT NULL AND exit_at IS NOT NULL AND entry_price IS NOT NULL AND exit_price IS NOT NULL AND gross_pnl IS NOT NULL AND exit_at > entry_at) OR "
             "(status <> 'COMPLETED' AND entry_at IS NULL AND exit_at IS NULL AND entry_price IS NULL AND exit_price IS NULL AND gross_pnl IS NULL AND spread_cost IS NULL AND slippage_cost IS NULL AND commission_cost IS NULL AND swap_adjustment IS NULL AND net_pnl IS NULL AND costs_complete = false)",
             name="ck_evaluation_outcome_completion_fields",
         ),
         CheckConstraint(
-            "costs_complete = false OR (status = 'COMPLETED' AND measurement_basis = 'BID_ASK_QUOTES' AND net_pnl IS NOT NULL)",
+            "costs_complete = false OR (status = 'COMPLETED' AND measurement_basis = 'BID_ASK_QUOTES' AND net_pnl IS NOT NULL AND slippage_knowledge <> 'UNKNOWN' AND commission_knowledge <> 'UNKNOWN' AND swap_knowledge <> 'UNKNOWN')",
             name="ck_evaluation_outcome_complete_costs",
+        ),
+        CheckConstraint(
+            "costs_complete = true OR net_pnl IS NULL",
+            name="ck_evaluation_outcome_net_requires_complete_costs",
         ),
         Index("ix_evaluation_outcomes_run_horizon_status", "run_id", "horizon_minutes", "status"),
         Index("ix_evaluation_outcomes_period_horizon", "period_id", "horizon_minutes"),
