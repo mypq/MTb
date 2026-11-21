@@ -137,9 +137,6 @@ class EvaluationRunRecord(DatabaseBase):
     signals: Mapped[list[EvaluationSignalRecord]] = relationship(
         back_populates="run", cascade="all, delete-orphan", passive_deletes=True
     )
-    outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
-        back_populates="run", cascade="all, delete-orphan", passive_deletes=True
-    )
 
 
 class EvaluationPeriodRecord(DatabaseBase):
@@ -165,7 +162,6 @@ class EvaluationPeriodRecord(DatabaseBase):
 
     run: Mapped[EvaluationRunRecord] = relationship(back_populates="periods")
     signals: Mapped[list[EvaluationSignalRecord]] = relationship(back_populates="period")
-    outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(back_populates="period")
 
 
 class EvaluationSignalRecord(DatabaseBase):
@@ -271,6 +267,4 @@ class EvaluationOutcomeRecord(DatabaseBase):
     net_pnl: Mapped[Decimal | None] = mapped_column(EVALUATION_NUMERIC_TYPE, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    run: Mapped[EvaluationRunRecord] = relationship(back_populates="outcomes")
-    period: Mapped[EvaluationPeriodRecord] = relationship(back_populates="outcomes")
     signal: Mapped[EvaluationSignalRecord] = relationship(back_populates="outcomes")
