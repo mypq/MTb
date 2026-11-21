@@ -106,7 +106,15 @@ class EvaluationOHLCOutcomeCalculator:
         for candle in window:
             values = (candle.open, candle.high, candle.low, candle.close)
             if (
-                any(not isfinite(value) or value <= 0 for value in values)
+                candle.event_time.second != 0
+                or candle.event_time.microsecond != 0
+                or not candle.is_closed
+                or candle.candle_quality != "VERIFIED"
+                or candle.clock_verified is not True
+                or candle.analysis_eligible is not True
+                or not isinstance(candle.validation_report, dict)
+                or candle.validation_report.get("analysis_eligible") is not True
+                or any(not isfinite(value) or value <= 0 for value in values)
                 or candle.low > min(candle.open, candle.close)
                 or candle.high < max(candle.open, candle.close)
                 or candle.high < candle.low
