@@ -570,3 +570,53 @@ def test_get_history_returns_utc_aware_timestamps(repository):
     assert len(candles) == 2
     assert all(c.timestamp.tzinfo is not None for c in candles)
     assert all(c.timestamp.utcoffset() == timedelta(0) for c in candles)
+
+
+
+def test_candle_data_contract_preserves_temporal_and_source_lineage(repository):
+    repo, database = repository
+    snapshot = make_snapshot(count=1)
+
+    save_result = repo.save_snapshot(snapshot)
+    assert save_result.batch_id is not None
+
+    with database.session() as session:
+        record = session.scalar(select(MarketCandleRecord))
+        assert record is not None
+        candle_id = record.id
+
+    contract = repo.get_candle_contract(candle_id)
+
+    assert contract is not None
+    assert contract.contract_version == "1.0"
+    assert contract.record_type == "market_candle"
+    assert contract.candle_id == candle_id
+    assert contract.batch_id == save_result.batch_id
+    assert contract.instrument == "XAUUSD"
+    assert contract.timeframe == "M5"
+    assert contract.event_time == snapshot.batch.candles[0].timestamp
+    assert contract.available_at == snapshot.batch.received_at
+    assert contract.recorded_at is not None
+    assert contract.source == "MT5"
+    assert contract.source_account_login == 123456
+    assert contract.source_broker_server == "Test-Broker"
+    assert contract.clock_verified is True
+    assert contract.analysis_eligible is True
+    assert contract.validation_report is not None
+    assert contract.validation_report["analysis_eligible"] is True
+
+
+def test_candle_data_contract_returns_none_for_unknown_id(repository):
+    repo, _ = repository
+
+    assert repo.get_candle_contract(999999) is None
+
+
+def test_candle_data_contract_rejects_invalid_ids(repository):
+    repo, _ = repository
+
+    with pytest.raises(TypeError):
+        repo.get_candle_contract(True)
+
+    with pytest.raises(ValueError):
+        repo.get_candle_contract(0)
