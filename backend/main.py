@@ -1086,6 +1086,28 @@ def create_app() -> FastAPI:
         return snapshot.model_dump(mode="json")
 
     @application.get(
+        "/api/v1/market-data/batches/{batch_id}/contract",
+        tags=["Market Data"],
+        dependencies=[Depends(verify_api_token)],
+    )
+    def market_data_batch_contract(batch_id: int) -> dict[str, object]:
+        repository: MarketDataRepository = (
+            application.state.market_data_repository
+        )
+        try:
+            contract = repository.get_batch_contract(batch_id)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if contract is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Persisted market-data batch was not found.",
+            )
+
+        return contract.model_dump(mode="json")
+
+    @application.get(
         "/api/v1/market-data/candles/{candle_id}/contract",
         tags=["Market Data"],
         dependencies=[Depends(verify_api_token)],
