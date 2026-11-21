@@ -69,6 +69,14 @@ def test_depth_audit_reports_empty_timeframes_without_claiming_readiness(
     assert report.candle_data_status == "NO_DATA"
     assert report.data_foundation_status == "PARTIAL"
     assert report.history_sufficiency_assessed is False
+    assert [item.horizon_minutes for item in report.evaluation_sample_policy] == [5, 15, 30, 60]
+    assert all(
+        item.minimum_completed_non_overlapping_trades == 300
+        and item.independent_period_count == 3
+        and item.minimum_trades_per_period == 75
+        and item.insufficient_sample_status == "NEEDS_MORE_DATA"
+        for item in report.evaluation_sample_policy
+    )
     assert all(item.status == "NO_DATA" for item in report.timeframes)
     assert all(item.ingestion_status == "NO_DATA" for item in report.timeframes)
     assert all(item.candle_count == 0 for item in report.timeframes)
