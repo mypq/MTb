@@ -63,6 +63,13 @@ class EvaluationOHLCOutcomeCalculator:
             for index in range(len(items) - 1)
         ):
             raise ValueError("M1 candles must be supplied in chronological order.")
+        if any(
+            item.event_time.second != 0 or item.event_time.microsecond != 0
+            for item in items
+        ):
+            return self._incomplete(
+                signal, horizon_minutes, EvaluationOutcomeStatus.INVALID, created
+            )
 
         entry_candidates = [
             candle for candle in items if candle.event_time > signal.signal_at
