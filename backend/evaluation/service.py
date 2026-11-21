@@ -12,6 +12,8 @@ from backend.database import Database
 from backend.database_models import (
     EvaluationPeriodRecord,
     EvaluationRunRecord,
+    EvaluationSampleSelectionRecord,
+    EvaluationSignalRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationHorizon,
@@ -20,6 +22,7 @@ from backend.evaluation.contracts import (
     EvaluationSignalContract,
     configuration_snapshot_sha256,
     validate_evaluation_period_set,
+    validate_evaluation_relationships,
 )
 
 
@@ -147,6 +150,148 @@ class EvaluationService:
             session.add_all(period_records)
 
         return run, periods
+
+    def persist_signals(
+        self,
+        run: EvaluationRunContract,
+        periods: tuple[EvaluationPeriodContract, ...],
+        signals: Iterable[EvaluationSignalContract],
+    ) -> tuple[EvaluationSignalRecord, ...]:
+        """Persist source-linked signal contracts after validating their run scope."""
+        signal_items = tuple(signals)
+        if not signal_items:
+            return ()
+        validate_evaluation_relationships(run, periods, signal_items, ())
+        records = [
+            EvaluationSignalRecord(
+                id=str(signal.signal_id),
+                run_id=str(signal.run_id),
+                period_id=str(signal.period_id),
+                contract_version=signal.contract_version,
+                instrument=signal.instrument,
+                signal_at=signal.signal_at,
+                input_available_at=signal.input_available_at,
+                direction=signal.direction.value if hasattr(signal.direction, "value") else signal.direction,
+                reference_eligible=signal.reference_eligible,
+                filter_decision=signal.filter_decision.value if hasattr(signal.filter_decision, "value") else signal.filter_decision,
+                filter_reason=signal.filter_reason,
+                source_candle_ids=list(signal.source_candle_ids),
+                source_batch_ids=list(signal.source_batch_ids),
+                input_snapshot=(
+                    json.loads(json.dumps(signal.input_snapshot, ensure_ascii=False))
+                    if signal.input_snapshot is not None
+                    else None
+                ),
+                created_at=signal.created_at,
+            )
+            for signal in signal_items
+        ]
+        with self._database.session() as session:
+            session.add_all(records)
+        return tuple(records)
+
+    def record_sample_selections(
+        self,
+        *,
+        run_id: str,
+        signals: Iterable[EvaluationSignalContract],
+        horizons: tuple[EvaluationHorizon, ...] | None = None,
+    ) -> tuple[EvaluationSampleSelectionRecord, ...]:
+        """Persist one auditable decision for every candidate and enabled horizon.
+
+        Every signal is retained in the decision ledger, including reference-
+        ineligible candidates. Filter decisions never affect the reference sample.
+        """
+        signal_items = tuple(signals)
+        if len({item.signal_id for item in signal_items}) != len(signal_items):
+            raise ValueError("Signal IDs in a selection batch must be unique.")
+        if any(str(item.run_id) != run_id for item in signal_items):
+            raise ValueError("Every selection candidate must belong to the supplied run.")
+
+        with self._database.session() as session:
+            run_record = session.get(EvaluationRunRecord, run_id)
+            if run_record is None:
+                raise ValueError("Evaluation run does not exist.")
+            enabled_horizons = tuple(run_record.horizons)
+            selected_horizons = enabled_horizons if horizons is None else tuple(horizons)
+            if (
+                not selected_horizons
+                or len(set(selected_horizons)) != len(selected_horizons)
+                or any(value not in enabled_horizons for value in selected_horizons)
+            ):
+                raise ValueError("Requested horizons must be unique horizons enabled for this run.")
+
+            if signal_items:
+                supplied_ids = {str(item.signal_id) for item in signal_items}
+                persisted_ids = set(
+                    session.scalars(
+                        select(EvaluationSignalRecord.id).where(
+                            EvaluationSignalRecord.run_id == run_id,
+                            EvaluationSignalRecord.id.in_(supplied_ids),
+                        )
+                    ).all()
+                )
+                if persisted_ids != supplied_ids:
+                    raise ValueError("All selection candidates must already be persisted for this run.")
+
+            records: list[EvaluationSampleSelectionRecord] = []
+            ordered_candidates = sorted(
+                signal_items,
+                key=lambda item: (item.signal_at, str(item.signal_id)),
+            )
+            for horizon in selected_horizons:
+                if horizon not in (5, 15, 30, 60):
+                    raise ValueError("Unsupported evaluation horizon.")
+                next_available_at: datetime | None = None
+                holding_period = timedelta(minutes=horizon)
+                for candidate_order, signal in enumerate(ordered_candidates, start=1):
+                    if not signal.reference_eligible:
+                        reason = "INELIGIBLE_REFERENCE"
+                        selected = False
+                    elif (
+                        next_available_at is not None
+                        and signal.signal_at < next_available_at
+                    ):
+                        reason = "OVERLAPPING_HORIZON"
+                        selected = False
+                    else:
+                        reason = "SELECTED"
+                        selected = True
+                        next_available_at = signal.signal_at + holding_period
+
+                    records.append(
+                        EvaluationSampleSelectionRecord(
+                            id=str(uuid4()),
+                            run_id=run_id,
+                            signal_id=str(signal.signal_id),
+                            period_id=str(signal.period_id),
+                            horizon_minutes=horizon,
+                            candidate_order=candidate_order,
+                            selected=selected,
+                            decision_reason=reason,
+                        )
+                    )
+            session.add_all(records)
+        return tuple(records)
+
+    def get_sample_selections(
+        self,
+        *,
+        run_id: str,
+        horizon_minutes: EvaluationHorizon,
+    ) -> tuple[EvaluationSampleSelectionRecord, ...]:
+        """Read a stored horizon ledger in the exact deterministic candidate order."""
+        with self._database.session() as session:
+            return tuple(
+                session.scalars(
+                    select(EvaluationSampleSelectionRecord)
+                    .where(
+                        EvaluationSampleSelectionRecord.run_id == run_id,
+                        EvaluationSampleSelectionRecord.horizon_minutes == horizon_minutes,
+                    )
+                    .order_by(EvaluationSampleSelectionRecord.candidate_order)
+                ).all()
+            )
 
     @staticmethod
     def select_non_overlapping_signals(
