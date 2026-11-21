@@ -29,6 +29,12 @@ class EvaluationRangeRepository(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class EvaluationCandleGap:
+    """Observed timestamp discontinuity; not proof of missing market candles.
+
+    missing_intervals remains None until a verified trading-session calendar
+    can distinguish closed-market time from absent source data.
+    """
+
     previous_event_time: datetime
     next_event_time: datetime
     expected_interval_seconds: int
@@ -138,9 +144,11 @@ class EvaluationMarketDataRepository:
 class EvaluationCandleSeriesReader:
     """Loads a bounded historical candle sequence and reports every gap.
 
-    It never fills, repairs, filters out late data, or assumes a gap is a
-    market closure. The caller receives explicit evidence and must not treat
-    a non-contiguous sequence as a complete lookback window.
+    It never fills, repairs, filters out late data, or classifies a timestamp
+    discontinuity as missing candles or a market closure. is_contiguous means
+    only that the observed candle timestamps have no internal discontinuity
+    or duplicates. It does not prove full range coverage, and the caller must
+    not infer session completeness without a verified trading-session calendar.
     """
 
     def __init__(self, repository: EvaluationRangeRepository) -> None:
@@ -235,18 +243,16 @@ class EvaluationCandleSeriesReader:
                     previous_time = candle.event_time
                     continue
                 if delta != interval:
-                    missing = (
-                        delta // interval - 1
-                        if delta > interval and delta % interval == 0
-                        else None
-                    )
+                    # Without an authoritative session calendar, the number
+                    # of absent candles cannot be distinguished from closed-
+                    # market time. Preserve only the observed time discontinuity.
                     gaps.append(
                         EvaluationCandleGap(
                             previous_event_time=previous_time,
                             next_event_time=candle.event_time,
                             expected_interval_seconds=interval,
                             actual_interval_seconds=delta,
-                            missing_intervals=missing,
+                            missing_intervals=None,
                         )
                     )
             previous_time = candle.event_time
