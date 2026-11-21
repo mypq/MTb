@@ -10,6 +10,9 @@ from sqlalchemy import create_engine, inspect, text
 
 UTC = timezone.utc
 
+VALIDATION_COLUMNS = {"validation_report"}
+
+
 CLOCK_COLUMNS = {
     "clock_verified",
     "clock_account_login",
@@ -173,6 +176,7 @@ def test_initial_migration_upgrade_and_downgrade(
         }.issubset(batch_columns)
 
         assert CLOCK_COLUMNS.issubset(batch_columns)
+        assert VALIDATION_COLUMNS.issubset(batch_columns)
 
         batch_column_details = {
             column["name"]: column
@@ -263,7 +267,8 @@ def test_initial_migration_upgrade_and_downgrade(
                         clock_ntp_servers,
                         clock_candle_offset_seconds,
                         clock_candle_uncertainty_seconds,
-                        clock_calibration_sample_count
+                        clock_calibration_sample_count,
+                        validation_report
                     FROM market_data_batches
                     WHERE id = :batch_id
                     """
@@ -276,6 +281,10 @@ def test_initial_migration_upgrade_and_downgrade(
         assert legacy_row["timeframe"] == "M5"
         assert legacy_row["source"] == "MT5"
         assert legacy_row["candle_count"] == 1
+
+        # Never invent historical clock or validation evidence for legacy records.
+        for column_name in VALIDATION_COLUMNS:
+            assert legacy_row[column_name] is None
 
         # Never invent historical clock evidence for legacy records.
         for column_name in CLOCK_COLUMNS:
