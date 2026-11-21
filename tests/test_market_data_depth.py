@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 
 from backend.database import Database
 from backend.database_models import (
