@@ -11,6 +11,7 @@ from backend.database_models import (
     MarketCandleRecord,
     MarketDataBatchRecord,
 )
+from backend.market_data.contracts import MarketCandleDataContract
 from backend.market_data.models import (
     CandleQuality,
     MarketCandle,
@@ -129,6 +130,62 @@ class MarketDataRepository:
             ) from exc
 
         return tuple(candles)
+
+    def get_candle_contract(
+        self,
+        candle_id: int,
+    ) -> MarketCandleDataContract | None:
+        """Return the standardized data contract and its persisted lineage."""
+        if isinstance(candle_id, bool) or not isinstance(candle_id, int):
+            raise TypeError("candle_id must be an integer.")
+        if candle_id <= 0:
+            raise ValueError("candle_id must be positive.")
+
+        with self._database.session() as session:
+            row = session.execute(
+                select(MarketCandleRecord, MarketDataBatchRecord)
+                .join(
+                    MarketDataBatchRecord,
+                    MarketCandleRecord.batch_id == MarketDataBatchRecord.id,
+                )
+                .where(MarketCandleRecord.id == candle_id)
+            ).one_or_none()
+
+        if row is None:
+            return None
+
+        candle, batch = row
+        validation_report = batch.validation_report
+        analysis_eligible = (
+            validation_report.get("analysis_eligible")
+            if isinstance(validation_report, dict)
+            else None
+        )
+
+        return MarketCandleDataContract(
+            candle_id=candle.id,
+            batch_id=batch.id,
+            instrument=candle.symbol,
+            timeframe=candle.timeframe,
+            event_time=self._as_utc(candle.timestamp),
+            available_at=self._as_utc(batch.received_at),
+            recorded_at=self._as_utc(batch.created_at),
+            open=candle.open_price,
+            high=candle.high_price,
+            low=candle.low_price,
+            close=candle.close_price,
+            tick_volume=candle.tick_volume,
+            real_volume=candle.real_volume,
+            volume_source=candle.volume_source,
+            candle_quality=candle.quality,
+            is_closed=candle.is_closed,
+            source=batch.source,
+            source_account_login=batch.clock_account_login,
+            source_broker_server=batch.clock_broker_server,
+            clock_verified=batch.clock_verified,
+            analysis_eligible=analysis_eligible,
+            validation_report=validation_report,
+        )
 
     def get_data_depth(
         self,
@@ -313,6 +370,9 @@ class MarketDataRepository:
                     ),
                     clock_calibration_sample_count=(
                         evidence.calibration_sample_count
+                    ),
+                    validation_report=snapshot.validation.model_dump(
+                        mode="json"
                     ),
                 )
 
