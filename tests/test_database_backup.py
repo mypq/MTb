@@ -824,7 +824,7 @@ def test_restore_upgrades_an_older_schema_to_current_head(
         current_before_restore = connection.exec_driver_sql(
             "SELECT version_num FROM alembic_version"
         ).scalar_one()
-    assert current_before_restore == "0002_clock_evidence"
+    assert current_before_restore == "0003_validation_provenance"
 
     service.restore_backup(old_schema_backup)
 
@@ -839,6 +839,7 @@ def test_restore_upgrades_an_older_schema_to_current_head(
             ).fetchall()
         }
 
-    assert restored_revision == "0002_clock_evidence"
+    assert restored_revision == "0003_validation_provenance"
     assert "clock_verified" in columns
     assert "clock_ntp_servers" in columns
+    assert "validation_report" in columns
