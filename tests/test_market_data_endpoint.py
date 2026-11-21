@@ -24,8 +24,9 @@ class FakeMarketDataService:
 
 
 class FakeMarketDataRepository:
-    def __init__(self, error=None):
+    def __init__(self, error=None, contract=None):
         self.error = error
+        self.contract = contract
         self.saved = []
 
     def save_snapshot(self, snapshot):
@@ -33,6 +34,9 @@ class FakeMarketDataRepository:
             raise self.error
 
         self.saved.append(snapshot)
+
+    def get_candle_contract(self, candle_id):
+        return self.contract
 
 
 class FakeSnapshot:
@@ -245,3 +249,58 @@ def test_symbol_whitespace_is_removed_before_service_call(
         }
     ]
     assert repository.saved == [snapshot]
+
+
+
+class FakeDataContract:
+    def model_dump(self, mode):
+        return {
+            "contract_version": "1.0",
+            "candle_id": 12,
+        }
+
+
+def test_candle_contract_endpoint_returns_persisted_contract(monkeypatch):
+    settings = SimpleNamespace(
+        APP_NAME="GOLD_BOT",
+        DEFAULT_TIMEFRAME="M5",
+        MT5_SYMBOL="XAUUSD",
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    application = main.create_app()
+    repository = FakeMarketDataRepository(contract=FakeDataContract())
+    application.state.market_data_repository = repository
+
+    route = next(
+        route for route in application.routes
+        if getattr(route, "path", None)
+        == "/api/v1/market-data/candles/{candle_id}/contract"
+    )
+
+    assert route.endpoint(candle_id=12) == {
+        "contract_version": "1.0",
+        "candle_id": 12,
+    }
+
+
+def test_candle_contract_endpoint_returns_404_for_missing_candle(monkeypatch):
+    settings = SimpleNamespace(
+        APP_NAME="GOLD_BOT",
+        DEFAULT_TIMEFRAME="M5",
+        MT5_SYMBOL="XAUUSD",
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    application = main.create_app()
+    repository = FakeMarketDataRepository(contract=None)
+    application.state.market_data_repository = repository
+
+    route = next(
+        route for route in application.routes
+        if getattr(route, "path", None)
+        == "/api/v1/market-data/candles/{candle_id}/contract"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        route.endpoint(candle_id=999)
+
+    assert exc_info.value.status_code == 404
