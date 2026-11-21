@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from sqlalchemy import select
@@ -227,10 +227,13 @@ class EvaluationCandleSeriesReader:
 
             if previous_time is not None:
                 delta = int((candle.event_time - previous_time).total_seconds())
-                if delta <= 0:
+                if delta < 0:
                     raise EvaluationMarketDataError(
-                        "Candle sequence is not strictly chronological."
+                        "Candle sequence is not chronological."
                     )
+                if delta == 0:
+                    previous_time = candle.event_time
+                    continue
                 if delta != interval:
                     missing = (
                         delta // interval - 1
@@ -278,5 +281,5 @@ def _require_utc(value: datetime, name: str) -> None:
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
-        return value.replace(tzinfo=__import__("datetime").timezone.utc)
-    return value.astimezone(__import__("datetime").timezone.utc)
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
