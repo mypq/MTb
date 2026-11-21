@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -220,10 +220,17 @@ def test_outcome_cannot_mismatch_signal_run_or_period(session):
     session.add(signal)
     session.flush()
     invalid = make_outcome(signal)
-    invalid.run_id = run_b.id
-    invalid.period_id = period_b.id
-    session.add(invalid)
+    values = {
+        column.name: getattr(invalid, column.name)
+        for column in EvaluationOutcomeRecord.__table__.columns
+    }
+    values.update(
+        run_id=run_b.id,
+        signal_id=signal.id,
+        period_id=period_b.id,
+    )
     with pytest.raises(IntegrityError):
+        session.execute(insert(EvaluationOutcomeRecord).values(**values))
         session.commit()
     session.rollback()
 
