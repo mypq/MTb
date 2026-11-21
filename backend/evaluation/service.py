@@ -12,9 +12,9 @@ from backend.database import Database
 from backend.database_models import (
     EvaluationPeriodRecord,
     EvaluationRunRecord,
+    EvaluationOutcomeRecord,
     EvaluationSampleSelectionRecord,
     EvaluationSignalRecord,
-    EvaluationOutcomeRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationHorizon,
@@ -42,11 +42,11 @@ class HorizonSampleReadiness:
 
 
 class EvaluationService:
-    """Creates reproducible evaluation runs and applies fixed sample rules.
+    """Creates reproducible evaluation runs, ledgers, and outcome persistence.
 
-    This first service layer deliberately does not calculate market outcomes.
-    Outcome measurement belongs to a separate component with explicit Bid/Ask
-    or OHLC evidence; it must never infer execution costs from missing data.
+    Outcome measurement is performed by dedicated calculators using explicit
+    Bid/Ask or OHLC evidence; this service validates lineage and persists the
+    resulting counterfactual records without inventing execution costs.
     """
 
     def __init__(self, database: Database) -> None:
