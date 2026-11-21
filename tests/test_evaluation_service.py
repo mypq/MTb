@@ -10,12 +10,15 @@ from backend.database_models import (
     EvaluationPeriodRecord,
     EvaluationRunRecord,
     EvaluationSampleSelectionRecord,
+    EvaluationOutcomeRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationSignalContract,
     FilterDecision,
 )
 from backend.evaluation.service import EvaluationService
+from backend.evaluation.ohlc_outcomes import EvaluationOHLCOutcomeCalculator
+from backend.market_data.contracts import MarketCandleDataContract
 
 
 @pytest.fixture
@@ -228,3 +231,61 @@ def test_sample_selection_requires_persisted_signals(evaluation_service):
             signals=(signal,),
             horizons=(5,),
         )
+
+
+def test_calculated_ohlc_outcome_is_persisted_with_counterfactual_lineage(
+    evaluation_service,
+):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="e" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+    )
+    signal_at = periods[0].start_at + timedelta(hours=1, seconds=30)
+    signal = make_signal(run, periods[0], signal_at, decision="BLOCKED")
+    service.persist_signals(run, periods, (signal,))
+
+    candles = []
+    for minute in range(1, 7):
+        event_time = signal_at.replace(second=0, microsecond=0) + timedelta(minutes=minute)
+        available_at = event_time + timedelta(minutes=1, seconds=1)
+        candles.append(MarketCandleDataContract(
+            candle_id=minute,
+            batch_id=minute,
+            instrument="XAUUSD",
+            timeframe="M1",
+            event_time=event_time,
+            available_at=available_at,
+            recorded_at=available_at + timedelta(seconds=1),
+            open=2000.0 + minute,
+            high=2003.0 + minute,
+            low=1999.0 + minute,
+            close=2000.5 + minute,
+            tick_volume=10,
+            real_volume=None,
+            volume_source="TICK",
+            candle_quality="VERIFIED",
+            is_closed=True,
+            source="MT5",
+            clock_verified=True,
+            analysis_eligible=True,
+            validation_report={"analysis_eligible": True},
+        ))
+
+    outcome = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, tuple(candles))
+    records = service.persist_outcomes(run, periods, (signal,), (outcome,))
+
+    assert len(records) == 1
+    with database.session() as session:
+        stored = session.get(EvaluationOutcomeRecord, str(outcome.outcome_id))
+        assert stored is not None
+        assert stored.outcome_type == "COUNTERFACTUAL"
+        assert stored.status == "COMPLETED"
+        assert stored.measurement_basis == "OHLC_APPROXIMATION"
+        assert stored.net_pnl is None
+        assert stored.signal_id == str(signal.signal_id)
