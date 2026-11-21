@@ -199,7 +199,11 @@ class EvaluationSignalRecord(DatabaseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     run: Mapped[EvaluationRunRecord] = relationship(back_populates="signals")
-    period: Mapped[EvaluationPeriodRecord] = relationship(back_populates="signals")
+    # period_id is written by this relationship; run_id remains owned by run.
+    # The composite database FK still enforces that both belong to the same run.
+    period: Mapped[EvaluationPeriodRecord] = relationship(
+        back_populates="signals", foreign_keys=[period_id]
+    )
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
