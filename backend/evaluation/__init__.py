@@ -1,4 +1,4 @@
-"""Evaluation data contracts and integrity helpers for GOLD BOT."""
+""""Evaluation contracts and orchestration for GOLD BOT."""
 
 from backend.evaluation.contracts import (
     CostKnowledge,
@@ -16,6 +16,10 @@ from backend.evaluation.contracts import (
     validate_evaluation_period_set,
     validate_evaluation_relationships,
 )
+from backend.evaluation.service import (
+    EvaluationService,
+    HorizonSampleReadiness,
+)
 
 __all__ = [
     "CostKnowledge",
@@ -24,9 +28,11 @@ __all__ = [
     "EvaluationOutcomeStatus",
     "EvaluationPeriodContract",
     "EvaluationRunContract",
+    "EvaluationService",
     "EvaluationSignalContract",
     "ExecutionPriceSide",
     "FilterDecision",
+    "HorizonSampleReadiness",
     "OutcomeMeasurementBasis",
     "SpreadAccounting",
     "configuration_snapshot_sha256",
