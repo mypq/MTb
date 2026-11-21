@@ -227,7 +227,7 @@ class EvaluationOutcomeRecord(DatabaseBase):
         CheckConstraint("commission_cost IS NULL OR commission_cost >= 0", name="ck_evaluation_outcome_commission_nonnegative"),
         CheckConstraint(
             "(status = 'COMPLETED' AND entry_at IS NOT NULL AND exit_at IS NOT NULL AND entry_price IS NOT NULL AND exit_price IS NOT NULL AND gross_pnl IS NOT NULL AND exit_at > entry_at) OR "
-            "(status <> 'COMPLETED' AND entry_at IS NULL AND exit_at IS NULL AND entry_price IS NULL AND exit_price IS NULL AND gross_pnl IS NULL AND spread_cost IS NULL AND slippage_cost IS NULL AND commission_cost IS NULL AND swap_adjustment IS NULL AND net_pnl IS NULL AND costs_complete = 0)",
+            "(status <> 'COMPLETED' AND entry_at IS NULL AND exit_at IS NULL AND entry_price IS NULL AND exit_price IS NULL AND gross_pnl IS NULL AND spread_cost IS NULL AND slippage_cost IS NULL AND commission_cost IS NULL AND swap_adjustment IS NULL AND net_pnl IS NULL AND costs_complete = false)",
             name="ck_evaluation_outcome_completion_fields",
         ),
         CheckConstraint(
