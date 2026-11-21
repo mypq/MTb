@@ -52,11 +52,6 @@ class EvaluationContract(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    @field_validator("created_at", check_fields=False)
-    @classmethod
-    def require_utc_created_at(cls, value: datetime) -> datetime:
-        return cls._require_utc(value)
-
     @staticmethod
     def _require_utc(value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
@@ -279,12 +274,22 @@ class EvaluationOutcomeContract(EvaluationContract):
         if self.costs_complete:
             if self.status != EvaluationOutcomeStatus.COMPLETED:
                 raise ValueError("Costs can be complete only for completed outcomes.")
+            if self.measurement_basis != OutcomeMeasurementBasis.BID_ASK_QUOTES:
+                raise ValueError("Complete trading costs require measured Bid/Ask quotes.")
             if any(value is None for value in (
                 self.slippage_cost, self.commission_cost, self.swap_cost,
             )):
                 raise ValueError("Complete cost model requires slippage, commission, and swap values.")
             if self.net_pnl is None:
                 raise ValueError("Complete cost model requires net PnL.")
+            expected_net_pnl = (
+                self.gross_pnl
+                - self.slippage_cost
+                - self.commission_cost
+                - self.swap_cost
+            )
+            if abs(self.net_pnl - expected_net_pnl) > 1e-9:
+                raise ValueError("Net PnL does not match gross PnL minus recorded costs.")
         elif self.net_pnl is not None:
             raise ValueError("Net PnL must remain unset until all applicable costs are known.")
         return self
