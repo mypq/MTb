@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import desc, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
@@ -26,6 +26,17 @@ class MarketDataPersistenceError(RuntimeError):
 
 class MarketDataPersistenceConflict(MarketDataPersistenceError):
     """Raised when an existing candle conflicts with incoming data."""
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDataDepthSummary:
+    timeframe: str
+    candle_count: int
+    first_candle_at: datetime | None
+    last_candle_at: datetime | None
+    batch_count: int
+    clock_verified_batch_count: int
+    last_received_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +129,101 @@ class MarketDataRepository:
             ) from exc
 
         return tuple(candles)
+
+    def get_data_depth(
+        self,
+        symbol: str,
+        timeframes: tuple[str, ...],
+    ) -> tuple[MarketDataDepthSummary, ...]:
+        """Return read-only persisted candle-depth metrics per timeframe.
+
+        This reports observed storage facts only. It does not infer missing
+        candles across broker sessions or claim that a history is sufficient
+        for any particular analytical horizon.
+        """
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("Symbol must be a non-empty string.")
+        if not isinstance(timeframes, tuple) or not timeframes:
+            raise ValueError("Timeframes must be a non-empty tuple.")
+
+        normalized_symbol = symbol.strip()
+        normalized_timeframes = tuple(
+            normalize_timeframe(value) for value in timeframes
+        )
+        if len(set(normalized_timeframes)) != len(normalized_timeframes):
+            raise ValueError("Timeframes must not contain duplicates.")
+
+        with self._database.session() as session:
+            rows = session.execute(
+                select(
+                    MarketCandleRecord.timeframe,
+                    func.count(MarketCandleRecord.id),
+                    func.min(MarketCandleRecord.timestamp),
+                    func.max(MarketCandleRecord.timestamp),
+                    func.count(func.distinct(MarketDataBatchRecord.id)),
+                    func.count(
+                        func.distinct(
+                            case(
+                                (
+                                    MarketDataBatchRecord.clock_verified.is_(True),
+                                    MarketDataBatchRecord.id,
+                                ),
+                                else_=None,
+                            )
+                        )
+                    ),
+                    func.max(MarketDataBatchRecord.received_at),
+                )
+                .join(
+                    MarketDataBatchRecord,
+                    MarketCandleRecord.batch_id == MarketDataBatchRecord.id,
+                )
+                .where(
+                    MarketCandleRecord.symbol == normalized_symbol,
+                    MarketCandleRecord.timeframe.in_(normalized_timeframes),
+                )
+                .group_by(MarketCandleRecord.timeframe)
+            ).all()
+
+        by_timeframe = {
+            row[0]: row for row in rows
+        }
+        summaries: list[MarketDataDepthSummary] = []
+        for timeframe in normalized_timeframes:
+            row = by_timeframe.get(timeframe)
+            if row is None:
+                summaries.append(
+                    MarketDataDepthSummary(
+                        timeframe=timeframe,
+                        candle_count=0,
+                        first_candle_at=None,
+                        last_candle_at=None,
+                        batch_count=0,
+                        clock_verified_batch_count=0,
+                        last_received_at=None,
+                    )
+                )
+                continue
+
+            summaries.append(
+                MarketDataDepthSummary(
+                    timeframe=timeframe,
+                    candle_count=int(row[1]),
+                    first_candle_at=(
+                        self._as_utc(row[2]) if row[2] is not None else None
+                    ),
+                    last_candle_at=(
+                        self._as_utc(row[3]) if row[3] is not None else None
+                    ),
+                    batch_count=int(row[4]),
+                    clock_verified_batch_count=int(row[5]),
+                    last_received_at=(
+                        self._as_utc(row[6]) if row[6] is not None else None
+                    ),
+                )
+            )
+
+        return tuple(summaries)
 
     def _save_snapshot(
         self,
