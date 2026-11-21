@@ -11,6 +11,7 @@ from backend.database_backup import DatabaseBackupService
 from backend.database_migrations import upgrade_database
 from backend.market_data.chrony import ChronyStatusService
 from backend.market_data.collector import MarketDataCollector
+from backend.market_data.data_depth import MarketDataDepthAuditor
 from backend.market_data.capabilities import CapabilityRegistry
 from backend.market_data.mt5_capability_probe import MT5CapabilityProbe
 from backend.market_data.ntp_monitor import NtpVerificationMonitor
@@ -1083,6 +1084,38 @@ def create_app() -> FastAPI:
                 ) from exc
 
         return snapshot.model_dump(mode="json")
+
+    @application.get(
+        "/api/v1/market-data/depth",
+        tags=["Market Data"],
+        dependencies=[Depends(verify_api_token)],
+    )
+    def market_data_depth(
+        symbol: str | None = None,
+    ) -> dict[str, object]:
+        selected_symbol = (
+            settings.MT5_SYMBOL if symbol is None else symbol
+        ).strip()
+        if not selected_symbol:
+            raise HTTPException(
+                status_code=400,
+                detail="A market symbol must be configured or supplied.",
+            )
+
+        repository: MarketDataRepository = (
+            application.state.market_data_repository
+        )
+        try:
+            report = MarketDataDepthAuditor(repository).audit(
+                selected_symbol
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=str(exc),
+            ) from exc
+
+        return report.model_dump(mode="json")
 
     return application
 
