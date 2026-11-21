@@ -41,6 +41,15 @@ class MarketDataDepthSummary:
     batch_count: int
     clock_verified_batch_count: int
     last_received_at: datetime | None
+    validation_report_batch_count: int
+    analysis_eligible_batch_count: int
+    freshness_verified_batch_count: int
+    validation_issue_count: int
+    unconfirmed_gap_count: int
+    verified_candle_count: int
+    closed_candle_count: int
+    unknown_volume_candle_count: int
+    last_validation_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,11 +259,10 @@ class MarketDataRepository:
         symbol: str,
         timeframes: tuple[str, ...],
     ) -> tuple[MarketDataDepthSummary, ...]:
-        """Return read-only persisted candle-depth metrics per timeframe.
+        """Return observed candle depth and persisted validation coverage.
 
-        This reports observed storage facts only. It does not infer missing
-        candles across broker sessions or claim that a history is sufficient
-        for any particular analytical horizon.
+        No market-session gaps are inferred here. Only gaps explicitly
+        recorded by the ingestion validator are counted.
         """
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
@@ -269,25 +277,33 @@ class MarketDataRepository:
             raise ValueError("Timeframes must not contain duplicates.")
 
         with self._database.session() as session:
-            rows = session.execute(
+            candle_rows = session.execute(
                 select(
                     MarketCandleRecord.timeframe,
                     func.count(MarketCandleRecord.id),
                     func.min(MarketCandleRecord.timestamp),
                     func.max(MarketCandleRecord.timestamp),
                     func.count(func.distinct(MarketDataBatchRecord.id)),
-                    func.count(
-                        func.distinct(
-                            case(
-                                (
-                                    MarketDataBatchRecord.clock_verified.is_(True),
-                                    MarketDataBatchRecord.id,
-                                ),
-                                else_=None,
-                            )
-                        )
-                    ),
+                    func.count(func.distinct(case(
+                        (
+                            MarketDataBatchRecord.clock_verified.is_(True),
+                            MarketDataBatchRecord.id,
+                        ),
+                        else_=None,
+                    ))),
                     func.max(MarketDataBatchRecord.received_at),
+                    func.sum(case(
+                        (MarketCandleRecord.quality == "VERIFIED", 1),
+                        else_=0,
+                    )),
+                    func.sum(case(
+                        (MarketCandleRecord.is_closed.is_(True), 1),
+                        else_=0,
+                    )),
+                    func.sum(case(
+                        (MarketCandleRecord.volume_source == "UNKNOWN", 1),
+                        else_=0,
+                    )),
                 )
                 .join(
                     MarketDataBatchRecord,
@@ -300,43 +316,118 @@ class MarketDataRepository:
                 .group_by(MarketCandleRecord.timeframe)
             ).all()
 
-        by_timeframe = {
-            row[0]: row for row in rows
-        }
-        summaries: list[MarketDataDepthSummary] = []
-        for timeframe in normalized_timeframes:
-            row = by_timeframe.get(timeframe)
-            if row is None:
-                summaries.append(
-                    MarketDataDepthSummary(
-                        timeframe=timeframe,
-                        candle_count=0,
-                        first_candle_at=None,
-                        last_candle_at=None,
-                        batch_count=0,
-                        clock_verified_batch_count=0,
-                        last_received_at=None,
-                    )
+            batch_rows = session.execute(
+                select(
+                    MarketDataBatchRecord.timeframe,
+                    MarketDataBatchRecord.validation_report,
+                ).where(
+                    MarketDataBatchRecord.symbol == normalized_symbol,
+                    MarketDataBatchRecord.timeframe.in_(normalized_timeframes),
                 )
+            ).all()
+
+        candle_by_timeframe = {row[0]: row for row in candle_rows}
+        validation_by_timeframe: dict[str, dict[str, object]] = {
+            timeframe: {
+                "reports": 0,
+                "eligible": 0,
+                "freshness": 0,
+                "issues": 0,
+                "unconfirmed_gaps": 0,
+                "last_validation": None,
+            }
+            for timeframe in normalized_timeframes
+        }
+
+        for timeframe, report in batch_rows:
+            stats = validation_by_timeframe[timeframe]
+            if not isinstance(report, dict):
                 continue
 
-            summaries.append(
-                MarketDataDepthSummary(
-                    timeframe=timeframe,
-                    candle_count=int(row[1]),
-                    first_candle_at=(
-                        self._as_utc(row[2]) if row[2] is not None else None
-                    ),
-                    last_candle_at=(
-                        self._as_utc(row[3]) if row[3] is not None else None
-                    ),
-                    batch_count=int(row[4]),
-                    clock_verified_batch_count=int(row[5]),
-                    last_received_at=(
-                        self._as_utc(row[6]) if row[6] is not None else None
-                    ),
+            stats["reports"] = int(stats["reports"]) + 1
+            if report.get("analysis_eligible") is True:
+                stats["eligible"] = int(stats["eligible"]) + 1
+            if report.get("freshness_verified") is True:
+                stats["freshness"] = int(stats["freshness"]) + 1
+
+            issues = report.get("issues")
+            if isinstance(issues, list):
+                stats["issues"] = int(stats["issues"]) + len(issues)
+
+            gaps = report.get("gaps")
+            if isinstance(gaps, list):
+                stats["unconfirmed_gaps"] = (
+                    int(stats["unconfirmed_gaps"])
+                    + sum(
+                        1 for gap in gaps
+                        if isinstance(gap, dict)
+                        and gap.get("confirmed_closed") is not True
+                    )
                 )
-            )
+
+            checked_at = report.get("checked_at")
+            if isinstance(checked_at, str):
+                try:
+                    parsed = datetime.fromisoformat(
+                        checked_at.replace("Z", "+00:00")
+                    )
+                    if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                        parsed = parsed.astimezone(timezone.utc)
+                        previous = stats["last_validation"]
+                        if previous is None or parsed > previous:
+                            stats["last_validation"] = parsed
+                except ValueError:
+                    pass
+
+        summaries: list[MarketDataDepthSummary] = []
+        for timeframe in normalized_timeframes:
+            row = candle_by_timeframe.get(timeframe)
+            stats = validation_by_timeframe[timeframe]
+            if row is None:
+                summaries.append(MarketDataDepthSummary(
+                    timeframe=timeframe,
+                    candle_count=0,
+                    first_candle_at=None,
+                    last_candle_at=None,
+                    batch_count=0,
+                    clock_verified_batch_count=0,
+                    last_received_at=None,
+                    validation_report_batch_count=0,
+                    analysis_eligible_batch_count=0,
+                    freshness_verified_batch_count=0,
+                    validation_issue_count=0,
+                    unconfirmed_gap_count=0,
+                    verified_candle_count=0,
+                    closed_candle_count=0,
+                    unknown_volume_candle_count=0,
+                    last_validation_at=None,
+                ))
+                continue
+
+            summaries.append(MarketDataDepthSummary(
+                timeframe=timeframe,
+                candle_count=int(row[1]),
+                first_candle_at=(
+                    self._as_utc(row[2]) if row[2] is not None else None
+                ),
+                last_candle_at=(
+                    self._as_utc(row[3]) if row[3] is not None else None
+                ),
+                batch_count=int(row[4]),
+                clock_verified_batch_count=int(row[5]),
+                last_received_at=(
+                    self._as_utc(row[6]) if row[6] is not None else None
+                ),
+                validation_report_batch_count=int(stats["reports"]),
+                analysis_eligible_batch_count=int(stats["eligible"]),
+                freshness_verified_batch_count=int(stats["freshness"]),
+                validation_issue_count=int(stats["issues"]),
+                unconfirmed_gap_count=int(stats["unconfirmed_gaps"]),
+                verified_candle_count=int(row[7] or 0),
+                closed_candle_count=int(row[8] or 0),
+                unknown_volume_candle_count=int(row[9] or 0),
+                last_validation_at=stats["last_validation"],
+            ))
 
         return tuple(summaries)
 
