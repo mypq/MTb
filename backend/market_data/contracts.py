@@ -54,3 +54,38 @@ class MarketCandleDataContract(BaseModel):
         if value.utcoffset().total_seconds() != 0:
             raise ValueError("Contract timestamps must already be UTC.")
         return value
+
+
+
+class MarketDataBatchContract(BaseModel):
+    """Versioned lineage contract for one persisted ingestion batch."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    contract_version: Literal["1.0"] = "1.0"
+    record_type: Literal["market_data_batch"] = "market_data_batch"
+
+    batch_id: int = Field(gt=0)
+    instrument: str = Field(min_length=1)
+    timeframe: str = Field(min_length=2)
+    source: str = Field(min_length=1)
+
+    available_at: datetime
+    recorded_at: datetime
+    candle_count: int = Field(ge=0)
+    candle_ids: tuple[int, ...]
+
+    source_account_login: int | None = None
+    source_broker_server: str | None = None
+    clock_verified: bool | None = None
+    clock_evidence: dict[str, Any] | None = None
+    validation_report: dict[str, Any] | None = None
+
+    @field_validator("available_at", "recorded_at")
+    @classmethod
+    def require_utc_timestamps(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Contract timestamps must be timezone-aware.")
+        if value.utcoffset().total_seconds() != 0:
+            raise ValueError("Contract timestamps must already be UTC.")
+        return value
