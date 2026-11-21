@@ -97,8 +97,7 @@ def make_signal(run, period):
 
 def make_outcome(signal, horizon=5):
     return EvaluationOutcomeRecord(
-        id=str(uuid4()), run_id=signal.run_id, signal_id=signal.id,
-        period_id=signal.period_id, contract_version="1.0",
+        id=str(uuid4()), signal=signal, contract_version="1.0",
         horizon_minutes=horizon, outcome_type="COUNTERFACTUAL",
         direction=signal.direction, status="COMPLETED",
         measurement_basis="BID_ASK_QUOTES",
