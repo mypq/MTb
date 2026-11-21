@@ -138,3 +138,90 @@ def test_range_reader_rejects_non_utc_boundaries(evaluation_repository):
             end_at=BASE + timedelta(minutes=20),
             available_at_cutoff=BASE + timedelta(minutes=20),
         )
+
+
+def _series_candle(candle_id: int, minute: int):
+    from backend.market_data.contracts import MarketCandleDataContract
+
+    event_time = BASE + timedelta(minutes=minute)
+    available_at = event_time + timedelta(seconds=30)
+    return MarketCandleDataContract(
+        candle_id=candle_id,
+        batch_id=candle_id,
+        instrument="XAUUSD",
+        timeframe="M5",
+        event_time=event_time,
+        available_at=available_at,
+        recorded_at=available_at + timedelta(seconds=1),
+        open=2000.0,
+        high=2002.0,
+        low=1999.0,
+        close=2001.0,
+        tick_volume=100,
+        real_volume=None,
+        volume_source="TICK",
+        candle_quality="VERIFIED",
+        is_closed=True,
+        source="MT5",
+        source_account_login=123456,
+        source_broker_server="Test-Broker",
+        clock_verified=True,
+        analysis_eligible=True,
+        validation_report={"analysis_eligible": True},
+    )
+
+
+class _StaticSeriesRepository:
+    def __init__(self, candles):
+        self._candles = tuple(candles)
+
+    def get_candle_contracts(self, instrument, timeframe, start_at, end_at):
+        return self._candles
+
+
+def test_series_reader_reports_duplicate_event_times_without_hiding_them():
+    reader = EvaluationCandleSeriesReader(
+        _StaticSeriesRepository(
+            (
+                _series_candle(1, 0),
+                _series_candle(2, 5),
+                _series_candle(3, 5),
+                _series_candle(4, 10),
+            )
+        )
+    )
+
+    evidence = reader.load_series(
+        instrument="XAUUSD",
+        timeframe="M5",
+        start_at=BASE,
+        end_at=BASE + timedelta(minutes=15),
+        available_at_cutoff=BASE + timedelta(minutes=15),
+    )
+
+    assert evidence.duplicate_event_times == (BASE + timedelta(minutes=5),)
+    assert len(evidence.candles) == 4
+    assert evidence.is_contiguous is False
+
+
+def test_series_reader_rejects_out_of_order_repository_results():
+    from backend.evaluation.market_data import EvaluationMarketDataError
+
+    reader = EvaluationCandleSeriesReader(
+        _StaticSeriesRepository(
+            (
+                _series_candle(1, 0),
+                _series_candle(2, 10),
+                _series_candle(3, 5),
+            )
+        )
+    )
+
+    with pytest.raises(EvaluationMarketDataError, match="not chronological"):
+        reader.load_series(
+            instrument="XAUUSD",
+            timeframe="M5",
+            start_at=BASE,
+            end_at=BASE + timedelta(minutes=15),
+            available_at_cutoff=BASE + timedelta(minutes=15),
+        )
