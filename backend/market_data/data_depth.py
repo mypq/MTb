@@ -52,6 +52,18 @@ class TimeframeDataDepth(BaseModel):
         return value
 
 
+class EvaluationHorizonRequirement(BaseModel):
+    """Frozen minimum independent-trade sample policy for one evaluation horizon."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    horizon_minutes: Literal[5, 15, 30, 60]
+    minimum_completed_non_overlapping_trades: int = Field(default=300, ge=1)
+    independent_period_count: Literal[3] = 3
+    minimum_trades_per_period: int = Field(default=75, ge=1)
+    insufficient_sample_status: Literal["NEEDS_MORE_DATA"] = "NEEDS_MORE_DATA"
+
+
 class MarketDataDepthReport(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -60,6 +72,12 @@ class MarketDataDepthReport(BaseModel):
     candle_data_status: Literal["NO_DATA", "LIMITED", "VALIDATED"]
     data_foundation_status: Literal["PARTIAL"] = "PARTIAL"
     history_sufficiency_assessed: bool = False
+    evaluation_sample_policy: tuple[EvaluationHorizonRequirement, ...] = (
+        EvaluationHorizonRequirement(horizon_minutes=5),
+        EvaluationHorizonRequirement(horizon_minutes=15),
+        EvaluationHorizonRequirement(horizon_minutes=30),
+        EvaluationHorizonRequirement(horizon_minutes=60),
+    )
     limitations: tuple[str, ...]
     timeframes: tuple[TimeframeDataDepth, ...]
 
@@ -80,7 +98,8 @@ class MarketDataDepthAuditor:
         "This audit covers persisted OHLC candles only.",
         "Historical Tick and Quote archive readiness is not assessed here.",
         "Historical spread distributions and shadow slippage are not assessed here.",
-        "Minimum history requirements are not defined; history sufficiency is NOT_ASSESSED.",
+        "Evaluation sample requirements are defined per horizon, but completed-trade outcomes are not stored or assessed by this candle-depth audit.",
+        "History sufficiency remains NOT_ASSESSED until each horizon has an independently verified evaluation sample.",
     )
 
     def __init__(self, repository: MarketDataRepository) -> None:
