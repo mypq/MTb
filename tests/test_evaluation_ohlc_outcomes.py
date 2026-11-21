@@ -125,7 +125,7 @@ def test_duplicate_m1_timestamp_marks_outcome_invalid():
     candles = make_window()
     duplicate = candle(3, candle_id=999)
     result = EvaluationOHLCOutcomeCalculator().calculate(
-        signal, 5, candles + (duplicate,)
+        signal, 5, candles[:3] + (duplicate,) + candles[3:]
     )
 
     assert result.status == EvaluationOutcomeStatus.INVALID
