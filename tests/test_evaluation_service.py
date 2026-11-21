@@ -120,8 +120,8 @@ def test_non_overlapping_selection_is_independent_and_keeps_blocked_signals(
     ("counts", "expected"),
     [
         ((100, 100, 100), "READY"),
-        ((100, 99, 100), "READY"),
-        ((100, 100, 74), "NEEDS_MORE_DATA"),
+        ((150, 75, 75), "READY"),
+        ((100, 100, 99), "NEEDS_MORE_DATA"),
         ((150, 75, 74), "NEEDS_MORE_DATA"),
         ((74, 74, 74), "NEEDS_MORE_DATA"),
     ],
