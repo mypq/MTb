@@ -2,13 +2,14 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 
 from backend.database import Database
 from backend.database_models import (
     DatabaseBase,
     EvaluationPeriodRecord,
     EvaluationRunRecord,
+    EvaluationSampleSelectionRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationSignalContract,
@@ -146,4 +147,84 @@ def test_sample_readiness_rejects_invalid_counts():
         EvaluationService.assess_horizon_sample(
             horizon_minutes=5,
             selected_completed_by_period=(300, -1, 1),
+        )
+
+
+
+def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="c" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+    )
+    base = periods[0].start_at + timedelta(hours=2)
+    signals = (
+        make_signal(run, periods[0], base + timedelta(minutes=10)),
+        make_signal(run, periods[0], base, decision=FilterDecision.BLOCKED),
+        make_signal(run, periods[0], base + timedelta(minutes=2), eligible=False),
+        make_signal(run, periods[0], base + timedelta(minutes=5)),
+        make_signal(run, periods[0], base + timedelta(minutes=15)),
+    )
+
+    service.persist_signals(run, periods, signals)
+    ledger = service.record_sample_selections(
+        run_id=str(run.run_id),
+        signals=signals,
+        horizons=(5, 15),
+    )
+
+    assert len(ledger) == 10
+    five = service.get_sample_selections(run_id=str(run.run_id), horizon_minutes=5)
+    fifteen = service.get_sample_selections(run_id=str(run.run_id), horizon_minutes=15)
+    assert len(five) == len(fifteen) == 5
+    assert [item.decision_reason for item in five] == [
+        "SELECTED",
+        "INELIGIBLE_REFERENCE",
+        "SELECTED",
+        "SELECTED",
+        "SELECTED",
+    ]
+    assert [item.decision_reason for item in fifteen] == [
+        "SELECTED",
+        "INELIGIBLE_REFERENCE",
+        "OVERLAPPING_HORIZON",
+        "OVERLAPPING_HORIZON",
+        "SELECTED",
+    ]
+    # The blocked signal remains in the reference sample; filter state is separate.
+    assert five[0].selected is True
+    assert five[0].signal_id == str(next(
+        signal.signal_id for signal in signals
+        if signal.filter_decision == FilterDecision.BLOCKED
+    ))
+    with database.session() as session:
+        assert session.scalar(
+            select(func.count()).select_from(EvaluationSampleSelectionRecord)
+        ) == 10
+
+
+def test_sample_selection_requires_persisted_signals(evaluation_service):
+    service, _database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="d" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    with pytest.raises(ValueError, match="already be persisted"):
+        service.record_sample_selections(
+            run_id=str(run.run_id),
+            signals=(signal,),
+            horizons=(5,),
         )
