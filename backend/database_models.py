@@ -114,6 +114,13 @@ class MarketDataBatchRecord(DatabaseBase):
         nullable=True,
     )
 
+    # Exact validation outcome for the accepted ingestion batch.
+    # Nullable for records created before validation provenance was stored.
+    validation_report: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+
     candles: Mapped[list[MarketCandleRecord]] = relationship(
         back_populates="batch",
         cascade="all, delete-orphan",
