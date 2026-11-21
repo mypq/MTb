@@ -22,6 +22,7 @@ from backend.evaluation.market_data_series import (
     EvaluationCandleSeriesReader,
     EvaluationMarketDataRepository,
 )
+from backend.evaluation.ohlc_outcomes import EvaluationOHLCOutcomeCalculator
 from backend.evaluation.service import (
     EvaluationService,
     HorizonSampleReadiness,
@@ -34,6 +35,7 @@ __all__ = [
     "EvaluationCandleSeriesReader",
     "EvaluationDirection",
     "EvaluationOutcomeContract",
+    "EvaluationOHLCOutcomeCalculator",
     "EvaluationOutcomeStatus",
     "EvaluationMarketDataRepository",
     "EvaluationPeriodContract",
