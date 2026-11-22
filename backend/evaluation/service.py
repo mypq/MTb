@@ -13,6 +13,7 @@ from backend.database_models import (
     EvaluationPeriodRecord,
     EvaluationRunRecord,
     EvaluationOutcomeRecord,
+    EvaluationOutcomeEvidenceRecord,
     EvaluationSampleSelectionRecord,
     EvaluationSignalRecord,
 )
@@ -31,6 +32,66 @@ from backend.evaluation.contracts import (
     validate_evaluation_period_set,
     validate_evaluation_relationships,
 )
+
+
+
+def _serialize_outcome_source_evidence(evidence) -> dict:
+    """Create a JSON-safe, immutable-in-practice snapshot of the full M1 input."""
+
+    def timestamp(value):
+        return value.isoformat() if value is not None else None
+
+    candles = []
+    for candle in evidence.candles:
+        candles.append({
+            "candle_id": candle.candle_id,
+            "batch_id": candle.batch_id,
+            "instrument": candle.instrument,
+            "timeframe": candle.timeframe,
+            "event_time": timestamp(candle.event_time),
+            "available_at": timestamp(candle.available_at),
+            "recorded_at": timestamp(candle.recorded_at),
+            "open": candle.open,
+            "high": candle.high,
+            "low": candle.low,
+            "close": candle.close,
+            "tick_volume": candle.tick_volume,
+            "real_volume": candle.real_volume,
+            "volume_source": candle.volume_source,
+            "candle_quality": candle.candle_quality,
+            "is_closed": candle.is_closed,
+            "source": candle.source,
+            "source_account_login": candle.source_account_login,
+            "source_broker_server": candle.source_broker_server,
+            "clock_verified": candle.clock_verified,
+            "analysis_eligible": candle.analysis_eligible,
+            "validation_report": candle.validation_report,
+        })
+
+    return {
+        "instrument": evidence.instrument,
+        "timeframe": evidence.timeframe,
+        "requested_start_at": timestamp(evidence.start_at),
+        "requested_end_at": timestamp(evidence.end_at),
+        "available_at_cutoff": timestamp(evidence.available_at_cutoff),
+        "latest_available_at": timestamp(evidence.latest_available_at),
+        "source_candles": candles,
+        "observed_gaps": [
+            {
+                "previous_event_time": timestamp(gap.previous_event_time),
+                "next_event_time": timestamp(gap.next_event_time),
+                "expected_interval_seconds": gap.expected_interval_seconds,
+                "actual_interval_seconds": gap.actual_interval_seconds,
+                "missing_intervals": gap.missing_intervals,
+            }
+            for gap in evidence.gaps
+        ],
+        "duplicate_event_times": [
+            timestamp(value) for value in evidence.duplicate_event_times
+        ],
+        "is_contiguous": evidence.is_contiguous,
+        "evidence_schema_version": 1,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,8 +444,10 @@ class EvaluationService:
         periods: tuple[EvaluationPeriodContract, ...],
         signals: Iterable[EvaluationSignalContract],
         outcomes: Iterable[EvaluationOutcomeContract],
+        *,
+        evidence_by_outcome_id: dict[str, dict] | None = None,
     ) -> tuple[EvaluationOutcomeRecord, ...]:
-        """Persist validated counterfactual outcomes for already-persisted signals."""
+        """Persist validated outcomes and optional immutable source evidence."""
         signal_items = tuple(signals)
         outcome_items = tuple(outcomes)
         validate_evaluation_relationships(
@@ -396,6 +459,13 @@ class EvaluationService:
         signal_ids = {str(item.signal_id) for item in signal_items}
         if any(str(item.signal_id) not in signal_ids for item in outcome_items):
             raise ValueError("Every outcome must reference a supplied signal.")
+
+        evidence_map = evidence_by_outcome_id or {}
+        outcome_ids = {str(item.outcome_id) for item in outcome_items}
+        if set(evidence_map) - outcome_ids:
+            raise ValueError("Source evidence cannot reference an outcome outside this persistence batch.")
+        if evidence_by_outcome_id is not None and set(evidence_map) != outcome_ids:
+            raise ValueError("Every persisted outcome must have exactly one source evidence snapshot.")
 
         with self._database.session() as session:
             stored_run = session.get(EvaluationRunRecord, str(run.run_id))
@@ -444,6 +514,14 @@ class EvaluationService:
                 for item in outcome_items
             ]
             session.add_all(records)
+            if evidence_by_outcome_id is not None:
+                session.add_all(
+                    EvaluationOutcomeEvidenceRecord(
+                        outcome_id=outcome_id,
+                        **snapshot,
+                    )
+                    for outcome_id, snapshot in evidence_map.items()
+                )
         return tuple(records)
 
     def calculate_and_persist_ohlc_outcomes(
@@ -508,6 +586,7 @@ class EvaluationService:
         calculator = EvaluationOHLCOutcomeCalculator()
         maximum_horizon = max(horizons)
         outcomes: list[EvaluationOutcomeContract] = []
+        evidence_by_outcome_id: dict[str, dict] = {}
 
         for signal in sorted(
             signal_items,
@@ -525,21 +604,23 @@ class EvaluationService:
                 end_at=series_end,
                 available_at_cutoff=run.created_at,
             )
+            evidence_snapshot = _serialize_outcome_source_evidence(evidence)
             for horizon in horizons:
-                outcomes.append(
-                    calculator.calculate(
-                        signal,
-                        horizon,
-                        evidence.candles,
-                        created_at=run.created_at,
-                    )
+                outcome = calculator.calculate(
+                    signal,
+                    horizon,
+                    evidence.candles,
+                    created_at=run.created_at,
                 )
+                outcomes.append(outcome)
+                evidence_by_outcome_id[str(outcome.outcome_id)] = evidence_snapshot
 
         return self.persist_outcomes(
             run,
             periods,
             signal_items,
             tuple(outcomes),
+            evidence_by_outcome_id=evidence_by_outcome_id,
         )
 
     def get_run_periods(
