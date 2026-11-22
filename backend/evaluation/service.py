@@ -419,8 +419,8 @@ class EvaluationService:
         selected_completed_by_period: tuple[int, int, int],
         required_total: int = 300,
         required_per_period: int = 75,
-    ) -> HorizonSampleReadiness:
-        """Return NEEDS_MORE_DATA unless total and every period pass."""
+    ) -> HorizonSampleAssessment:
+        """Assess completed selected counts without implying ledger totals."""
         if horizon_minutes not in (5, 15, 30, 60):
             raise ValueError("Unsupported evaluation horizon.")
         if (
