@@ -141,6 +141,9 @@ def test_sample_readiness_requires_total_and_each_period(counts, expected):
     assert result.status == expected
     assert result.ready is (expected == "READY")
     assert result.selected_completed_total == sum(counts)
+    assert result.selected_completed_by_period == counts
+    assert not hasattr(result, "candidate_total")
+    assert not hasattr(result, "selected_total")
 
 
 def test_sample_readiness_rejects_invalid_counts():
