@@ -822,7 +822,7 @@ def test_backup_restore_preserves_evaluation_evidence_and_market_data(tmp_path):
         assert service.delete_run(str(run.run_id)) is True
         with database.engine.begin() as connection:
             connection.exec_driver_sql(
-                "UPDATE market_candles SET close_price = 1998.0 WHERE batch_id = ?",
+                "UPDATE market_candles SET close_price = 2000.0 WHERE batch_id = ?",
                 (batch_id,),
             )
 
