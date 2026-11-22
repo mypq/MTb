@@ -326,6 +326,11 @@ def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation
             select(func.count()).select_from(EvaluationSampleSelectionRecord)
         ) == 10
 
+    with pytest.raises(ValueError, match="already exists"):
+        service.record_sample_selections(
+            run_id=str(run.run_id), signals=signals, horizons=(5,)
+        )
+
 
 def test_sample_selection_requires_persisted_signals(evaluation_service):
     service, _database = evaluation_service
@@ -341,11 +346,36 @@ def test_sample_selection_requires_persisted_signals(evaluation_service):
     signal = make_signal(
         run, periods[0], periods[0].start_at + timedelta(hours=1)
     )
-    with pytest.raises(ValueError, match="already be persisted"):
+    with pytest.raises(ValueError, match="every persisted signal"):
         service.record_sample_selections(
             run_id=str(run.run_id),
             signals=(signal,),
             horizons=(5,),
+        )
+
+
+
+def test_sample_selection_rejects_partial_candidate_batch(evaluation_service):
+    service, _database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="f" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+    )
+    base = periods[0].start_at + timedelta(hours=1)
+    signals = (
+        make_signal(run, periods[0], base),
+        make_signal(run, periods[0], base + timedelta(minutes=10)),
+    )
+    service.persist_signals(run, periods, signals)
+
+    with pytest.raises(ValueError, match="every persisted signal"):
+        service.record_sample_selections(
+            run_id=str(run.run_id), signals=(signals[0],), horizons=(5,)
         )
 
 
