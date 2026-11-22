@@ -6,6 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
+from backend.database_backup import DatabaseBackupService
+from backend.database_migrations import upgrade_database
 from backend.database_models import (
     DatabaseBase,
     EvaluationPeriodRecord,
@@ -751,3 +753,103 @@ def test_delete_run_cascades_only_evaluation_records(evaluation_service):
         service.get_run_readiness(run_id=str(run.run_id))
     with pytest.raises(ValueError, match="does not exist"):
         service.get_outcome_evidence(outcome_id)
+
+
+def test_backup_restore_preserves_evaluation_evidence_and_market_data(tmp_path):
+    database_path = tmp_path / "evaluation-backup.db"
+    database = Database(f"sqlite:///{database_path.as_posix()}")
+    database.initialize()
+    upgrade_database(str(database.engine.url))
+    service = EvaluationService(database)
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    try:
+        run, periods = service.create_run(
+            instrument="XAUUSD",
+            data_start_at=now - timedelta(days=30),
+            data_end_at=now,
+            code_revision="b" * 40,
+            configuration_snapshot={"backup_roundtrip": True},
+            created_at=now,
+            horizons=(5,),
+        )
+        signal_at = periods[0].start_at + timedelta(hours=1, seconds=30)
+        signal = make_signal(run, periods[0], signal_at)
+        service.persist_signals(run, periods, (signal,))
+        outcome = EvaluationOHLCOutcomeCalculator().calculate(
+            signal, 5, (), created_at=run.created_at
+        )
+        evidence = {
+            "instrument": "XAUUSD",
+            "timeframe": "M1",
+            "requested_start_at": signal_at.isoformat(),
+            "requested_end_at": (signal_at + timedelta(minutes=6)).isoformat(),
+            "available_at_cutoff": run.created_at.isoformat(),
+            "latest_available_at": None,
+            "source_candles": [],
+            "observed_gaps": [],
+            "duplicate_event_times": [],
+            "is_contiguous": False,
+            "evidence_schema_version": 1,
+        }
+        service.persist_outcomes(
+            run, periods, (signal,), (outcome,),
+            evidence_by_outcome_id={str(outcome.outcome_id): evidence},
+        )
+        original_digest = service.get_outcome_evidence(
+            str(outcome.outcome_id)
+        ).evidence_sha256
+
+        with database.session() as session:
+            batch = MarketDataBatchRecord(
+                symbol="XAUUSD", timeframe="M1", source="MT5",
+                received_at=now, candle_count=1, created_at=now,
+                clock_verified=True, clock_broker_server="Backup-Test-Broker",
+                validation_report={"analysis_eligible": True, "issues": []},
+            )
+            session.add(batch)
+            session.flush()
+            session.add(MarketCandleRecord(
+                batch_id=batch.id, symbol="XAUUSD", timeframe="M1",
+                timestamp=now - timedelta(minutes=1),
+                open_price=2000.0, high_price=2002.0, low_price=1999.0,
+                close_price=2001.0, tick_volume=10, real_volume=None,
+                volume_source="TICK", is_closed=True, quality="VERIFIED",
+            ))
+            batch_id = batch.id
+
+        backup_service = DatabaseBackupService(database, tmp_path / "backups")
+        backup_path = backup_service.create_backup()
+        assert service.delete_run(str(run.run_id)) is True
+        with database.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE market_candles SET close_price = 1998.0 WHERE batch_id = ?",
+                (batch_id,),
+            )
+
+        backup_service.restore_backup(backup_path)
+        with database.session() as session:
+            assert session.get(EvaluationRunRecord, str(run.run_id)) is not None
+            assert session.get(EvaluationOutcomeRecord, str(outcome.outcome_id)) is not None
+            assert session.get(EvaluationOutcomeEvidenceRecord, str(outcome.outcome_id)) is not None
+            candle = session.scalar(select(MarketCandleRecord).where(
+                MarketCandleRecord.batch_id == batch_id
+            ))
+            assert candle is not None and candle.close_price == 2001.0
+            batch_record = session.get(MarketDataBatchRecord, batch_id)
+            assert batch_record.validation_report == {
+                "analysis_eligible": True, "issues": []
+            }
+
+        restored = service.get_outcome_evidence(str(outcome.outcome_id))
+        assert restored.evidence_sha256 == original_digest
+        with pytest.raises(IntegrityError, match="immutable"):
+            with database.engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE evaluation_outcome_evidence SET is_contiguous = 1 "
+                    "WHERE outcome_id = ?", (str(outcome.outcome_id),)
+                )
+        assert service.get_outcome_evidence(
+            str(outcome.outcome_id)
+        ).evidence_sha256 == original_digest
+    finally:
+        database.dispose()
