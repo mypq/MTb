@@ -157,6 +157,85 @@ def test_sample_readiness_rejects_invalid_counts():
 
 
 
+
+def test_run_readiness_counts_only_selected_completed_outcomes_by_period(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="g" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+        horizons=(5,),
+        minimum_completed_outcomes_per_horizon=3,
+        minimum_outcomes_per_period=1,
+    )
+    first_at = periods[0].start_at + timedelta(hours=1, seconds=30)
+    signals = (
+        make_signal(run, periods[0], first_at),
+        make_signal(run, periods[0], first_at + timedelta(minutes=1)),
+        make_signal(run, periods[1], periods[1].start_at + timedelta(hours=1, seconds=30)),
+        make_signal(run, periods[2], periods[2].start_at + timedelta(hours=1, seconds=30)),
+    )
+    service.persist_signals(run, periods, signals)
+    ledger = service.record_sample_selections(
+        run_id=str(run.run_id), signals=signals, horizons=(5,)
+    )
+    assert sum(item.selected for item in ledger) == 3
+    assert [item.decision_reason for item in sorted(ledger, key=lambda item: item.candidate_order)] == [
+        "SELECTED", "OVERLAPPING_HORIZON", "SELECTED", "SELECTED"
+    ]
+
+    with database.session() as session:
+        for signal in signals[:3]:
+            first_minute = signal.signal_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            for offset in range(5):
+                event_time = first_minute + timedelta(minutes=offset)
+                available_at = event_time + timedelta(minutes=1, seconds=1)
+                batch = MarketDataBatchRecord(
+                    symbol="XAUUSD", timeframe="M1", source="MT5",
+                    received_at=available_at, candle_count=1,
+                    created_at=available_at + timedelta(seconds=1),
+                    clock_verified=True, clock_account_login=123456,
+                    clock_broker_server="Test-Broker",
+                    validation_report={"analysis_eligible": True, "freshness_verified": True, "issues": [], "gaps": []},
+                )
+                session.add(batch)
+                session.flush()
+                session.add(MarketCandleRecord(
+                    batch_id=batch.id, symbol="XAUUSD", timeframe="M1",
+                    timestamp=event_time, open_price=2000.0 + offset,
+                    high_price=2002.0 + offset, low_price=1999.0 + offset,
+                    close_price=2001.0 + offset, tick_volume=10,
+                    real_volume=None, volume_source="TICK", is_closed=True,
+                    quality="VERIFIED",
+                ))
+
+    # Three selected ledger rows exist, but the third selected signal has no
+    # source candles. The completed but overlapping second signal is excluded.
+    service.calculate_and_persist_ohlc_outcomes(run, periods, signals)
+    report = service.get_run_readiness(run_id=str(run.run_id))
+
+    assert len(report) == 1
+    readiness = report[0]
+    assert readiness.horizon_minutes == 5
+    assert readiness.selected_total == 3
+    assert readiness.selected_completed_total == 2
+    assert readiness.selected_completed_by_period == (1, 1, 0)
+    assert readiness.selected_not_completed_by_period == (0, 0, 1)
+    assert readiness.required_total == 3
+    assert readiness.required_per_period == 1
+    assert readiness.ready is False
+    assert readiness.status == "NEEDS_MORE_DATA"
+
+
+def test_run_readiness_rejects_unknown_run(evaluation_service):
+    service, _database = evaluation_service
+    with pytest.raises(ValueError, match="does not exist"):
+        service.get_run_readiness(run_id="missing-run")
+
 def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation_service):
     service, database = evaluation_service
     now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
