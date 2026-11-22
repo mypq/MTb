@@ -253,6 +253,9 @@ class EvaluationSignalRecord(DatabaseBase):
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
+    outcome_evidence: Mapped[list[EvaluationOutcomeEvidenceRecord]] = relationship(
+        back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
+    )
     sample_selections: Mapped[list[EvaluationSampleSelectionRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -351,7 +354,42 @@ class EvaluationOutcomeRecord(DatabaseBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     signal: Mapped[EvaluationSignalRecord] = relationship(back_populates="outcomes")
+    evidence: Mapped[EvaluationOutcomeEvidenceRecord | None] = relationship(
+        back_populates="outcome",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        uselist=False,
+    )
 
+
+class EvaluationOutcomeEvidenceRecord(DatabaseBase):
+    """Immutable source snapshot and range diagnostics for one outcome."""
+
+    __tablename__ = "evaluation_outcome_evidence"
+    __table_args__ = (
+        CheckConstraint("length(instrument) > 0", name="ck_eval_outcome_evidence_instrument"),
+        CheckConstraint("timeframe = 'M1'", name="ck_eval_outcome_evidence_timeframe"),
+        CheckConstraint("requested_start_at < requested_end_at", name="ck_eval_outcome_evidence_range"),
+        Index("ix_eval_outcome_evidence_cutoff", "available_at_cutoff"),
+    )
+
+    outcome_id: Mapped[str] = mapped_column(
+        ForeignKey("evaluation_outcomes.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    instrument: Mapped[str] = mapped_column(String(64), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(8), nullable=False)
+    requested_start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    requested_end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    available_at_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    latest_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_candles: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    observed_gaps: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    duplicate_event_times: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    is_contiguous: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    outcome: Mapped[EvaluationOutcomeRecord] = relationship(back_populates="evidence")
 
 
 class EvaluationSampleSelectionRecord(DatabaseBase):
