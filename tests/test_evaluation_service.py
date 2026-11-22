@@ -379,7 +379,7 @@ def test_sample_selection_rejects_partial_candidate_batch(evaluation_service):
         )
 
 
-def test_calculated_ohlc_outcome_is_persisted_with_counterfactual_lineage(
+def test_ohlc_outcome_cannot_be_persisted_without_source_lineage(
     evaluation_service,
 ):
     service, database = evaluation_service
@@ -424,17 +424,11 @@ def test_calculated_ohlc_outcome_is_persisted_with_counterfactual_lineage(
         ))
 
     outcome = EvaluationOHLCOutcomeCalculator().calculate(signal, 5, tuple(candles))
-    records = service.persist_outcomes(run, periods, (signal,), (outcome,))
+    with pytest.raises(ValueError, match="Every OHLC outcome requires exactly one M1 source evidence snapshot"):
+        service.persist_outcomes(run, periods, (signal,), (outcome,))
 
-    assert len(records) == 1
     with database.session() as session:
-        stored = session.get(EvaluationOutcomeRecord, str(outcome.outcome_id))
-        assert stored is not None
-        assert stored.outcome_type == "COUNTERFACTUAL"
-        assert stored.status == "COMPLETED"
-        assert stored.measurement_basis == "OHLC_APPROXIMATION"
-        assert stored.net_pnl is None
-        assert stored.signal_id == str(signal.signal_id)
+        assert session.get(EvaluationOutcomeRecord, str(outcome.outcome_id)) is None
 
 
 def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
