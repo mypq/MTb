@@ -360,7 +360,7 @@ def test_persist_signals_rejects_run_and_period_contract_mismatch(evaluation_ser
         service.persist_signals(forged_run, periods, (signal,))
 
     forged_period = periods[0].model_copy(
-        update={"start_at": periods[0].start_at + timedelta(seconds=1)}
+        update={"created_at": periods[0].created_at + timedelta(seconds=1)}
     )
     with pytest.raises(ValueError, match="persisted record"):
         service.persist_signals(run, (forged_period, *periods[1:]), (signal,))
