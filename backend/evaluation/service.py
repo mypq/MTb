@@ -518,7 +518,23 @@ class EvaluationService:
                 session.add_all(
                     EvaluationOutcomeEvidenceRecord(
                         outcome_id=outcome_id,
-                        **snapshot,
+                        **{
+                            **snapshot,
+                            "requested_start_at": datetime.fromisoformat(
+                                snapshot["requested_start_at"]
+                            ),
+                            "requested_end_at": datetime.fromisoformat(
+                                snapshot["requested_end_at"]
+                            ),
+                            "available_at_cutoff": datetime.fromisoformat(
+                                snapshot["available_at_cutoff"]
+                            ),
+                            "latest_available_at": (
+                                datetime.fromisoformat(snapshot["latest_available_at"])
+                                if snapshot["latest_available_at"] is not None
+                                else None
+                            ),
+                        },
                     )
                     for outcome_id, snapshot in evidence_map.items()
                 )
