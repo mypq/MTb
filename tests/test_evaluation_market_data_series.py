@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from backend.database import Database
 from backend.database_models import (
@@ -226,4 +227,27 @@ def test_series_reader_rejects_out_of_order_repository_results():
             start_at=BASE,
             end_at=BASE + timedelta(minutes=15),
             available_at_cutoff=BASE + timedelta(minutes=15),
+        )
+
+
+
+def test_range_reader_rejects_candles_recorded_after_cutoff(evaluation_repository):
+    database = evaluation_repository._database
+    with database.session() as session:
+        batch = session.scalar(
+            select(MarketDataBatchRecord).where(
+                MarketDataBatchRecord.received_at == BASE + timedelta(minutes=5, seconds=30)
+            )
+        )
+        assert batch is not None
+        batch.created_at = BASE + timedelta(minutes=7, seconds=30)
+
+    reader = EvaluationCandleSeriesReader(evaluation_repository)
+    with pytest.raises(ValueError, match="recorded after"):
+        reader.load_series(
+            instrument="XAUUSD",
+            timeframe="M5",
+            start_at=BASE,
+            end_at=BASE + timedelta(minutes=20),
+            available_at_cutoff=BASE + timedelta(minutes=6),
         )

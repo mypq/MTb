@@ -209,6 +209,10 @@ class EvaluationCandleSeriesReader:
                 raise EvaluationMarketDataError(
                     f"Candle {candle.candle_id} became available after the input cutoff."
                 )
+            if candle.recorded_at > available_at_cutoff:
+                raise EvaluationMarketDataError(
+                    f"Candle {candle.candle_id} was recorded after the input cutoff."
+                )
             if not candle.is_closed or candle.candle_quality != "VERIFIED":
                 raise EvaluationMarketDataError(
                     f"Candle {candle.candle_id} is not verified and closed."

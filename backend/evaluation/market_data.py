@@ -81,6 +81,10 @@ class EvaluationMarketDataReader:
                 raise EvaluationMarketDataError(
                     f"Source candle {candle_id} became available after signal inputs were frozen."
                 )
+            if candle.recorded_at > signal.input_available_at:
+                raise EvaluationMarketDataError(
+                    f"Source candle {candle_id} was recorded after signal inputs were frozen."
+                )
             if not candle.is_closed or candle.candle_quality != "VERIFIED":
                 raise EvaluationMarketDataError(
                     f"Source candle {candle_id} is not a verified closed candle."

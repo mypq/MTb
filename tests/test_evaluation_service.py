@@ -335,6 +335,35 @@ def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation
             run_id=str(run.run_id), signals=signals, horizons=(5,)
         )
 
+    late_signal = make_signal(run, periods[0], base + timedelta(hours=1))
+    with pytest.raises(ValueError, match="frozen"):
+        service.persist_signals(run, periods, (late_signal,))
+
+
+def test_sample_selection_rejects_forged_signal_contract(evaluation_service):
+    service, _database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="d" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+        horizons=(5,),
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    service.persist_signals(run, periods, (signal,))
+    forged = signal.model_copy(
+        update={"signal_at": signal.signal_at + timedelta(minutes=1)}
+    )
+    with pytest.raises(ValueError, match="differs from its persisted"):
+        service.record_sample_selections(
+            run_id=str(run.run_id), signals=(forged,), horizons=(5,)
+        )
+
 
 def test_sample_selection_requires_persisted_signals(evaluation_service):
     service, _database = evaluation_service
@@ -853,3 +882,39 @@ def test_backup_restore_preserves_evaluation_evidence_and_market_data(tmp_path):
         ).evidence_sha256 == original_digest
     finally:
         database.dispose()
+
+
+
+def test_run_readiness_rejects_tampered_evidence_digest(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="e" * 40,
+        configuration_snapshot={"readiness_integrity": True},
+        created_at=now,
+        horizons=(5,),
+        minimum_completed_outcomes_per_horizon=1,
+        minimum_outcomes_per_period=1,
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    service.persist_signals(run, periods, (signal,))
+    service.record_sample_selections(
+        run_id=str(run.run_id), signals=(signal,), horizons=(5,)
+    )
+    service.calculate_and_persist_ohlc_outcomes(run, periods, (signal,))
+
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE evaluation_outcome_evidence "
+            "SET evidence_sha256 = ? WHERE outcome_id IN "
+            "(SELECT id FROM evaluation_outcomes WHERE run_id = ?)",
+            ("0" * 64, str(run.run_id)),
+        )
+
+    with pytest.raises(ValueError, match="evidence integrity check failed"):
+        service.get_run_readiness(run_id=str(run.run_id))

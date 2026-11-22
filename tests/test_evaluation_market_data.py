@@ -115,6 +115,7 @@ def test_reader_rejects_missing_source_candle():
         ({"instrument": "EURUSD"}, "another instrument"),
         ({"event_time": SIGNAL_AT + timedelta(seconds=1)}, "occurs after"),
         ({"available_at": SIGNAL_AT - timedelta(minutes=1)}, "became available after"),
+        ({"recorded_at": SIGNAL_AT - timedelta(seconds=1)}, "was recorded after"),
         ({"is_closed": False}, "verified closed"),
         ({"candle_quality": "INCOMPLETE"}, "verified closed"),
         ({"clock_verified": False}, "verified source clock"),

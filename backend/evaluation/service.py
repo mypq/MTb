@@ -35,6 +35,85 @@ from backend.evaluation.contracts import (
 
 
 
+
+def _utc_instant(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _enum_value(value):
+    return value.value if hasattr(value, "value") else value
+
+
+def _signal_contract_matches_record(signal, record) -> bool:
+    snapshot = (
+        json.loads(json.dumps(signal.input_snapshot, ensure_ascii=False))
+        if signal.input_snapshot is not None else None
+    )
+    return (
+        str(signal.signal_id) == record.id
+        and str(signal.run_id) == record.run_id
+        and str(signal.period_id) == record.period_id
+        and signal.contract_version == record.contract_version
+        and signal.instrument == record.instrument
+        and _utc_instant(signal.signal_at) == _utc_instant(record.signal_at)
+        and _utc_instant(signal.input_available_at) == _utc_instant(record.input_available_at)
+        and _enum_value(signal.direction) == record.direction
+        and signal.reference_eligible is record.reference_eligible
+        and _enum_value(signal.filter_decision) == record.filter_decision
+        and signal.filter_reason == record.filter_reason
+        and list(signal.source_candle_ids) == record.source_candle_ids
+        and list(signal.source_batch_ids) == record.source_batch_ids
+        and snapshot == record.input_snapshot
+        and _utc_instant(signal.created_at) == _utc_instant(record.created_at)
+    )
+
+
+def _validate_stored_run_and_periods(session, run, periods) -> None:
+    stored_run = session.get(EvaluationRunRecord, str(run.run_id))
+    if stored_run is None:
+        raise ValueError("Evaluation run must be persisted before its dependent records.")
+    snapshot = json.loads(json.dumps(run.configuration_snapshot, ensure_ascii=False))
+    if not (
+        stored_run.contract_version == run.contract_version
+        and stored_run.instrument == run.instrument
+        and _utc_instant(stored_run.created_at) == _utc_instant(run.created_at)
+        and _utc_instant(stored_run.data_start_at) == _utc_instant(run.data_start_at)
+        and _utc_instant(stored_run.data_end_at) == _utc_instant(run.data_end_at)
+        and stored_run.code_revision == run.code_revision
+        and stored_run.configuration_sha256 == run.configuration_sha256
+        and stored_run.configuration_snapshot == snapshot
+        and stored_run.sampling_rule == run.sampling_rule
+        and stored_run.period_partition == run.period_partition
+        and tuple(stored_run.horizons) == tuple(run.horizons)
+        and stored_run.minimum_completed_outcomes_per_horizon == run.minimum_completed_outcomes_per_horizon
+        and stored_run.minimum_outcomes_per_period == run.minimum_outcomes_per_period
+    ):
+        raise ValueError("Supplied evaluation run contract differs from its persisted definition.")
+
+    supplied_periods = {str(item.period_id): item for item in periods}
+    stored_periods = session.scalars(
+        select(EvaluationPeriodRecord).where(
+            EvaluationPeriodRecord.run_id == str(run.run_id)
+        )
+    ).all()
+    if set(supplied_periods) != {item.id for item in stored_periods}:
+        raise ValueError("Supplied evaluation periods differ from the persisted run periods.")
+    for record in stored_periods:
+        item = supplied_periods[record.id]
+        if not (
+            str(item.run_id) == record.run_id
+            and item.contract_version == record.contract_version
+            and item.period_index == record.period_index
+            and _utc_instant(item.start_at) == _utc_instant(record.start_at)
+            and _utc_instant(item.end_at) == _utc_instant(record.end_at)
+            and _utc_instant(item.created_at) == _utc_instant(record.created_at)
+            and item.partition_method == record.partition_method
+        ):
+            raise ValueError("Supplied evaluation period contract differs from its persisted record.")
+
+
 def _serialize_outcome_source_evidence(evidence) -> dict:
     """Create a JSON-safe, immutable-in-practice snapshot of the full M1 input."""
 
@@ -221,7 +300,9 @@ def _validate_ohlc_evidence_snapshot(
             raise ValueError("A source candle does not match the signal instrument and M1 timeframe.")
         event_time = _parse_evidence_timestamp(candle["event_time"], "candle.event_time")
         available_at = _parse_evidence_timestamp(candle["available_at"], "candle.available_at")
-        _parse_evidence_timestamp(candle["recorded_at"], "candle.recorded_at")
+        recorded_at = _parse_evidence_timestamp(candle["recorded_at"], "candle.recorded_at")
+        if recorded_at > cutoff:
+            raise ValueError("A source candle was recorded after the frozen run cutoff.")
         if not (start <= event_time < end):
             raise ValueError("A source candle falls outside the requested evidence range.")
         if available_at > cutoff:
@@ -438,6 +519,23 @@ class EvaluationService:
         if not signal_items:
             return ()
         validate_evaluation_relationships(run, periods, signal_items, ())
+        with self._database.session() as session:
+            _validate_stored_run_and_periods(session, run, periods)
+            if session.scalar(
+                select(EvaluationSampleSelectionRecord.id).where(
+                    EvaluationSampleSelectionRecord.run_id == str(run.run_id)
+                ).limit(1)
+            ) is not None:
+                raise ValueError("Signals are frozen after the sample selection ledger is created.")
+            supplied_ids = {str(item.signal_id) for item in signal_items}
+            existing_ids = set(session.scalars(
+                select(EvaluationSignalRecord.id).where(
+                    EvaluationSignalRecord.run_id == str(run.run_id),
+                    EvaluationSignalRecord.id.in_(supplied_ids),
+                )
+            ).all()) if supplied_ids else set()
+            if existing_ids:
+                raise ValueError("Evaluation signals are immutable and cannot be inserted twice.")
         records = [
             EvaluationSignalRecord(
                 id=str(signal.signal_id),
@@ -498,17 +596,23 @@ class EvaluationService:
                 raise ValueError("Requested horizons must be unique horizons enabled for this run.")
 
             supplied_ids = {str(item.signal_id) for item in signal_items}
-            persisted_ids = set(
-                session.scalars(
-                    select(EvaluationSignalRecord.id).where(
-                        EvaluationSignalRecord.run_id == run_id
-                    )
-                ).all()
-            )
-            if persisted_ids != supplied_ids:
+            persisted_records = session.scalars(
+                select(EvaluationSignalRecord).where(
+                    EvaluationSignalRecord.run_id == run_id
+                )
+            ).all()
+            persisted_by_id = {record.id: record for record in persisted_records}
+            if set(persisted_by_id) != supplied_ids:
                 raise ValueError(
                     "Selection must include every persisted signal for this run exactly once."
                 )
+            for signal in signal_items:
+                if not _signal_contract_matches_record(
+                    signal, persisted_by_id[str(signal.signal_id)]
+                ):
+                    raise ValueError(
+                        "Selection signal contract differs from its persisted immutable record."
+                    )
 
             existing_ledger_horizons = set(
                 session.scalars(
@@ -680,6 +784,28 @@ class EvaluationService:
             if not horizons or any(value not in (5, 15, 30, 60) for value in horizons):
                 raise ValueError("Evaluation run contains unsupported horizons.")
 
+            # Fail closed if any OHLC outcome lost its required evidence or if
+            # any evidence snapshot no longer matches its persisted SHA-256.
+            outcome_rows = session.execute(
+                select(EvaluationOutcomeRecord, EvaluationOutcomeEvidenceRecord)
+                .outerjoin(
+                    EvaluationOutcomeEvidenceRecord,
+                    EvaluationOutcomeEvidenceRecord.outcome_id == EvaluationOutcomeRecord.id,
+                )
+                .where(EvaluationOutcomeRecord.run_id == run_id)
+            ).all()
+            for outcome, evidence in outcome_rows:
+                if outcome.measurement_basis == "OHLC_APPROXIMATION" and evidence is None:
+                    raise ValueError(
+                        "Evaluation readiness blocked: an OHLC outcome has no source evidence."
+                    )
+                if evidence is not None:
+                    digest = _outcome_evidence_sha256(_evidence_record_payload(evidence))
+                    if digest != evidence.evidence_sha256:
+                        raise ValueError(
+                            "Evaluation readiness blocked: outcome source evidence integrity check failed."
+                        )
+
             rows = session.execute(
                 select(
                     EvaluationSampleSelectionRecord.horizon_minutes,
@@ -818,17 +944,23 @@ class EvaluationService:
                 )
 
         with self._database.session() as session:
-            stored_run = session.get(EvaluationRunRecord, str(run.run_id))
-            if stored_run is None:
-                raise ValueError("Evaluation run must be persisted before outcomes.")
-            stored_signal_ids = set(session.scalars(
-                select(EvaluationSignalRecord.id).where(
+            _validate_stored_run_and_periods(session, run, periods)
+            stored_signals = session.scalars(
+                select(EvaluationSignalRecord).where(
                     EvaluationSignalRecord.run_id == str(run.run_id),
                     EvaluationSignalRecord.id.in_(signal_ids),
                 )
-            ).all())
-            if stored_signal_ids != signal_ids:
+            ).all()
+            stored_by_id = {record.id: record for record in stored_signals}
+            if set(stored_by_id) != signal_ids:
                 raise ValueError("Every outcome signal must already be persisted for this run.")
+            for signal in signal_items:
+                if not _signal_contract_matches_record(
+                    signal, stored_by_id[str(signal.signal_id)]
+                ):
+                    raise ValueError(
+                        "Outcome signal contract differs from its persisted immutable record."
+                    )
 
             records = [
                 EvaluationOutcomeRecord(
