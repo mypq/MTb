@@ -74,6 +74,28 @@ def test_evaluation_outcome_evidence_migration_isolated_round_trip(
                 ).all()
             }
         assert "trg_eval_outcome_evidence_immutable_update" in trigger_names
+        with engine.connect() as connection:
+            connection.connection.driver_connection.execute("PRAGMA foreign_keys=OFF")
+            transaction = connection.begin()
+            try:
+                connection.exec_driver_sql(
+                    "INSERT INTO evaluation_outcome_evidence "
+                    "(outcome_id, instrument, timeframe, requested_start_at, requested_end_at, "
+                    "available_at_cutoff, latest_available_at, source_candles, observed_gaps, "
+                    "duplicate_event_times, is_contiguous, evidence_schema_version, evidence_sha256) "
+                    "VALUES ('trigger-test', 'XAUUSD', 'M1', '2026-01-01', '2026-01-02', "
+                    "'2026-01-01', NULL, '[]', '[]', '[]', 1, 1, '"
+                    + "0" * 64 + "')"
+                )
+                import pytest
+                from sqlalchemy.exc import IntegrityError
+                with pytest.raises(IntegrityError):
+                    connection.exec_driver_sql(
+                        "UPDATE evaluation_outcome_evidence SET is_contiguous = 0 "
+                        "WHERE outcome_id = 'trigger-test'"
+                    )
+            finally:
+                transaction.rollback()
         assert "ix_eval_outcome_evidence_cutoff" in {
             item["name"] for item in inspector.get_indexes("evaluation_outcome_evidence")
         }
