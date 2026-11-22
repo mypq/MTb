@@ -308,18 +308,32 @@ class EvaluationService:
             ):
                 raise ValueError("Requested horizons must be unique horizons enabled for this run.")
 
-            if signal_items:
-                supplied_ids = {str(item.signal_id) for item in signal_items}
-                persisted_ids = set(
-                    session.scalars(
-                        select(EvaluationSignalRecord.id).where(
-                            EvaluationSignalRecord.run_id == run_id,
-                            EvaluationSignalRecord.id.in_(supplied_ids),
-                        )
-                    ).all()
+            supplied_ids = {str(item.signal_id) for item in signal_items}
+            persisted_ids = set(
+                session.scalars(
+                    select(EvaluationSignalRecord.id).where(
+                        EvaluationSignalRecord.run_id == run_id
+                    )
+                ).all()
+            )
+            if persisted_ids != supplied_ids:
+                raise ValueError(
+                    "Selection must include every persisted signal for this run exactly once."
                 )
-                if persisted_ids != supplied_ids:
-                    raise ValueError("All selection candidates must already be persisted for this run.")
+
+            existing_ledger_horizons = set(
+                session.scalars(
+                    select(EvaluationSampleSelectionRecord.horizon_minutes).where(
+                        EvaluationSampleSelectionRecord.run_id == run_id,
+                        EvaluationSampleSelectionRecord.horizon_minutes.in_(selected_horizons),
+                    )
+                ).all()
+            )
+            if existing_ledger_horizons:
+                raise ValueError(
+                    "Sample selection ledger already exists for requested horizon(s): "
+                    + ", ".join(str(value) for value in sorted(existing_ledger_horizons))
+                )
 
             records: list[EvaluationSampleSelectionRecord] = []
             ordered_candidates = sorted(
