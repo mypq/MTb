@@ -320,7 +320,7 @@ def test_outcome_measurement_uses_later_cutoff_than_run_creation(evaluation_serv
     assert all(item.created_at == calculation_cutoff for item in outcomes)
     for outcome in outcomes:
         evidence = service.get_outcome_evidence(str(outcome.id))
-        assert evidence.available_at_cutoff == calculation_cutoff
+        assert evidence.available_at_cutoff.replace(tzinfo=timezone.utc) == calculation_cutoff
         assert evidence.available_at_cutoff > run.created_at
         assert evidence.source_candles
         assert all(
@@ -789,7 +789,7 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
             assert source.requested_start_at.replace(tzinfo=timezone.utc) == signals[
                 0 if record.signal_id == str(signals[0].signal_id) else 1
             ].signal_at
-            assert source.available_at_cutoff.replace(tzinfo=timezone.utc) == run.created_at
+            assert source.available_at_cutoff.replace(tzinfo=timezone.utc) == now + timedelta(hours=2)
             assert len(source.source_candles) in (60, 61)
             assert source.evidence_schema_version == 1
         complete_evidence = by_outcome[
