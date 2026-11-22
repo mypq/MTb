@@ -385,6 +385,7 @@ class EvaluationOutcomeEvidenceRecord(DatabaseBase):
     duplicate_event_times: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     is_contiguous: Mapped[bool] = mapped_column(Boolean, nullable=False)
     evidence_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
 
     outcome: Mapped[EvaluationOutcomeRecord] = relationship(back_populates="evidence")
 
