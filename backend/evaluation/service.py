@@ -257,9 +257,13 @@ def _validate_ohlc_evidence_snapshot(
     cutoff = _parse_evidence_timestamp(snapshot["available_at_cutoff"], "available_at_cutoff")
     if start != signal.signal_at:
         raise ValueError("OHLC source evidence start does not match the signal timestamp.")
-    if cutoff != run.created_at:
-        raise ValueError("OHLC source evidence cutoff does not match the frozen run cutoff.")
+    if cutoff != outcome.created_at:
+        raise ValueError("OHLC source evidence cutoff must match the outcome calculation timestamp.")
+    if cutoff < run.created_at:
+        raise ValueError("Outcome calculation cannot precede evaluation run creation.")
     minimum_required_end = signal.signal_at + timedelta(minutes=outcome.horizon_minutes + 1)
+    if outcome.exit_at is not None and outcome.exit_at > cutoff:
+        raise ValueError("Outcome calculation cutoff precedes the completed measurement window.")
     maximum_allowed_end = signal.signal_at + timedelta(minutes=max(run.horizons) + 1)
     if start >= end or end < minimum_required_end or end > maximum_allowed_end:
         raise ValueError("M1 source evidence range does not cover the required outcome horizon.")
@@ -302,11 +306,11 @@ def _validate_ohlc_evidence_snapshot(
         available_at = _parse_evidence_timestamp(candle["available_at"], "candle.available_at")
         recorded_at = _parse_evidence_timestamp(candle["recorded_at"], "candle.recorded_at")
         if recorded_at > cutoff:
-            raise ValueError("A source candle was recorded after the frozen run cutoff.")
+            raise ValueError("A source candle was recorded after the outcome calculation cutoff.")
         if not (start <= event_time < end):
             raise ValueError("A source candle falls outside the requested evidence range.")
         if available_at > cutoff:
-            raise ValueError("A source candle became available after the frozen run cutoff.")
+            raise ValueError("A source candle became available after the outcome calculation cutoff.")
         if candle["is_closed"] is not True or candle["candle_quality"] != "VERIFIED":
             raise ValueError("Source candles must be closed and verified.")
         if candle["clock_verified"] is not True or candle["analysis_eligible"] is not True:
@@ -1082,15 +1086,26 @@ class EvaluationService:
         run: EvaluationRunContract,
         periods: tuple[EvaluationPeriodContract, ...],
         signals: Iterable[EvaluationSignalContract],
+        *,
+        outcome_data_cutoff_at: datetime,
     ) -> tuple[EvaluationOutcomeRecord, ...]:
-        """Calculate and persist every enabled OHLC horizon for every signal.
+        """Calculate outcomes using data available at this later calculation cutoff.
 
-        The run creation timestamp is the frozen data-availability cutoff.
-        The range reader rejects candles received after that cutoff or whose
-        source/validation evidence is not trustworthy.
+        Signal inputs remain frozen independently at each signal's
+        input_available_at. This cutoff applies only to the M1 candles used
+        to measure counterfactual outcomes and must be supplied explicitly so
+        the result and its evidence can be reproduced.
         Filter decisions and sample-selection decisions never suppress
         counterfactual calculations.
         """
+        if (
+            not isinstance(outcome_data_cutoff_at, datetime)
+            or outcome_data_cutoff_at.tzinfo is None
+            or outcome_data_cutoff_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("outcome_data_cutoff_at must be a UTC-aware datetime.")
+        if outcome_data_cutoff_at < run.created_at:
+            raise ValueError("Outcome calculation cutoff cannot precede run creation.")
         signal_items = tuple(signals)
         validate_evaluation_relationships(run, periods, signal_items, ())
         if not signal_items:
@@ -1155,7 +1170,7 @@ class EvaluationService:
                 timeframe="M1",
                 start_at=signal.signal_at,
                 end_at=series_end,
-                available_at_cutoff=run.created_at,
+                available_at_cutoff=outcome_data_cutoff_at,
             )
             evidence_snapshot = _serialize_outcome_source_evidence(evidence)
             for horizon in horizons:
@@ -1163,7 +1178,7 @@ class EvaluationService:
                     signal,
                     horizon,
                     evidence.candles,
-                    created_at=run.created_at,
+                    created_at=outcome_data_cutoff_at,
                 )
                 outcomes.append(outcome)
                 evidence_by_outcome_id[str(outcome.outcome_id)] = evidence_snapshot
