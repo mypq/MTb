@@ -1001,6 +1001,21 @@ class EvaluationService:
                 raise ValueError("Outcome source evidence integrity check failed.")
             return record
 
+    def delete_run(self, run_id: str) -> bool:
+        """Delete one evaluation run and its dependent evaluation records.
+
+        Database foreign-key cascades remove periods, signals, outcomes,
+        sample-selection ledger rows, and outcome evidence. Market-data
+        batches, candles, and their validation/clock provenance are separate
+        records and are deliberately not deleted.
+        """
+        with self._database.session() as session:
+            run_record = session.get(EvaluationRunRecord, run_id)
+            if run_record is None:
+                return False
+            session.delete(run_record)
+        return True
+
     def get_run_periods(
         self,
         run_id: str,

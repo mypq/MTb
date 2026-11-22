@@ -9,6 +9,7 @@ from backend.database_models import (
     DatabaseBase,
     EvaluationPeriodRecord,
     EvaluationRunRecord,
+    EvaluationSignalRecord,
     EvaluationSampleSelectionRecord,
     EvaluationOutcomeRecord,
     EvaluationOutcomeEvidenceRecord,
@@ -655,3 +656,97 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
             periods,
             signals,
         )
+
+
+def test_delete_run_cascades_only_evaluation_records(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="d" * 40,
+        configuration_snapshot={"baseline": "delete-cascade"},
+        created_at=now,
+        horizons=(5,),
+    )
+    signal = make_signal(
+        run,
+        periods[0],
+        periods[0].start_at + timedelta(hours=1),
+    )
+    service.persist_signals(run, periods, (signal,))
+    service.record_sample_selections(
+        run_id=str(run.run_id),
+        signals=(signal,),
+        horizons=(5,),
+    )
+
+    # An unrelated source-market record must survive deletion of the run.
+    with database.session() as session:
+        session.add(
+            MarketDataBatchRecord(
+                id=9001,
+                symbol="EURUSD",
+                timeframe="M1",
+                source="TEST",
+                received_at=now,
+                candle_count=1,
+                created_at=now,
+            )
+        )
+        session.add(
+            MarketCandleRecord(
+                id=9001,
+                batch_id=9001,
+                symbol="EURUSD",
+                timeframe="M1",
+                timestamp=now - timedelta(minutes=1),
+                open_price=1.1,
+                high_price=1.2,
+                low_price=1.0,
+                close_price=1.15,
+                tick_volume=10,
+                real_volume=None,
+                volume_source="TICK",
+                is_closed=True,
+                quality="VERIFIED",
+            )
+        )
+
+    outcomes = service.calculate_and_persist_ohlc_outcomes(
+        run,
+        periods,
+        (signal,),
+    )
+    assert len(outcomes) == 1
+    outcome_id = str(outcomes[0].id)
+
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(EvaluationRunRecord)) == 1
+        assert session.scalar(select(func.count()).select_from(EvaluationPeriodRecord)) == 3
+        assert session.scalar(select(func.count()).select_from(EvaluationSignalRecord)) == 1
+        assert session.scalar(select(func.count()).select_from(EvaluationOutcomeRecord)) == 1
+        assert session.scalar(select(func.count()).select_from(EvaluationSampleSelectionRecord)) == 1
+        assert session.scalar(select(func.count()).select_from(EvaluationOutcomeEvidenceRecord)) == 1
+
+    assert service.delete_run(str(run.run_id)) is True
+
+    with database.session() as session:
+        assert session.scalar(select(func.count()).select_from(EvaluationRunRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(EvaluationPeriodRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(EvaluationSignalRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(EvaluationOutcomeRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(EvaluationSampleSelectionRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(EvaluationOutcomeEvidenceRecord)) == 0
+        assert session.scalar(select(func.count()).select_from(MarketDataBatchRecord)) == 1
+        assert session.scalar(select(func.count()).select_from(MarketCandleRecord)) == 1
+        batch = session.get(MarketDataBatchRecord, 9001)
+        assert batch is not None
+        assert batch.symbol == "EURUSD"
+
+    assert service.delete_run(str(run.run_id)) is False
+    with pytest.raises(ValueError, match="does not exist"):
+        service.get_run_readiness(run_id=str(run.run_id))
+    with pytest.raises(ValueError, match="does not exist"):
+        service.get_outcome_evidence(outcome_id)
