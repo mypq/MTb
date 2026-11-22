@@ -11,6 +11,8 @@ from backend.database_models import (
     EvaluationRunRecord,
     EvaluationSampleSelectionRecord,
     EvaluationOutcomeRecord,
+    MarketCandleRecord,
+    MarketDataBatchRecord,
 )
 from backend.evaluation.contracts import (
     EvaluationSignalContract,
@@ -289,3 +291,106 @@ def test_calculated_ohlc_outcome_is_persisted_with_counterfactual_lineage(
         assert stored.measurement_basis == "OHLC_APPROXIMATION"
         assert stored.net_pnl is None
         assert stored.signal_id == str(signal.signal_id)
+
+
+def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
+    evaluation_service,
+):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="f" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+    )
+    first_at = periods[0].start_at + timedelta(hours=2, seconds=30)
+    signals = (
+        make_signal(run, periods[0], first_at, decision="BLOCKED"),
+        make_signal(
+            run,
+            periods[0],
+            first_at + timedelta(hours=2),
+            eligible=False,
+        ),
+    )
+    service.persist_signals(run, periods, signals)
+
+    with database.session() as session:
+        candle_id = 1
+        for signal in signals:
+            first_minute = signal.signal_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
+            for offset in range(61):
+                event_time = first_minute + timedelta(minutes=offset)
+                available_at = event_time + timedelta(minutes=1, seconds=1)
+                batch = MarketDataBatchRecord(
+                    symbol="XAUUSD",
+                    timeframe="M1",
+                    source="MT5",
+                    received_at=available_at,
+                    candle_count=1,
+                    created_at=available_at + timedelta(seconds=1),
+                    clock_verified=True,
+                    clock_account_login=123456,
+                    clock_broker_server="Test-Broker",
+                    validation_report={
+                        "analysis_eligible": True,
+                        "freshness_verified": True,
+                        "issues": [],
+                        "gaps": [],
+                    },
+                )
+                session.add(batch)
+                session.flush()
+                session.add(
+                    MarketCandleRecord(
+                        batch_id=batch.id,
+                        symbol="XAUUSD",
+                        timeframe="M1",
+                        timestamp=event_time,
+                        open_price=2000.0 + offset,
+                        high_price=2002.0 + offset,
+                        low_price=1999.0 + offset,
+                        close_price=2001.0 + offset,
+                        tick_volume=10,
+                        real_volume=None,
+                        volume_source="TICK",
+                        is_closed=True,
+                        quality="VERIFIED",
+                    )
+                )
+                candle_id += 1
+
+    records = service.calculate_and_persist_ohlc_outcomes(
+        run,
+        periods,
+        signals,
+        available_at_cutoff=now,
+    )
+
+    assert len(records) == 8
+    assert {
+        (record.signal_id, record.horizon_minutes)
+        for record in records
+    } == {
+        (str(signal.signal_id), horizon)
+        for signal in signals
+        for horizon in (5, 15, 30, 60)
+    }
+    assert all(record.status == "COMPLETED" for record in records)
+    assert all(record.measurement_basis == "OHLC_APPROXIMATION" for record in records)
+    assert all(record.net_pnl is None for record in records)
+    # Filter-blocked and reference-ineligible signals both retain outcomes.
+    assert {
+        record.signal_id for record in records
+    } == {str(signal.signal_id) for signal in signals}
+
+    with pytest.raises(ValueError, match="already exist"):
+        service.calculate_and_persist_ohlc_outcomes(
+            run,
+            periods,
+            signals,
+            available_at_cutoff=now,
+        )
