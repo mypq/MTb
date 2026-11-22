@@ -451,14 +451,12 @@ class EvaluationService:
         run: EvaluationRunContract,
         periods: tuple[EvaluationPeriodContract, ...],
         signals: Iterable[EvaluationSignalContract],
-        *,
-        available_at_cutoff: datetime,
     ) -> tuple[EvaluationOutcomeRecord, ...]:
         """Calculate and persist every enabled OHLC horizon for every signal.
 
-        The caller must provide the frozen data-availability cutoff for this
-        evaluation. The range reader rejects candles that were received after
-        that cutoff or whose source/validation evidence is not trustworthy.
+        The run creation timestamp is the frozen data-availability cutoff.
+        The range reader rejects candles received after that cutoff or whose
+        source/validation evidence is not trustworthy.
         Filter decisions and sample-selection decisions never suppress
         counterfactual calculations.
         """
@@ -525,7 +523,7 @@ class EvaluationService:
                 timeframe="M1",
                 start_at=signal.signal_at,
                 end_at=series_end,
-                available_at_cutoff=available_at_cutoff,
+                available_at_cutoff=run.created_at,
             )
             for horizon in horizons:
                 outcomes.append(
@@ -533,7 +531,7 @@ class EvaluationService:
                         signal,
                         horizon,
                         evidence.candles,
-                        created_at=available_at_cutoff,
+                        created_at=run.created_at,
                     )
                 )
 
