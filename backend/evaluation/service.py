@@ -94,6 +94,137 @@ def _serialize_outcome_source_evidence(evidence) -> dict:
     }
 
 
+def _parse_evidence_timestamp(value, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Source evidence {field} must be an ISO timestamp.")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Source evidence {field} is not a valid timestamp.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"Source evidence {field} must be UTC-aware.")
+    return parsed
+
+
+def _validate_ohlc_evidence_snapshot(
+    snapshot: dict,
+    run: EvaluationRunContract,
+    signal: EvaluationSignalContract,
+    outcome: EvaluationOutcomeContract,
+) -> None:
+    """Validate that an M1 snapshot is complete and belongs to this outcome."""
+    if not isinstance(snapshot, dict):
+        raise ValueError("OHLC source evidence must be a mapping.")
+    required = {
+        "instrument", "timeframe", "requested_start_at", "requested_end_at",
+        "available_at_cutoff", "latest_available_at", "source_candles",
+        "observed_gaps", "duplicate_event_times", "is_contiguous",
+        "evidence_schema_version",
+    }
+    if set(snapshot) != required:
+        raise ValueError("OHLC source evidence has missing or unexpected fields.")
+    if snapshot["evidence_schema_version"] != 1:
+        raise ValueError("Unsupported OHLC source evidence schema version.")
+    if snapshot["instrument"] != signal.instrument or snapshot["instrument"] != run.instrument:
+        raise ValueError("OHLC source evidence instrument does not match its run and signal.")
+    if snapshot["timeframe"] != "M1":
+        raise ValueError("OHLC source evidence must use the M1 timeframe.")
+
+    start = _parse_evidence_timestamp(snapshot["requested_start_at"], "requested_start_at")
+    end = _parse_evidence_timestamp(snapshot["requested_end_at"], "requested_end_at")
+    cutoff = _parse_evidence_timestamp(snapshot["available_at_cutoff"], "available_at_cutoff")
+    if start != signal.signal_at:
+        raise ValueError("OHLC source evidence start does not match the signal timestamp.")
+    if cutoff != run.created_at:
+        raise ValueError("OHLC source evidence cutoff does not match the frozen run cutoff.")
+    if start >= end or end > signal.signal_at + timedelta(minutes=max(run.horizons) + 1):
+        raise ValueError("OHLC source evidence range is outside the permitted outcome window.")
+    if outcome.exit_at is not None and not (start <= outcome.entry_at < outcome.exit_at <= end):
+        raise ValueError("OHLC source evidence does not cover the outcome measurement window.")
+
+    candles = snapshot["source_candles"]
+    gaps = snapshot["observed_gaps"]
+    duplicate_times = snapshot["duplicate_event_times"]
+    if not isinstance(candles, list) or not isinstance(gaps, list) or not isinstance(duplicate_times, list):
+        raise ValueError("OHLC source evidence collections must be lists.")
+    candle_ids = set()
+    batch_ids = set()
+    event_times = []
+    available_times = []
+    for candle in candles:
+        if not isinstance(candle, dict):
+            raise ValueError("Each source candle evidence item must be a mapping.")
+        required_candle_fields = {
+            "candle_id", "batch_id", "instrument", "timeframe", "event_time",
+            "available_at", "recorded_at", "open", "high", "low", "close",
+            "tick_volume", "real_volume", "volume_source", "candle_quality",
+            "is_closed", "source", "source_account_login", "source_broker_server",
+            "clock_verified", "analysis_eligible", "validation_report",
+        }
+        if set(candle) != required_candle_fields:
+            raise ValueError("Source candle evidence has missing or unexpected fields.")
+        candle_id, batch_id = candle["candle_id"], candle["batch_id"]
+        if isinstance(candle_id, bool) or not isinstance(candle_id, int) or candle_id <= 0:
+            raise ValueError("Source candle IDs must be positive integers.")
+        if isinstance(batch_id, bool) or not isinstance(batch_id, int) or batch_id <= 0:
+            raise ValueError("Source batch IDs must be positive integers.")
+        if candle_id in candle_ids:
+            raise ValueError("Source candle IDs must not be duplicated.")
+        candle_ids.add(candle_id)
+        batch_ids.add(batch_id)
+        if candle["instrument"] != signal.instrument or candle["timeframe"] != "M1":
+            raise ValueError("A source candle does not match the signal instrument and M1 timeframe.")
+        event_time = _parse_evidence_timestamp(candle["event_time"], "candle.event_time")
+        available_at = _parse_evidence_timestamp(candle["available_at"], "candle.available_at")
+        _parse_evidence_timestamp(candle["recorded_at"], "candle.recorded_at")
+        if not (start <= event_time < end):
+            raise ValueError("A source candle falls outside the requested evidence range.")
+        if available_at > cutoff:
+            raise ValueError("A source candle became available after the frozen run cutoff.")
+        if candle["is_closed"] is not True or candle["candle_quality"] != "VERIFIED":
+            raise ValueError("Source candles must be closed and verified.")
+        if candle["clock_verified"] is not True or candle["analysis_eligible"] is not True:
+            raise ValueError("Source candles must have verified clock and analysis eligibility.")
+        if not isinstance(candle["validation_report"], dict) or candle["validation_report"].get("analysis_eligible") is not True:
+            raise ValueError("Source candles require persisted positive validation evidence.")
+        event_times.append(event_time)
+        available_times.append(available_at)
+
+    if event_times != sorted(event_times):
+        raise ValueError("Source candles must be stored in chronological order.")
+    expected_duplicates = sorted({
+        value.isoformat() for value in event_times
+        if event_times.count(value) > 1
+    })
+    normalized_duplicates = sorted(
+        _parse_evidence_timestamp(value, "duplicate_event_times").isoformat()
+        for value in duplicate_times
+    )
+    if normalized_duplicates != expected_duplicates:
+        raise ValueError("Duplicate event-time evidence does not match the source candles.")
+    if any(not isinstance(gap, dict) or set(gap) != {
+        "previous_event_time", "next_event_time", "expected_interval_seconds",
+        "actual_interval_seconds", "missing_intervals",
+    } for gap in gaps):
+        raise ValueError("Observed gap evidence has an invalid structure.")
+    for gap in gaps:
+        previous = _parse_evidence_timestamp(gap["previous_event_time"], "gap.previous_event_time")
+        following = _parse_evidence_timestamp(gap["next_event_time"], "gap.next_event_time")
+        if following <= previous or gap["actual_interval_seconds"] != int((following - previous).total_seconds()):
+            raise ValueError("Observed gap timing is inconsistent.")
+        if gap["expected_interval_seconds"] != 60:
+            raise ValueError("M1 observed gaps must declare a 60-second expected interval.")
+    expected_contiguous = bool(candles) and not gaps and not duplicate_times
+    if snapshot["is_contiguous"] is not expected_contiguous:
+        raise ValueError("Source evidence contiguity flag conflicts with its gaps or duplicates.")
+    latest = snapshot["latest_available_at"]
+    if available_times:
+        if _parse_evidence_timestamp(latest, "latest_available_at") != max(available_times):
+            raise ValueError("Latest source availability does not match the source candles.")
+    elif latest is not None:
+        raise ValueError("Latest source availability must be null when no candles are present.")
+
+
 @dataclass(frozen=True, slots=True)
 class HorizonSampleReadiness:
     """Persisted selected-sample counts and readiness for one horizon."""
@@ -608,8 +739,20 @@ class EvaluationService:
         outcome_ids = {str(item.outcome_id) for item in outcome_items}
         if set(evidence_map) - outcome_ids:
             raise ValueError("Source evidence cannot reference an outcome outside this persistence batch.")
-        if evidence_by_outcome_id is not None and set(evidence_map) != outcome_ids:
-            raise ValueError("Every persisted outcome must have exactly one source evidence snapshot.")
+        signal_by_id = {str(item.signal_id): item for item in signal_items}
+        for outcome in outcome_items:
+            outcome_id = str(outcome.outcome_id)
+            if outcome.measurement_basis.value == "OHLC_APPROXIMATION":
+                if outcome_id not in evidence_map:
+                    raise ValueError("Every OHLC outcome requires exactly one M1 source evidence snapshot.")
+                _validate_ohlc_evidence_snapshot(
+                    evidence_map[outcome_id],
+                    run,
+                    signal_by_id[str(outcome.signal_id)],
+                    outcome,
+                )
+            elif outcome_id in evidence_map:
+                raise ValueError("M1 OHLC evidence cannot be attached to a non-OHLC measurement basis.")
 
         with self._database.session() as session:
             stored_run = session.get(EvaluationRunRecord, str(run.run_id))
