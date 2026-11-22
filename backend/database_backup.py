@@ -323,6 +323,17 @@ class DatabaseBackupService:
                     "SQLite integrity check failed."
                 )
 
+            foreign_key_violations = connection.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+            if foreign_key_violations:
+                sample = foreign_key_violations[:5]
+                raise DatabaseBackupError(
+                    "SQLite foreign-key check failed: "
+                    f"{len(foreign_key_violations)} violation(s); "
+                    f"sample={sample!r}"
+                )
+
         except DatabaseBackupError:
             raise
         except Exception as exc:

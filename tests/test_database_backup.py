@@ -843,3 +843,23 @@ def test_restore_upgrades_an_older_schema_to_current_head(
     assert "clock_verified" in columns
     assert "clock_ntp_servers" in columns
     assert "validation_report" in columns
+
+
+
+def test_backup_verification_rejects_foreign_key_violations(tmp_path):
+    invalid_backup = tmp_path / "foreign-key-violation.sqlite3"
+    connection = sqlite3.connect(invalid_backup)
+    try:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("CREATE TABLE parents (id INTEGER PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE children (parent_id INTEGER NOT NULL "
+            "REFERENCES parents(id))"
+        )
+        connection.execute("INSERT INTO children (parent_id) VALUES (404)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(DatabaseBackupError, match="foreign-key check failed"):
+        DatabaseBackupService._verify_backup(invalid_backup)

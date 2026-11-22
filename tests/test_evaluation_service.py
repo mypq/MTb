@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
 from backend.database_models import (
