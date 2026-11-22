@@ -371,7 +371,6 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
         run,
         periods,
         signals,
-        available_at_cutoff=now,
     )
 
     assert len(records) == 8
@@ -412,5 +411,4 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
             run,
             periods,
             signals,
-            available_at_cutoff=now,
         )
