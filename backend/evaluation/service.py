@@ -99,7 +99,12 @@ class HorizonSampleReadiness:
     """Persisted selected-sample counts and readiness for one horizon."""
 
     horizon_minutes: EvaluationHorizon
+    candidate_total: int
+    candidates_by_period: tuple[int, int, int]
     selected_total: int
+    selected_by_period: tuple[int, int, int]
+    overlapping_by_period: tuple[int, int, int]
+    ineligible_by_period: tuple[int, int, int]
     selected_completed_total: int
     selected_completed_by_period: tuple[int, int, int]
     selected_not_completed_by_period: tuple[int, int, int]
@@ -432,7 +437,12 @@ class EvaluationService:
         )
         return HorizonSampleReadiness(
             horizon_minutes=horizon_minutes,
+            candidate_total=total,
+            candidates_by_period=selected_completed_by_period,
             selected_total=total,
+            selected_by_period=selected_completed_by_period,
+            overlapping_by_period=(0, 0, 0),
+            ineligible_by_period=(0, 0, 0),
             selected_completed_total=total,
             selected_completed_by_period=selected_completed_by_period,
             selected_not_completed_by_period=(0, 0, 0),
@@ -466,6 +476,8 @@ class EvaluationService:
                 select(
                     EvaluationSampleSelectionRecord.horizon_minutes,
                     EvaluationPeriodRecord.period_index,
+                    EvaluationSampleSelectionRecord.selected,
+                    EvaluationSampleSelectionRecord.decision_reason,
                     EvaluationOutcomeRecord.status,
                 )
                 .select_from(EvaluationSampleSelectionRecord)
@@ -481,34 +493,47 @@ class EvaluationService:
                 )
                 .where(
                     EvaluationSampleSelectionRecord.run_id == run_id,
-                    EvaluationSampleSelectionRecord.selected.is_(True),
                     EvaluationSampleSelectionRecord.horizon_minutes.in_(horizons),
                 )
             ).all()
 
             counts = {
                 horizon: {
+                    "candidates": [0, 0, 0],
                     "selected": [0, 0, 0],
+                    "overlapping": [0, 0, 0],
+                    "ineligible": [0, 0, 0],
                     "completed": [0, 0, 0],
                     "not_completed": [0, 0, 0],
                 }
                 for horizon in horizons
             }
-            for horizon, period_index, outcome_status in rows:
+            for horizon, period_index, selected, decision_reason, outcome_status in rows:
                 if period_index not in (1, 2, 3):
                     raise ValueError("Sample selection references an invalid evaluation period.")
                 bucket = counts[horizon]
                 index = period_index - 1
-                bucket["selected"][index] += 1
-                if outcome_status == "COMPLETED":
-                    bucket["completed"][index] += 1
-                else:
-                    bucket["not_completed"][index] += 1
+                bucket["candidates"][index] += 1
+                if decision_reason == "OVERLAPPING_HORIZON":
+                    bucket["overlapping"][index] += 1
+                elif decision_reason == "INELIGIBLE_REFERENCE":
+                    bucket["ineligible"][index] += 1
+                if selected:
+                    bucket["selected"][index] += 1
+                    if outcome_status == "COMPLETED":
+                        bucket["completed"][index] += 1
+                    else:
+                        bucket["not_completed"][index] += 1
 
             return tuple(
                 HorizonSampleReadiness(
                     horizon_minutes=horizon,
+                    candidate_total=sum(counts[horizon]["candidates"]),
+                    candidates_by_period=tuple(counts[horizon]["candidates"]),
                     selected_total=sum(counts[horizon]["selected"]),
+                    selected_by_period=tuple(counts[horizon]["selected"]),
+                    overlapping_by_period=tuple(counts[horizon]["overlapping"]),
+                    ineligible_by_period=tuple(counts[horizon]["ineligible"]),
                     selected_completed_total=sum(counts[horizon]["completed"]),
                     selected_completed_by_period=tuple(counts[horizon]["completed"]),
                     selected_not_completed_by_period=tuple(counts[horizon]["not_completed"]),
