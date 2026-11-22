@@ -224,7 +224,12 @@ def test_run_readiness_counts_only_selected_completed_outcomes_by_period(evaluat
     assert len(report) == 1
     readiness = report[0]
     assert readiness.horizon_minutes == 5
+    assert readiness.candidate_total == 4
+    assert readiness.candidates_by_period == (2, 1, 1)
     assert readiness.selected_total == 3
+    assert readiness.selected_by_period == (1, 1, 1)
+    assert readiness.overlapping_by_period == (1, 0, 0)
+    assert readiness.ineligible_by_period == (0, 0, 0)
     assert readiness.selected_completed_total == 2
     assert readiness.selected_completed_by_period == (1, 1, 0)
     assert readiness.selected_not_completed_by_period == (0, 0, 1)
