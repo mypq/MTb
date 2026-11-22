@@ -94,6 +94,49 @@ def _serialize_outcome_source_evidence(evidence) -> dict:
     }
 
 
+def _canonical_evidence_value(value):
+    if isinstance(value, datetime):
+        normalized = value
+        if normalized.tzinfo is None:
+            normalized = normalized.replace(tzinfo=timezone.utc)
+        else:
+            normalized = normalized.astimezone(timezone.utc)
+        return normalized.isoformat()
+    if isinstance(value, dict):
+        return {key: _canonical_evidence_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_evidence_value(item) for item in value]
+    return value
+
+
+def _outcome_evidence_sha256(payload: dict) -> str:
+    canonical = json.dumps(
+        _canonical_evidence_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    import hashlib
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _evidence_record_payload(record) -> dict:
+    return {
+        "instrument": record.instrument,
+        "timeframe": record.timeframe,
+        "requested_start_at": record.requested_start_at,
+        "requested_end_at": record.requested_end_at,
+        "available_at_cutoff": record.available_at_cutoff,
+        "latest_available_at": record.latest_available_at,
+        "source_candles": record.source_candles,
+        "observed_gaps": record.observed_gaps,
+        "duplicate_event_times": record.duplicate_event_times,
+        "is_contiguous": record.is_contiguous,
+        "evidence_schema_version": record.evidence_schema_version,
+    }
+
+
 def _parse_evidence_timestamp(value, field: str) -> datetime:
     if not isinstance(value, str) or not value:
         raise ValueError(f"Source evidence {field} must be an ISO timestamp.")
@@ -841,6 +884,7 @@ class EvaluationService:
                                 if snapshot["latest_available_at"] is not None
                                 else None
                             ),
+                            "evidence_sha256": _outcome_evidence_sha256(snapshot),
                         },
                     )
                     for outcome_id, snapshot in evidence_map.items()
@@ -945,6 +989,17 @@ class EvaluationService:
             tuple(outcomes),
             evidence_by_outcome_id=evidence_by_outcome_id,
         )
+
+    def get_outcome_evidence(self, outcome_id: str) -> EvaluationOutcomeEvidenceRecord:
+        """Read one source snapshot only after verifying its canonical digest."""
+        with self._database.session() as session:
+            record = session.get(EvaluationOutcomeEvidenceRecord, outcome_id)
+            if record is None:
+                raise ValueError("Outcome source evidence does not exist.")
+            actual_digest = _outcome_evidence_sha256(_evidence_record_payload(record))
+            if actual_digest != record.evidence_sha256:
+                raise ValueError("Outcome source evidence integrity check failed.")
+            return record
 
     def get_run_periods(
         self,
