@@ -431,6 +431,66 @@ def test_ohlc_outcome_cannot_be_persisted_without_source_lineage(
         assert session.get(EvaluationOutcomeRecord, str(outcome.outcome_id)) is None
 
 
+def test_unavailable_outcome_validates_any_attached_m1_evidence(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="h" * 40,
+        configuration_snapshot={"baseline": "fixed"},
+        created_at=now,
+        horizons=(5,),
+    )
+    signal_at = periods[0].start_at + timedelta(hours=1, seconds=30)
+    signal = make_signal(run, periods[0], signal_at)
+    service.persist_signals(run, periods, (signal,))
+    outcome = EvaluationOHLCOutcomeCalculator().calculate(
+        signal, 5, (), created_at=run.created_at
+    )
+    assert outcome.measurement_basis.value == "UNAVAILABLE"
+
+    snapshot = {
+        "instrument": "EURUSD",
+        "timeframe": "M1",
+        "requested_start_at": signal_at.isoformat(),
+        "requested_end_at": (signal_at + timedelta(minutes=6)).isoformat(),
+        "available_at_cutoff": run.created_at.isoformat(),
+        "latest_available_at": None,
+        "source_candles": [],
+        "observed_gaps": [],
+        "duplicate_event_times": [],
+        "is_contiguous": False,
+        "evidence_schema_version": 1,
+    }
+    with pytest.raises(ValueError, match="instrument"):
+        service.persist_outcomes(
+            run,
+            periods,
+            (signal,),
+            (outcome,),
+            evidence_by_outcome_id={str(outcome.outcome_id): snapshot},
+        )
+
+    snapshot["instrument"] = "XAUUSD"
+    snapshot["requested_end_at"] = (signal_at + timedelta(minutes=5)).isoformat()
+    with pytest.raises(ValueError, match="required outcome horizon"):
+        service.persist_outcomes(
+            run,
+            periods,
+            (signal,),
+            (outcome,),
+            evidence_by_outcome_id={str(outcome.outcome_id): snapshot},
+        )
+
+    with database.session() as session:
+        assert session.get(EvaluationOutcomeRecord, str(outcome.outcome_id)) is None
+        assert session.get(
+            EvaluationOutcomeEvidenceRecord, str(outcome.outcome_id)
+        ) is None
+
+
 def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
     evaluation_service,
 ):
