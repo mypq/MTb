@@ -188,8 +188,11 @@ def test_run_readiness_counts_only_selected_completed_outcomes_by_period(evaluat
         "SELECTED", "OVERLAPPING_HORIZON", "SELECTED", "SELECTED"
     ]
 
+    # Add source candles only for selected signals in periods 1 and 2.
+    # The overlapping signal shares the same time range and is deliberately
+    # left without separate duplicate market-candle rows; period 3 stays incomplete.
     with database.session() as session:
-        for signal in signals[:3]:
+        for signal in (signals[0], signals[2]):
             first_minute = signal.signal_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
             for offset in range(5):
                 event_time = first_minute + timedelta(minutes=offset)
