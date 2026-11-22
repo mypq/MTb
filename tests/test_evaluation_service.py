@@ -11,6 +11,7 @@ from backend.database_models import (
     EvaluationRunRecord,
     EvaluationSampleSelectionRecord,
     EvaluationOutcomeRecord,
+    EvaluationOutcomeEvidenceRecord,
     MarketCandleRecord,
     MarketDataBatchRecord,
 )
@@ -405,6 +406,37 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
     assert {
         record.signal_id for record in records
     } == {str(signal.signal_id) for signal in signals}
+
+    with database.session() as session:
+        evidence_rows = session.scalars(
+            select(EvaluationOutcomeEvidenceRecord).order_by(
+                EvaluationOutcomeEvidenceRecord.outcome_id
+            )
+        ).all()
+        assert len(evidence_rows) == 8
+        by_outcome = {item.outcome_id: item for item in evidence_rows}
+        for record in records:
+            source = by_outcome[record.id]
+            assert source.instrument == "XAUUSD"
+            assert source.timeframe == "M1"
+            assert source.requested_start_at == signals[
+                0 if record.signal_id == str(signals[0].signal_id) else 1
+            ].signal_at
+            assert source.available_at_cutoff == run.created_at
+            assert len(source.source_candles) in (60, 61)
+            assert source.evidence_schema_version == 1
+        complete_evidence = by_outcome[
+            next(record.id for record in records if record.signal_id == str(signals[0].signal_id))
+        ]
+        assert complete_evidence.source_candles[0]["candle_id"] > 0
+        assert complete_evidence.source_candles[0]["batch_id"] > 0
+        assert complete_evidence.source_candles[0]["open"] > 0
+        gap_evidence = by_outcome[
+            next(record.id for record in records if record.signal_id == str(signals[1].signal_id))
+        ]
+        assert len(gap_evidence.observed_gaps) == 1
+        assert gap_evidence.observed_gaps[0]["missing_intervals"] is None
+        assert gap_evidence.is_contiguous is False
 
     with pytest.raises(ValueError, match="already exist"):
         service.calculate_and_persist_ohlc_outcomes(
