@@ -944,3 +944,36 @@ def test_run_readiness_rejects_tampered_evidence_digest(evaluation_service):
 
     with pytest.raises(ValueError, match="evidence integrity check failed"):
         service.get_run_readiness(run_id=str(run.run_id))
+
+
+
+def test_run_readiness_rejects_altered_sample_selection_ledger(evaluation_service):
+    service, database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="a" * 40,
+        configuration_snapshot={"ledger_integrity": True},
+        created_at=now,
+        horizons=(5,),
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    service.persist_signals(run, periods, (signal,))
+    service.record_sample_selections(
+        run_id=str(run.run_id), signals=(signal,), horizons=(5,)
+    )
+
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE evaluation_sample_selections "
+            "SET selected = false, decision_reason = 'OVERLAPPING_HORIZON' "
+            "WHERE run_id = ?",
+            (str(run.run_id),),
+        )
+
+    with pytest.raises(ValueError, match="sample selection ledger decision changed"):
+        service.get_run_readiness(run_id=str(run.run_id))
