@@ -922,7 +922,7 @@ def test_run_readiness_rejects_tampered_evidence_digest(evaluation_service):
         configuration_snapshot={"readiness_integrity": True},
         created_at=now,
         horizons=(5,),
-        minimum_completed_outcomes_per_horizon=1,
+        minimum_completed_outcomes_per_horizon=3,
         minimum_outcomes_per_period=1,
     )
     signal = make_signal(
