@@ -16,6 +16,11 @@ from backend.database_models import (
     EvaluationSampleSelectionRecord,
     EvaluationSignalRecord,
 )
+from backend.evaluation.market_data_series import (
+    EvaluationCandleSeriesReader,
+    EvaluationMarketDataRepository,
+)
+from backend.evaluation.ohlc_outcomes import EvaluationOHLCOutcomeCalculator
 from backend.evaluation.contracts import (
     EvaluationHorizon,
     EvaluationOutcomeContract,
@@ -440,6 +445,104 @@ class EvaluationService:
             ]
             session.add_all(records)
         return tuple(records)
+
+    def calculate_and_persist_ohlc_outcomes(
+        self,
+        run: EvaluationRunContract,
+        periods: tuple[EvaluationPeriodContract, ...],
+        signals: Iterable[EvaluationSignalContract],
+        *,
+        available_at_cutoff: datetime,
+    ) -> tuple[EvaluationOutcomeRecord, ...]:
+        """Calculate and persist every enabled OHLC horizon for every signal.
+
+        The caller must provide the frozen data-availability cutoff for this
+        evaluation. The range reader rejects candles that were received after
+        that cutoff or whose source/validation evidence is not trustworthy.
+        Filter decisions and sample-selection decisions never suppress
+        counterfactual calculations.
+        """
+        signal_items = tuple(signals)
+        validate_evaluation_relationships(run, periods, signal_items, ())
+        if not signal_items:
+            return ()
+
+        horizons = tuple(run.horizons)
+        if not horizons or any(value not in (5, 15, 30, 60) for value in horizons):
+            raise ValueError("The evaluation run has no supported outcome horizons.")
+
+        signal_ids = {str(item.signal_id) for item in signal_items}
+        with self._database.session() as session:
+            stored_run = session.get(EvaluationRunRecord, str(run.run_id))
+            if stored_run is None:
+                raise ValueError("Evaluation run must be persisted before outcomes.")
+            stored_signal_ids = set(
+                session.scalars(
+                    select(EvaluationSignalRecord.id).where(
+                        EvaluationSignalRecord.run_id == str(run.run_id),
+                        EvaluationSignalRecord.id.in_(signal_ids),
+                    )
+                ).all()
+            )
+            if stored_signal_ids != signal_ids:
+                raise ValueError(
+                    "Every outcome signal must already be persisted for this run."
+                )
+            existing = session.execute(
+                select(
+                    EvaluationOutcomeRecord.signal_id,
+                    EvaluationOutcomeRecord.horizon_minutes,
+                ).where(
+                    EvaluationOutcomeRecord.run_id == str(run.run_id),
+                    EvaluationOutcomeRecord.signal_id.in_(signal_ids),
+                    EvaluationOutcomeRecord.horizon_minutes.in_(horizons),
+                )
+            ).all()
+            if existing:
+                raise ValueError(
+                    "Counterfactual outcomes already exist for one or more "
+                    "supplied signals and enabled horizons; refusing to overwrite."
+                )
+
+        reader = EvaluationCandleSeriesReader(
+            EvaluationMarketDataRepository(self._database)
+        )
+        calculator = EvaluationOHLCOutcomeCalculator()
+        maximum_horizon = max(horizons)
+        outcomes: list[EvaluationOutcomeContract] = []
+
+        for signal in sorted(
+            signal_items,
+            key=lambda item: (item.signal_at, str(item.signal_id)),
+        ):
+            # Include the last M1 candle needed when the signal falls inside
+            # a minute and entry therefore starts at the following minute.
+            series_end = signal.signal_at + timedelta(
+                minutes=maximum_horizon + 1
+            )
+            evidence = reader.load_series(
+                instrument=signal.instrument,
+                timeframe="M1",
+                start_at=signal.signal_at,
+                end_at=series_end,
+                available_at_cutoff=available_at_cutoff,
+            )
+            for horizon in horizons:
+                outcomes.append(
+                    calculator.calculate(
+                        signal,
+                        horizon,
+                        evidence.candles,
+                        created_at=available_at_cutoff,
+                    )
+                )
+
+        return self.persist_outcomes(
+            run,
+            periods,
+            signal_items,
+            tuple(outcomes),
+        )
 
     def get_run_periods(
         self,
