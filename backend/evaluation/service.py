@@ -96,11 +96,13 @@ def _serialize_outcome_source_evidence(evidence) -> dict:
 
 @dataclass(frozen=True, slots=True)
 class HorizonSampleReadiness:
-    """Evidence that one horizon meets the pre-registered sample thresholds."""
+    """Persisted selected-sample counts and readiness for one horizon."""
 
     horizon_minutes: EvaluationHorizon
+    selected_total: int
     selected_completed_total: int
     selected_completed_by_period: tuple[int, int, int]
+    selected_not_completed_by_period: tuple[int, int, int]
     required_total: int
     required_per_period: int
     ready: bool
@@ -430,13 +432,111 @@ class EvaluationService:
         )
         return HorizonSampleReadiness(
             horizon_minutes=horizon_minutes,
+            selected_total=total,
             selected_completed_total=total,
             selected_completed_by_period=selected_completed_by_period,
+            selected_not_completed_by_period=(0, 0, 0),
             required_total=required_total,
             required_per_period=required_per_period,
             ready=ready,
             status="READY" if ready else "NEEDS_MORE_DATA",
         )
+
+    def get_run_readiness(
+        self,
+        *,
+        run_id: str,
+    ) -> tuple[HorizonSampleReadiness, ...]:
+        """Aggregate selected ledger rows with COMPLETED outcomes per period.
+
+        Only rows selected by the frozen sample ledger are candidates for the
+        readiness count. Missing, NEEDS_MORE_DATA, and INVALID outcomes are
+        reported as not completed and never contribute to the required sample.
+        """
+        with self._database.session() as session:
+            run = session.get(EvaluationRunRecord, run_id)
+            if run is None:
+                raise ValueError("Evaluation run does not exist.")
+
+            horizons = tuple(run.horizons)
+            if not horizons or any(value not in (5, 15, 30, 60) for value in horizons):
+                raise ValueError("Evaluation run contains unsupported horizons.")
+
+            rows = session.execute(
+                select(
+                    EvaluationSampleSelectionRecord.horizon_minutes,
+                    EvaluationPeriodRecord.period_index,
+                    EvaluationOutcomeRecord.status,
+                )
+                .select_from(EvaluationSampleSelectionRecord)
+                .join(
+                    EvaluationPeriodRecord,
+                    EvaluationPeriodRecord.id == EvaluationSampleSelectionRecord.period_id,
+                )
+                .outerjoin(
+                    EvaluationOutcomeRecord,
+                    (EvaluationOutcomeRecord.run_id == EvaluationSampleSelectionRecord.run_id)
+                    & (EvaluationOutcomeRecord.signal_id == EvaluationSampleSelectionRecord.signal_id)
+                    & (EvaluationOutcomeRecord.horizon_minutes == EvaluationSampleSelectionRecord.horizon_minutes),
+                )
+                .where(
+                    EvaluationSampleSelectionRecord.run_id == run_id,
+                    EvaluationSampleSelectionRecord.selected.is_(True),
+                    EvaluationSampleSelectionRecord.horizon_minutes.in_(horizons),
+                )
+            ).all()
+
+            counts = {
+                horizon: {
+                    "selected": [0, 0, 0],
+                    "completed": [0, 0, 0],
+                    "not_completed": [0, 0, 0],
+                }
+                for horizon in horizons
+            }
+            for horizon, period_index, outcome_status in rows:
+                if period_index not in (1, 2, 3):
+                    raise ValueError("Sample selection references an invalid evaluation period.")
+                bucket = counts[horizon]
+                index = period_index - 1
+                bucket["selected"][index] += 1
+                if outcome_status == "COMPLETED":
+                    bucket["completed"][index] += 1
+                else:
+                    bucket["not_completed"][index] += 1
+
+            return tuple(
+                HorizonSampleReadiness(
+                    horizon_minutes=horizon,
+                    selected_total=sum(counts[horizon]["selected"]),
+                    selected_completed_total=sum(counts[horizon]["completed"]),
+                    selected_completed_by_period=tuple(counts[horizon]["completed"]),
+                    selected_not_completed_by_period=tuple(counts[horizon]["not_completed"]),
+                    required_total=run.minimum_completed_outcomes_per_horizon,
+                    required_per_period=run.minimum_outcomes_per_period,
+                    ready=(
+                        sum(counts[horizon]["completed"])
+                        >= run.minimum_completed_outcomes_per_horizon
+                        and all(
+                            value >= run.minimum_outcomes_per_period
+                            for value in counts[horizon]["completed"]
+                        )
+                    ),
+                    status=(
+                        "READY"
+                        if (
+                            sum(counts[horizon]["completed"])
+                            >= run.minimum_completed_outcomes_per_horizon
+                            and all(
+                                value >= run.minimum_outcomes_per_period
+                                for value in counts[horizon]["completed"]
+                            )
+                        )
+                        else "NEEDS_MORE_DATA"
+                    ),
+                )
+                for horizon in horizons
+            )
 
     def persist_outcomes(
         self,
