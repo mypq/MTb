@@ -320,9 +320,13 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
 
     with database.session() as session:
         candle_id = 1
-        for signal in signals:
+        for signal_index, signal in enumerate(signals):
             first_minute = signal.signal_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
             for offset in range(61):
+                if signal_index == 1 and offset == 3:
+                    # Preserve a real M1 gap: every horizon for this signal
+                    # must remain incomplete rather than interpolate a price.
+                    continue
                 event_time = first_minute + timedelta(minutes=offset)
                 available_at = event_time + timedelta(minutes=1, seconds=1)
                 batch = MarketDataBatchRecord(
@@ -379,8 +383,24 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
         for signal in signals
         for horizon in (5, 15, 30, 60)
     }
-    assert all(record.status == "COMPLETED" for record in records)
-    assert all(record.measurement_basis == "OHLC_APPROXIMATION" for record in records)
+    assert all(
+        record.status == "COMPLETED"
+        for record in records
+        if record.signal_id == str(signals[0].signal_id)
+    )
+    assert all(
+        record.status == "NEEDS_MORE_DATA"
+        for record in records
+        if record.signal_id == str(signals[1].signal_id)
+    )
+    assert all(
+        record.measurement_basis == (
+            "OHLC_APPROXIMATION"
+            if record.signal_id == str(signals[0].signal_id)
+            else "UNAVAILABLE"
+        )
+        for record in records
+    )
     assert all(record.net_pnl is None for record in records)
     # Filter-blocked and reference-ineligible signals both retain outcomes.
     assert {
