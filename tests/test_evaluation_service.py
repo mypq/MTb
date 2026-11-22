@@ -3,6 +3,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from backend.database import Database
 from backend.database_models import (
@@ -634,6 +635,33 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
         assert len(gap_evidence.observed_gaps) == 1
         assert gap_evidence.observed_gaps[0]["missing_intervals"] is None
         assert gap_evidence.is_contiguous is False
+        assert len(complete_evidence.evidence_sha256) == 64
+        assert service.get_outcome_evidence(complete_evidence.outcome_id).evidence_sha256 == (
+            complete_evidence.evidence_sha256
+        )
+
+        # Database-level protection rejects ordinary UPDATE statements.
+        with pytest.raises(IntegrityError):
+            with database.engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE evaluation_outcome_evidence "
+                    "SET is_contiguous = 0 WHERE outcome_id = ?",
+                    (complete_evidence.outcome_id,),
+                )
+
+        # Simulate out-of-band tampering with the guard deliberately bypassed:
+        # the stored digest must still detect the changed evidence payload.
+        with database.engine.begin() as connection:
+            connection.exec_driver_sql(
+                "DROP TRIGGER trg_eval_outcome_evidence_immutable_update"
+            )
+            connection.exec_driver_sql(
+                "UPDATE evaluation_outcome_evidence "
+                "SET is_contiguous = 0 WHERE outcome_id = ?",
+                (complete_evidence.outcome_id,),
+            )
+        with pytest.raises(ValueError, match="integrity check failed"):
+            service.get_outcome_evidence(complete_evidence.outcome_id)
 
     with pytest.raises(ValueError, match="already exist"):
         service.calculate_and_persist_ohlc_outcomes(
