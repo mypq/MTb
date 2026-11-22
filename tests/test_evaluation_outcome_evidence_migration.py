@@ -61,11 +61,19 @@ def test_evaluation_outcome_evidence_migration_isolated_round_trip(
             "duplicate_event_times",
             "is_contiguous",
             "evidence_schema_version",
+            "evidence_sha256",
         }.issubset(columns)
         assert any(
             fk["name"] == "fk_eval_outcome_evidence_outcome"
             for fk in inspector.get_foreign_keys("evaluation_outcome_evidence")
         )
+        with engine.connect() as connection:
+            trigger_names = {
+                row[0] for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+                ).all()
+            }
+        assert "trg_eval_outcome_evidence_immutable_update" in trigger_names
         assert "ix_eval_outcome_evidence_cutoff" in {
             item["name"] for item in inspector.get_indexes("evaluation_outcome_evidence")
         }
