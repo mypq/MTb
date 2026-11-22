@@ -321,7 +321,7 @@ def test_outcome_measurement_uses_later_cutoff_than_run_creation(evaluation_serv
     for outcome in outcomes:
         evidence = service.get_outcome_evidence(str(outcome.id))
         assert evidence.available_at_cutoff.replace(tzinfo=timezone.utc) == calculation_cutoff
-        assert evidence.available_at_cutoff > run.created_at
+        assert evidence.available_at_cutoff.replace(tzinfo=timezone.utc) > run.created_at
         assert evidence.source_candles
         assert all(
             datetime.fromisoformat(candle["available_at"]) > run.created_at
