@@ -577,6 +577,8 @@ class EvaluationService:
         ineligible candidates. Filter decisions never affect the reference sample.
         """
         signal_items = tuple(signals)
+        if not signal_items:
+            raise ValueError("At least one persisted signal is required to create a sample selection ledger.")
         if len({item.signal_id for item in signal_items}) != len(signal_items):
             raise ValueError("Signal IDs in a selection batch must be unique.")
         if any(str(item.run_id) != run_id for item in signal_items):
@@ -783,6 +785,58 @@ class EvaluationService:
             horizons = tuple(run.horizons)
             if not horizons or any(value not in (5, 15, 30, 60) for value in horizons):
                 raise ValueError("Evaluation run contains unsupported horizons.")
+
+            # Recompute each existing horizon ledger from the immutable stored
+            # signal set. A partial or altered ledger must never contribute to READY.
+            persisted_signals = session.scalars(
+                select(EvaluationSignalRecord)
+                .where(EvaluationSignalRecord.run_id == run_id)
+                .order_by(EvaluationSignalRecord.signal_at, EvaluationSignalRecord.id)
+            ).all()
+            for horizon in horizons:
+                ledger_rows = session.scalars(
+                    select(EvaluationSampleSelectionRecord)
+                    .where(
+                        EvaluationSampleSelectionRecord.run_id == run_id,
+                        EvaluationSampleSelectionRecord.horizon_minutes == horizon,
+                    )
+                    .order_by(EvaluationSampleSelectionRecord.candidate_order)
+                ).all()
+                if not ledger_rows:
+                    continue
+                if len(ledger_rows) != len(persisted_signals):
+                    raise ValueError(
+                        "Evaluation readiness blocked: sample selection ledger is incomplete."
+                    )
+                next_available_at = None
+                for order, (ledger, signal) in enumerate(
+                    zip(ledger_rows, persisted_signals), start=1
+                ):
+                    if (
+                        ledger.candidate_order != order
+                        or ledger.signal_id != signal.id
+                        or ledger.period_id != signal.period_id
+                    ):
+                        raise ValueError(
+                            "Evaluation readiness blocked: sample selection ledger identity or order changed."
+                        )
+                    if not signal.reference_eligible:
+                        expected_reason, expected_selected = "INELIGIBLE_REFERENCE", False
+                    elif (
+                        next_available_at is not None
+                        and _utc_instant(signal.signal_at) < next_available_at
+                    ):
+                        expected_reason, expected_selected = "OVERLAPPING_HORIZON", False
+                    else:
+                        expected_reason, expected_selected = "SELECTED", True
+                        next_available_at = _utc_instant(signal.signal_at) + timedelta(minutes=horizon)
+                    if (
+                        ledger.decision_reason != expected_reason
+                        or ledger.selected is not expected_selected
+                    ):
+                        raise ValueError(
+                            "Evaluation readiness blocked: sample selection ledger decision changed."
+                        )
 
             # Fail closed if any OHLC outcome lost its required evidence or if
             # any evidence snapshot no longer matches its persisted SHA-256.
