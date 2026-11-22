@@ -137,10 +137,12 @@ def _validate_ohlc_evidence_snapshot(
         raise ValueError("OHLC source evidence start does not match the signal timestamp.")
     if cutoff != run.created_at:
         raise ValueError("OHLC source evidence cutoff does not match the frozen run cutoff.")
-    if start >= end or end > signal.signal_at + timedelta(minutes=max(run.horizons) + 1):
-        raise ValueError("OHLC source evidence range is outside the permitted outcome window.")
+    minimum_required_end = signal.signal_at + timedelta(minutes=outcome.horizon_minutes + 1)
+    maximum_allowed_end = signal.signal_at + timedelta(minutes=max(run.horizons) + 1)
+    if start >= end or end < minimum_required_end or end > maximum_allowed_end:
+        raise ValueError("M1 source evidence range does not cover the required outcome horizon.")
     if outcome.exit_at is not None and not (start <= outcome.entry_at < outcome.exit_at <= end):
-        raise ValueError("OHLC source evidence does not cover the outcome measurement window.")
+        raise ValueError("M1 source evidence does not cover the outcome measurement window.")
 
     candles = snapshot["source_candles"]
     gaps = snapshot["observed_gaps"]
@@ -758,14 +760,19 @@ class EvaluationService:
             if outcome.measurement_basis.value == "OHLC_APPROXIMATION":
                 if outcome_id not in evidence_map:
                     raise ValueError("Every OHLC outcome requires exactly one M1 source evidence snapshot.")
+            elif outcome.measurement_basis.value == "BID_ASK_QUOTES" and outcome_id in evidence_map:
+                raise ValueError("M1 OHLC evidence cannot be attached to a Bid/Ask measurement outcome.")
+
+            # An UNAVAILABLE outcome may still carry the M1 evidence explaining
+            # why its OHLC measurement could not be completed. Never persist an
+            # attached snapshot without validating its identity and contents.
+            if outcome_id in evidence_map:
                 _validate_ohlc_evidence_snapshot(
                     evidence_map[outcome_id],
                     run,
                     signal_by_id[str(outcome.signal_id)],
                     outcome,
                 )
-            elif outcome.measurement_basis.value == "BID_ASK_QUOTES" and outcome_id in evidence_map:
-                raise ValueError("M1 OHLC evidence cannot be attached to a Bid/Ask measurement outcome.")
 
         with self._database.session() as session:
             stored_run = session.get(EvaluationRunRecord, str(run.run_id))
