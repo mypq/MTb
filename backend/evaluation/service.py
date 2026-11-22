@@ -207,13 +207,26 @@ def _validate_ohlc_evidence_snapshot(
         "actual_interval_seconds", "missing_intervals",
     } for gap in gaps):
         raise ValueError("Observed gap evidence has an invalid structure.")
+    normalized_gaps = []
     for gap in gaps:
         previous = _parse_evidence_timestamp(gap["previous_event_time"], "gap.previous_event_time")
         following = _parse_evidence_timestamp(gap["next_event_time"], "gap.next_event_time")
-        if following <= previous or gap["actual_interval_seconds"] != int((following - previous).total_seconds()):
+        actual = int((following - previous).total_seconds())
+        if following <= previous or gap["actual_interval_seconds"] != actual:
             raise ValueError("Observed gap timing is inconsistent.")
-        if gap["expected_interval_seconds"] != 60:
-            raise ValueError("M1 observed gaps must declare a 60-second expected interval.")
+        if gap["expected_interval_seconds"] != 60 or gap["missing_intervals"] is not None:
+            raise ValueError("M1 gaps must preserve the 60-second interval without inferring missing counts.")
+        normalized_gaps.append((previous, following, 60, actual, None))
+    expected_gaps = []
+    previous = None
+    for current in event_times:
+        if previous is not None and current != previous:
+            delta = int((current - previous).total_seconds())
+            if delta != 60:
+                expected_gaps.append((previous, current, 60, delta, None))
+        previous = current
+    if normalized_gaps != expected_gaps:
+        raise ValueError("Observed gap evidence does not match the source candle sequence.")
     expected_contiguous = bool(candles) and not gaps and not duplicate_times
     if snapshot["is_contiguous"] is not expected_contiguous:
         raise ValueError("Source evidence contiguity flag conflicts with its gaps or duplicates.")
