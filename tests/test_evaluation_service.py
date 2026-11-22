@@ -225,7 +225,10 @@ def test_run_readiness_counts_only_selected_completed_outcomes_by_period(evaluat
 
     # Three selected ledger rows exist, but the third selected signal has no
     # source candles. The completed but overlapping second signal is excluded.
-    service.calculate_and_persist_ohlc_outcomes(run, periods, signals)
+    service.calculate_and_persist_ohlc_outcomes(
+        run, periods, signals,
+        outcome_data_cutoff_at=now + timedelta(hours=2),
+    )
     report = service.get_run_readiness(run_id=str(run.run_id))
 
     assert len(report) == 1
@@ -735,6 +738,7 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
         run,
         periods,
         signals,
+        outcome_data_cutoff_at=now + timedelta(hours=2),
     )
 
     assert len(records) == 8
@@ -820,6 +824,7 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
             run,
             periods,
             signals,
+            outcome_data_cutoff_at=now + timedelta(hours=2),
         )
 
 
@@ -883,6 +888,7 @@ def test_delete_run_cascades_only_evaluation_records(evaluation_service):
         run,
         periods,
         (signal,),
+        outcome_data_cutoff_at=now + timedelta(hours=2),
     )
     assert len(outcomes) == 1
     outcome_id = str(outcomes[0].id)
@@ -1039,7 +1045,10 @@ def test_run_readiness_rejects_tampered_evidence_digest(evaluation_service):
     service.record_sample_selections(
         run_id=str(run.run_id), signals=(signal,), horizons=(5,)
     )
-    service.calculate_and_persist_ohlc_outcomes(run, periods, (signal,))
+    service.calculate_and_persist_ohlc_outcomes(
+        run, periods, (signal,),
+        outcome_data_cutoff_at=now + timedelta(hours=2),
+    )
 
     with database.engine.begin() as connection:
         connection.exec_driver_sql(
