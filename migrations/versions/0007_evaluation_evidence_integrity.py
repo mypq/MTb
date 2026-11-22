@@ -89,12 +89,12 @@ def upgrade() -> None:
             .where(table.c.outcome_id == row["outcome_id"])
             .values(evidence_sha256=_digest(payload))
         )
-    op.alter_column(
-        "evaluation_outcome_evidence",
-        "evidence_sha256",
-        existing_type=sa.String(length=64),
-        nullable=False,
-    )
+    with op.batch_alter_table("evaluation_outcome_evidence") as batch_op:
+        batch_op.alter_column(
+            "evidence_sha256",
+            existing_type=sa.String(length=64),
+            nullable=False,
+        )
 
     dialect = connection.dialect.name
     if dialect == "sqlite":
