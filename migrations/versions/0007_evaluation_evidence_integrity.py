@@ -66,9 +66,14 @@ def upgrade() -> None:
         "evaluation_outcome_evidence",
         sa.column("outcome_id", sa.String()),
         *[
-            sa.column(name, sa.JSON() if name in {
-                "source_candles", "observed_gaps", "duplicate_event_times"
-            } else sa.String())
+            sa.column(
+                name,
+                sa.JSON() if name in {"source_candles", "observed_gaps", "duplicate_event_times"}
+                else sa.DateTime(timezone=True) if name in {
+                    "requested_start_at", "requested_end_at", "available_at_cutoff", "latest_available_at"
+                }
+                else sa.String(),
+            )
             for name in _PAYLOAD_COLUMNS
         ],
         sa.column("evidence_sha256", sa.String()),
