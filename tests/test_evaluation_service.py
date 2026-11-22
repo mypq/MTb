@@ -307,7 +307,7 @@ def test_outcome_measurement_uses_later_cutoff_than_run_creation(evaluation_serv
                 quality="VERIFIED",
             ))
 
-    calculation_cutoff = run_created_at + timedelta(hours=3)
+    calculation_cutoff = run_created_at + timedelta(hours=4)
     outcomes = service.calculate_and_persist_ohlc_outcomes(
         run,
         periods,
