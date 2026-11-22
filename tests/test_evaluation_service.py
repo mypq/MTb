@@ -419,10 +419,10 @@ def test_service_calculates_and_persists_every_enabled_horizon_for_all_signals(
             source = by_outcome[record.id]
             assert source.instrument == "XAUUSD"
             assert source.timeframe == "M1"
-            assert source.requested_start_at == signals[
+            assert source.requested_start_at.replace(tzinfo=timezone.utc) == signals[
                 0 if record.signal_id == str(signals[0].signal_id) else 1
             ].signal_at
-            assert source.available_at_cutoff == run.created_at
+            assert source.available_at_cutoff.replace(tzinfo=timezone.utc) == run.created_at
             assert len(source.source_candles) in (60, 61)
             assert source.evidence_schema_version == 1
         complete_evidence = by_outcome[
