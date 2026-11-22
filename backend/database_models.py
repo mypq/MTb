@@ -253,9 +253,6 @@ class EvaluationSignalRecord(DatabaseBase):
     outcomes: Mapped[list[EvaluationOutcomeRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
-    outcome_evidence: Mapped[list[EvaluationOutcomeEvidenceRecord]] = relationship(
-        back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
-    )
     sample_selections: Mapped[list[EvaluationSampleSelectionRecord]] = relationship(
         back_populates="signal", cascade="all, delete-orphan", passive_deletes=True
     )
