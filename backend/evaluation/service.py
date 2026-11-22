@@ -764,8 +764,8 @@ class EvaluationService:
                     signal_by_id[str(outcome.signal_id)],
                     outcome,
                 )
-            elif outcome_id in evidence_map:
-                raise ValueError("M1 OHLC evidence cannot be attached to a non-OHLC measurement basis.")
+            elif outcome.measurement_basis.value == "BID_ASK_QUOTES" and outcome_id in evidence_map:
+                raise ValueError("M1 OHLC evidence cannot be attached to a Bid/Ask measurement outcome.")
 
         with self._database.session() as session:
             stored_run = session.get(EvaluationRunRecord, str(run.run_id))
