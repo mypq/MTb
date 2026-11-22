@@ -295,6 +295,29 @@ def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation
         signal.signal_id for signal in signals
         if signal.filter_decision == FilterDecision.BLOCKED
     ))
+
+    readiness = service.get_run_readiness(run_id=str(run.run_id))
+    by_horizon = {item.horizon_minutes: item for item in readiness}
+    five_report = by_horizon[5]
+    assert five_report.candidate_total == 5
+    assert five_report.candidates_by_period == (5, 0, 0)
+    assert five_report.selected_total == 4
+    assert five_report.selected_by_period == (4, 0, 0)
+    assert five_report.overlapping_by_period == (0, 0, 0)
+    assert five_report.ineligible_by_period == (1, 0, 0)
+    assert five_report.selected_completed_total == 0
+    assert five_report.selected_not_completed_by_period == (4, 0, 0)
+
+    fifteen_report = by_horizon[15]
+    assert fifteen_report.candidate_total == 5
+    assert fifteen_report.candidates_by_period == (5, 0, 0)
+    assert fifteen_report.selected_total == 2
+    assert fifteen_report.selected_by_period == (2, 0, 0)
+    assert fifteen_report.overlapping_by_period == (2, 0, 0)
+    assert fifteen_report.ineligible_by_period == (1, 0, 0)
+    assert fifteen_report.selected_completed_total == 0
+    assert fifteen_report.selected_not_completed_by_period == (2, 0, 0)
+
     with database.session() as session:
         assert session.scalar(
             select(func.count()).select_from(EvaluationSampleSelectionRecord)
