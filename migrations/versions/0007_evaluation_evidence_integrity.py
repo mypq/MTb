@@ -72,6 +72,8 @@ def upgrade() -> None:
                 else sa.DateTime(timezone=True) if name in {
                     "requested_start_at", "requested_end_at", "available_at_cutoff", "latest_available_at"
                 }
+                else sa.Boolean() if name == "is_contiguous"
+                else sa.Integer() if name == "evidence_schema_version"
                 else sa.String(),
             )
             for name in _PAYLOAD_COLUMNS
