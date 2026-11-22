@@ -114,6 +114,18 @@ class HorizonSampleReadiness:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class HorizonSampleAssessment:
+    """Threshold assessment for completed selected counts, without ledger totals."""
+
+    horizon_minutes: EvaluationHorizon
+    selected_completed_total: int
+    selected_completed_by_period: tuple[int, int, int]
+    required_total: int
+    required_per_period: int
+    ready: bool
+    status: str
+
 class EvaluationService:
     """Creates reproducible evaluation runs, ledgers, and outcome persistence.
 
@@ -435,17 +447,10 @@ class EvaluationService:
             total >= required_total
             and all(count >= required_per_period for count in selected_completed_by_period)
         )
-        return HorizonSampleReadiness(
+        return HorizonSampleAssessment(
             horizon_minutes=horizon_minutes,
-            candidate_total=total,
-            candidates_by_period=selected_completed_by_period,
-            selected_total=total,
-            selected_by_period=selected_completed_by_period,
-            overlapping_by_period=(0, 0, 0),
-            ineligible_by_period=(0, 0, 0),
             selected_completed_total=total,
             selected_completed_by_period=selected_completed_by_period,
-            selected_not_completed_by_period=(0, 0, 0),
             required_total=required_total,
             required_per_period=required_per_period,
             ready=ready,
