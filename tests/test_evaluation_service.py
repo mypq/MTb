@@ -340,6 +340,32 @@ def test_sample_selection_ledger_persists_every_candidate_per_horizon(evaluation
         service.persist_signals(run, periods, (late_signal,))
 
 
+def test_persist_signals_rejects_run_and_period_contract_mismatch(evaluation_service):
+    service, _database = evaluation_service
+    now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=now - timedelta(days=30),
+        data_end_at=now,
+        code_revision="f" * 40,
+        configuration_snapshot={"persisted_scope": True},
+        created_at=now,
+        horizons=(5,),
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    forged_run = run.model_copy(update={"code_revision": "changed-revision"})
+    with pytest.raises(ValueError, match="persisted definition"):
+        service.persist_signals(forged_run, periods, (signal,))
+
+    forged_period = periods[0].model_copy(
+        update={"start_at": periods[0].start_at + timedelta(seconds=1)}
+    )
+    with pytest.raises(ValueError, match="persisted record"):
+        service.persist_signals(run, (forged_period, *periods[1:]), (signal,))
+
+
 def test_sample_selection_rejects_forged_signal_contract(evaluation_service):
     service, _database = evaluation_service
     now = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
