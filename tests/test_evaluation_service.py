@@ -246,6 +246,113 @@ def test_run_readiness_counts_only_selected_completed_outcomes_by_period(evaluat
     assert readiness.status == "NEEDS_MORE_DATA"
 
 
+def test_outcome_measurement_uses_later_cutoff_than_run_creation(evaluation_service):
+    service, database = evaluation_service
+    run_created_at = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=run_created_at,
+        data_end_at=run_created_at + timedelta(days=30),
+        code_revision="c" * 40,
+        configuration_snapshot={"forward_outcome_cutoff": True},
+        created_at=run_created_at,
+        horizons=(5, 15, 30, 60),
+    )
+    signal_at = periods[0].start_at + timedelta(hours=1, seconds=30)
+    signal = make_signal(run, periods[0], signal_at)
+    service.persist_signals(run, periods, (signal,))
+
+    # All measured M1 bars occur after run creation, as they do in a
+    # forward-running evaluation. Their ingestion timestamps are also later.
+    with database.session() as session:
+        first_minute = signal_at.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        for offset in range(61):
+            event_time = first_minute + timedelta(minutes=offset)
+            available_at = event_time + timedelta(minutes=1, seconds=1)
+            batch = MarketDataBatchRecord(
+                symbol="XAUUSD",
+                timeframe="M1",
+                source="MT5",
+                received_at=available_at,
+                candle_count=1,
+                created_at=available_at + timedelta(seconds=1),
+                clock_verified=True,
+                clock_account_login=123456,
+                clock_broker_server="Forward-Test-Broker",
+                validation_report={
+                    "analysis_eligible": True,
+                    "freshness_verified": True,
+                    "issues": [],
+                    "gaps": [],
+                },
+            )
+            session.add(batch)
+            session.flush()
+            session.add(MarketCandleRecord(
+                batch_id=batch.id,
+                symbol="XAUUSD",
+                timeframe="M1",
+                timestamp=event_time,
+                open_price=2000.0 + offset,
+                high_price=2002.0 + offset,
+                low_price=1999.0 + offset,
+                close_price=2001.0 + offset,
+                tick_volume=10,
+                real_volume=None,
+                volume_source="TICK",
+                is_closed=True,
+                quality="VERIFIED",
+            ))
+
+    calculation_cutoff = run_created_at + timedelta(hours=3)
+    outcomes = service.calculate_and_persist_ohlc_outcomes(
+        run,
+        periods,
+        (signal,),
+        outcome_data_cutoff_at=calculation_cutoff,
+    )
+
+    assert len(outcomes) == 4
+    assert all(item.status == "COMPLETED" for item in outcomes)
+    assert all(item.created_at == calculation_cutoff for item in outcomes)
+    for outcome in outcomes:
+        evidence = service.get_outcome_evidence(str(outcome.id))
+        assert evidence.available_at_cutoff == calculation_cutoff
+        assert evidence.available_at_cutoff > run.created_at
+        assert evidence.source_candles
+        assert all(
+            datetime.fromisoformat(candle["available_at"]) > run.created_at
+            and datetime.fromisoformat(candle["recorded_at"]) > run.created_at
+            for candle in evidence.source_candles
+        )
+
+
+def test_outcome_measurement_rejects_cutoff_before_run_creation(evaluation_service):
+    service, _database = evaluation_service
+    run_created_at = datetime(2026, 11, 21, 12, 0, tzinfo=timezone.utc)
+    run, periods = service.create_run(
+        instrument="XAUUSD",
+        data_start_at=run_created_at - timedelta(days=30),
+        data_end_at=run_created_at,
+        code_revision="d" * 40,
+        configuration_snapshot={"invalid_cutoff": True},
+        created_at=run_created_at,
+        horizons=(5,),
+    )
+    signal = make_signal(
+        run, periods[0], periods[0].start_at + timedelta(hours=1)
+    )
+    service.persist_signals(run, periods, (signal,))
+
+    with pytest.raises(ValueError, match="cannot precede run creation"):
+        service.calculate_and_persist_ohlc_outcomes(
+            run,
+            periods,
+            (signal,),
+            outcome_data_cutoff_at=run_created_at - timedelta(seconds=1),
+        )
+
+
 def test_run_readiness_rejects_unknown_run(evaluation_service):
     service, _database = evaluation_service
     with pytest.raises(ValueError, match="does not exist"):
