@@ -1,4 +1,3 @@
-
 """Validated reader for append-only MT5 SessionBridge clock evidence."""
 
 from __future__ import annotations
@@ -58,21 +57,38 @@ class MT5ClockHistorySample:
         )
 
 
+def _text(row: dict[str, str], name: str) -> str:
+    raw = row.get(name)
+
+    if not isinstance(raw, str) or not raw.strip():
+        raise ClockHistoryError(f"{name} is missing.")
+
+    return raw.strip()
+
+
 def _integer(row: dict[str, str], name: str) -> int:
     raw = row.get(name)
-    if raw is None or not raw.strip():
+
+    if not isinstance(raw, str) or not raw.strip():
         raise ClockHistoryError(f"{name} is missing.")
 
     try:
         return int(raw, 10)
-    except (TypeError, ValueError) as exc:
+    except ValueError as exc:
         raise ClockHistoryError(
             f"{name} must be an integer."
         ) from exc
 
 
 def _boolean(row: dict[str, str], name: str) -> bool:
-    raw = row.get(name, "").strip().lower()
+    raw = row.get(name)
+
+    if not isinstance(raw, str):
+        raise ClockHistoryError(
+            f"{name} must be true or false."
+        )
+
+    raw = raw.strip().lower()
 
     if raw == "true":
         return True
@@ -100,14 +116,9 @@ def parse_clock_history_row(
             "Unsupported clock history schema version."
         )
 
-    run_id = row.get("run_id", "").strip()
-    broker_server = row.get("broker_server", "").strip()
-    symbol = row.get("symbol", "").strip()
-
-    if not run_id or not broker_server or not symbol:
-        raise ClockHistoryError(
-            "Run ID and broker identity fields are required."
-        )
+    run_id = _text(row, "run_id")
+    broker_server = _text(row, "broker_server")
+    symbol = _text(row, "symbol")
 
     sample_sequence = _integer(row, "sample_sequence")
     monotonic_ms = _integer(row, "monotonic_ms")

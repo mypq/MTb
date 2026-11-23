@@ -190,3 +190,117 @@ def test_reject_empty_history(tmp_path):
 
     with pytest.raises(ClockHistoryError):
         read_clock_history(path)
+
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("run_id", None),
+        ("run_id", 123),
+        ("broker_server", None),
+        ("symbol", []),
+    ],
+)
+def test_reject_non_text_identity_fields(field, value):
+    with pytest.raises(ClockHistoryError):
+        parse_clock_history_row(make_row(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("clock_values_valid", None),
+        ("clock_values_valid", 1),
+        ("terminal_connected", None),
+        ("terminal_connected", []),
+    ],
+)
+def test_reject_non_text_boolean_fields(field, value):
+    with pytest.raises(ClockHistoryError):
+        parse_clock_history_row(make_row(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("schema_version", None),
+        ("sample_sequence", "0"),
+        ("sample_sequence", "-1"),
+        ("monotonic_ms", "-1"),
+        ("monotonic_ms", "4294967296"),
+        ("time_current_quote_epoch", "-1"),
+    ],
+)
+def test_reject_invalid_clock_history_numeric_boundaries(field, value):
+    with pytest.raises(ClockHistoryError):
+        parse_clock_history_row(make_row(**{field: value}))
+
+
+@pytest.mark.parametrize("offset", [50400, -50400])
+def test_accept_supported_broker_offset_boundaries(offset):
+    row = make_row(
+        server_utc_offset_seconds=str(offset),
+        time_trade_server_epoch=str(1794952458 + offset),
+    )
+
+    sample = parse_clock_history_row(row)
+
+    assert sample.server_utc_offset_seconds == offset
+
+
+@pytest.mark.parametrize("offset", [50401, -50401])
+def test_reject_broker_offset_outside_supported_boundaries(offset):
+    row = make_row(
+        server_utc_offset_seconds=str(offset),
+        time_trade_server_epoch=str(1794952458 + offset),
+    )
+
+    with pytest.raises(ClockHistoryError, match="supported range"):
+        parse_clock_history_row(row)
+
+
+def test_reject_csv_row_with_missing_boolean_field(tmp_path):
+    path = tmp_path / "clock_history.csv"
+    path.write_text(
+        ";".join(CLOCK_HISTORY_COLUMNS)
+        + chr(10)
+        + ";".join(make_row()[column] for column in CLOCK_HISTORY_COLUMNS[:9])
+        + chr(10),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ClockHistoryError):
+        read_clock_history(path)
+
+
+def test_accept_interleaved_independent_runs(tmp_path):
+    first_run_first = make_row(run_id="run-a")
+    second_run_first = make_row(
+        run_id="run-b",
+        sample_sequence="1",
+        monotonic_ms="2000",
+    )
+    first_run_second = make_row(
+        run_id="run-a",
+        sample_sequence="2",
+        monotonic_ms="61000",
+        time_gmt_epoch="1794952518",
+        time_trade_server_epoch="1794959718",
+        time_current_quote_epoch="1794959718",
+        time_local_epoch="1794963318",
+    )
+
+    path = tmp_path / "clock_history.csv"
+    write_history(
+        path,
+        [first_run_first, second_run_first, first_run_second],
+    )
+
+    samples = read_clock_history(path)
+
+    assert [sample.run_id for sample in samples] == [
+        "run-a",
+        "run-b",
+        "run-a",
+    ]
