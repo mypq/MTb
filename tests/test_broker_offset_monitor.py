@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import threading
 
 import pytest
 
@@ -12,6 +13,7 @@ from backend.market_data.broker_offset_detector import (
 )
 from backend.market_data.broker_offset_monitor import (
     BrokerOffsetEvidenceMonitor,
+    ClockHistoryFreshnessSnapshot,
 )
 from backend.market_data.broker_offset_registry import (
     BrokerOffsetRegistry,
@@ -319,3 +321,133 @@ def test_monitor_rejects_invalid_clock_history_max_age(tmp_path):
                 monitor._service,
                 clock_history_max_age_seconds=value,
             )
+
+
+
+def test_monitor_reports_unavailable_history_without_polling(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        stop_event = asyncio.Event()
+
+        def unavailable():
+            return ClockHistoryFreshnessSnapshot(
+                state="UNAVAILABLE",
+                age_seconds=None,
+                last_modified_unix=None,
+                max_age_seconds=180,
+                error="PermissionError: access denied",
+            )
+
+        def unexpected_poll():
+            raise AssertionError(
+                "Evidence polling must pause for an unavailable file."
+            )
+
+        monkeypatch.setattr(
+            monitor,
+            "_read_source_freshness",
+            unavailable,
+        )
+        monkeypatch.setattr(
+            monitor._service,
+            "poll_once",
+            unexpected_poll,
+        )
+
+        task = asyncio.create_task(monitor.run(stop_event))
+        try:
+            await asyncio.sleep(0.03)
+            assert monitor.snapshot().state == "NOT_STARTED"
+            assert monitor.is_running is True
+        finally:
+            stop_event.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        assert monitor.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_monitor_poll_does_not_block_asyncio_event_loop(
+    tmp_path,
+    monkeypatch,
+):
+    async def scenario():
+        monitor = make_monitor(tmp_path)
+        monitor._clock_history_path.write_text(
+            "fresh history",
+            encoding="utf-8",
+        )
+
+        poll_started = threading.Event()
+        release_poll = threading.Event()
+        heartbeat_ran = asyncio.Event()
+        stop_event = asyncio.Event()
+
+        def blocking_poll():
+            poll_started.set()
+            if not release_poll.wait(timeout=2.0):
+                raise TimeoutError("Test did not release the blocked poll.")
+            return BrokerOffsetServiceSnapshot(
+                state="COLLECTING",
+                samples_processed=0,
+                last_decision=None,
+                last_record=None,
+                error=None,
+            )
+
+        monkeypatch.setattr(
+            monitor._service,
+            "poll_once",
+            blocking_poll,
+        )
+
+        task = asyncio.create_task(monitor.run(stop_event))
+
+        try:
+            assert await asyncio.to_thread(
+                poll_started.wait,
+                1.0,
+            )
+
+            async def heartbeat():
+                await asyncio.sleep(0.02)
+                heartbeat_ran.set()
+
+            await asyncio.wait_for(heartbeat(), timeout=0.25)
+            assert heartbeat_ran.is_set()
+        finally:
+            stop_event.set()
+            release_poll.set()
+            await asyncio.wait_for(task, timeout=1.0)
+
+        assert monitor.snapshot().state == "COLLECTING"
+        assert monitor.is_running is False
+
+    asyncio.run(scenario())
+
+
+def test_source_freshness_reports_os_error(tmp_path, monkeypatch):
+    monitor = make_monitor(tmp_path)
+    original_stat = type(monitor._clock_history_path).stat
+
+    def fail_target_stat(path, *args, **kwargs):
+        if path == monitor._clock_history_path:
+            raise PermissionError("access denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        type(monitor._clock_history_path),
+        "stat",
+        fail_target_stat,
+    )
+
+    snapshot = monitor.source_freshness()
+
+    assert snapshot.state == "UNAVAILABLE"
+    assert snapshot.age_seconds is None
+    assert snapshot.last_modified_unix is None
+    assert snapshot.error == "PermissionError: access denied"
