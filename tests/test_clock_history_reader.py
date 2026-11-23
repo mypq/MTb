@@ -433,8 +433,8 @@ def test_max_samples_per_read_rejects_invalid_values(tmp_path, value):
 @pytest.mark.parametrize(
     "bad_line",
     [
-        b"too;few;columns\\r\\n",
-        b"\\xff\\xfe\\r\\n",
+        b"too;few;columns\r\n",
+        b"\xff\\xfe\r\n",
     ],
 )
 def test_malformed_or_non_utf8_appended_row_is_rejected(
@@ -458,7 +458,7 @@ def test_incomplete_header_is_rejected(tmp_path):
 
 def test_wrong_header_is_rejected(tmp_path):
     history, _, reader = make_reader(tmp_path)
-    history.write_bytes(b"wrong;header\\r\\n")
+    history.write_bytes(b"wrong;header\r\n")
 
     with pytest.raises(Exception, match="header"):
         reader.read_new()
@@ -467,7 +467,7 @@ def test_wrong_header_is_rejected(tmp_path):
 def test_utf8_bom_header_is_accepted(tmp_path):
     history, _, reader = make_reader(tmp_path)
     history.write_bytes(
-        b"\\xef\\xbb\\xbf" + header_bytes() + row_bytes(make_row(1))
+        b"\xef\xbb\xbf" + header_bytes() + row_bytes(make_row(1))
     )
 
     batch = reader.read_new()
