@@ -434,7 +434,7 @@ def test_max_samples_per_read_rejects_invalid_values(tmp_path, value):
     "bad_line",
     [
         b"too;few;columns\r\n",
-        b"\xff\\xfe\r\n",
+        b"\xff\xfe\r\n",
     ],
 )
 def test_malformed_or_non_utf8_appended_row_is_rejected(
