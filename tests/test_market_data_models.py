@@ -457,6 +457,36 @@ def test_clock_evidence_rejects_invalid_ntp_servers(servers):
         make_clock_evidence(ntp_servers=servers)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "account_login",
+        "terminal_build",
+        "ntp_sample_count",
+        "calibration_sample_count",
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_clock_evidence_rejects_boolean_integer_fields(field, value):
+    with pytest.raises(ValidationError):
+        make_clock_evidence(**{field: value})
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ntp_offset_seconds",
+        "ntp_uncertainty_seconds",
+        "candle_offset_seconds",
+        "candle_uncertainty_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [True, False])
+def test_clock_evidence_rejects_boolean_decimal_fields(field, value):
+    with pytest.raises(ValidationError):
+        make_clock_evidence(**{field: value})
+
+
 def test_clock_evidence_rejects_non_utc_checked_at():
     with pytest.raises(ValidationError):
         make_clock_evidence(
