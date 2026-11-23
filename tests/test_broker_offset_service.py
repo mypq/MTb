@@ -1106,3 +1106,61 @@ def test_writer_lock_contention_preserves_detector_and_resumes(
     assert resumed.samples_processed == 3
     assert len(registry.load()) == 1
     assert registry.load()[0].event_type == "BASELINE"
+
+
+
+def test_ntp_trust_loss_during_batch_defers_checkpoint_and_replays(
+    tmp_path,
+):
+    rows = [
+        make_row(sequence, 7200)
+        for sequence in range(1, 4)
+    ]
+    history_path = tmp_path / "clock_history.csv"
+    registry = BrokerOffsetRegistry(tmp_path / "offsets.jsonl")
+    write_history(history_path, rows)
+
+    verifier = make_verifier()
+    detector = BrokerOffsetDetector(verifier)
+    service = BrokerOffsetEvidenceService(
+        history_path,
+        detector,
+        registry,
+    )
+
+    original_process = service._process_sample
+    processed = 0
+
+    def lose_ntp_trust_after_first_sample(sample):
+        nonlocal processed
+        original_process(sample)
+        processed += 1
+        if processed == 1:
+            verifier.reset()
+
+    service._process_sample = lose_ntp_trust_after_first_sample
+
+    deferred = service.poll_once()
+
+    checkpoint_path = history_path.with_suffix(".checkpoint.json")
+    assert deferred.state == "WAITING_FOR_NTP"
+    assert deferred.error is None
+    assert deferred.samples_processed == 0
+    assert not checkpoint_path.exists()
+    assert registry.load() == ()
+
+    # A fresh independent verification allows the exact same source batch
+    # to be replayed; the failed partial detector window must not survive.
+    assert verifier.verify().verified
+    service._process_sample = original_process
+
+    resumed = service.poll_once()
+
+    assert resumed.state == "BASELINE_RECORDED"
+    assert resumed.error is None
+    assert resumed.samples_processed == 3
+    assert checkpoint_path.exists()
+    records = registry.load()
+    assert len(records) == 1
+    assert records[0].event_type == "BASELINE"
+    assert records[0].evidence_sample_count == 3
