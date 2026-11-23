@@ -389,7 +389,11 @@ async def lifespan(app: FastAPI):
 
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
-    broker_quote_repository = BrokerQuoteRepository(database)
+    broker_quote_repository = (
+        BrokerQuoteRepository(database)
+        if callable(getattr(database, "session", None))
+        else None
+    )
 
     # Load the broker session calendar when a file is configured.
     # A configured but missing or invalid file must stop startup.
