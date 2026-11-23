@@ -189,3 +189,71 @@ def test_probe_keeps_empty_history_partial_not_permanently_unavailable():
     assert quote_source.status is CapabilityStatus.PARTIAL
     assert "does not prove" in " ".join(tick_source.limitations)
     assert registry.get("tick_history_archive", symbol="XAUUSD").status is CapabilityStatus.UNAVAILABLE
+
+def test_live_quote_identity_change_is_rejected_and_original_identity_is_preserved():
+    class AccountChangesDuringQuoteProbe(FakeMT5Source):
+        def get_broker_time_sample(self, symbol):
+            self.calls.append(("quote", symbol))
+            return SimpleNamespace(
+                account_login=654321,
+                broker_server="Different-Server",
+                broker_time_msc=1790000000000,
+            )
+
+    registry = CapabilityRegistry()
+    observations = MT5CapabilityProbe(
+        AccountChangesDuringQuoteProbe(),
+        registry,
+    ).probe("XAUUSD", "M5")
+
+    quote = registry.get("live_quote_sample", symbol="XAUUSD")
+    assert quote.status is CapabilityStatus.UNAVAILABLE
+    assert quote.account_login == 123456
+    assert quote.broker_server == "Demo-Server"
+    assert "ValueError" in " ".join(quote.evidence)
+    assert observations[2] == quote
+
+
+def test_live_quote_rejects_account_login_mismatch():
+    class AccountLoginChangesDuringQuoteProbe(FakeMT5Source):
+        def get_broker_time_sample(self, symbol):
+            self.calls.append(("quote", symbol))
+            return SimpleNamespace(
+                account_login=654321,
+                broker_server="Demo-Server",
+                broker_time_msc=1790000000000,
+            )
+
+    registry = CapabilityRegistry()
+    MT5CapabilityProbe(
+        AccountLoginChangesDuringQuoteProbe(),
+        registry,
+    ).probe("XAUUSD", "M5")
+
+    quote = registry.get("live_quote_sample", symbol="XAUUSD")
+    assert quote.status is CapabilityStatus.UNAVAILABLE
+    assert quote.account_login == 123456
+    assert quote.broker_server == "Demo-Server"
+
+
+def test_live_quote_rejects_broker_server_mismatch():
+    class BrokerServerChangesDuringQuoteProbe(FakeMT5Source):
+        def get_broker_time_sample(self, symbol):
+            self.calls.append(("quote", symbol))
+            return SimpleNamespace(
+                account_login=123456,
+                broker_server="Different-Server",
+                broker_time_msc=1790000000000,
+            )
+
+    registry = CapabilityRegistry()
+    MT5CapabilityProbe(
+        BrokerServerChangesDuringQuoteProbe(),
+        registry,
+    ).probe("XAUUSD", "M5")
+
+    quote = registry.get("live_quote_sample", symbol="XAUUSD")
+    assert quote.status is CapabilityStatus.UNAVAILABLE
+    assert quote.account_login == 123456
+    assert quote.broker_server == "Demo-Server"
+
