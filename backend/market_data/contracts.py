@@ -46,6 +46,27 @@ class MarketCandleDataContract(BaseModel):
     analysis_eligible: bool | None = None
     validation_report: dict[str, Any] | None = None
 
+    @field_validator(
+        "candle_id",
+        "batch_id",
+        "tick_volume",
+        "real_volume",
+        "source_account_login",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_integer_fields(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("Integer contract fields cannot be booleans.")
+        return value
+
+    @field_validator("open", "high", "low", "close", mode="before")
+    @classmethod
+    def reject_boolean_price_fields(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("Price contract fields cannot be booleans.")
+        return value
+
     @field_validator("event_time", "available_at", "recorded_at")
     @classmethod
     def require_utc_timestamps(cls, value: datetime) -> datetime:
@@ -80,6 +101,27 @@ class MarketDataBatchContract(BaseModel):
     clock_verified: bool | None = None
     clock_evidence: dict[str, Any] | None = None
     validation_report: dict[str, Any] | None = None
+
+    @field_validator(
+        "batch_id",
+        "candle_count",
+        "source_account_login",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_integer_fields(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("Integer contract fields cannot be booleans.")
+        return value
+
+    @field_validator("candle_ids", mode="before")
+    @classmethod
+    def reject_boolean_candle_ids(cls, value: Any) -> Any:
+        if isinstance(value, (list, tuple)) and any(
+            isinstance(item, bool) for item in value
+        ):
+            raise ValueError("Candle IDs cannot contain booleans.")
+        return value
 
     @field_validator("available_at", "recorded_at")
     @classmethod
