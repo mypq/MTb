@@ -13,6 +13,7 @@ from backend.database_models import (
     EvaluationPeriodRecord,
     EvaluationRunRecord,
     EvaluationSignalRecord,
+    BrokerQuoteRecord,
     MarketCandleRecord,
     MarketDataBatchRecord,
 )
@@ -116,7 +117,7 @@ def make_outcome(signal, horizon=5):
 
 def test_database_models_create_expected_tables(session):
     assert set(DatabaseBase.metadata.tables) == {
-        "market_data_batches", "market_candles",
+        "market_data_batches", "market_candles", "broker_quotes",
         "evaluation_runs", "evaluation_periods",
         "evaluation_signals", "evaluation_outcomes",
         "evaluation_outcome_evidence", "evaluation_sample_selections",
@@ -350,3 +351,48 @@ def test_signal_delete_cascades_to_its_outcomes(session):
     session.delete(signal)
     session.commit()
     assert session.scalar(select(EvaluationOutcomeRecord)) is None
+
+
+
+def test_broker_quote_record_persists_raw_and_receipt_clocks(session):
+    now = datetime.now(timezone.utc)
+    record = BrokerQuoteRecord(
+        symbol="GOLD",
+        broker_time_msc=1795406052640,
+        received_at_utc=now,
+        received_monotonic_ns=123456789,
+        bid=3603.30,
+        ask=3603.87,
+        account_login=12345678,
+        broker_server="XMGlobal-MT5 9",
+        source="symbol_info_tick",
+    )
+    session.add(record)
+    session.commit()
+    loaded = session.scalar(
+        select(BrokerQuoteRecord).where(BrokerQuoteRecord.symbol == "GOLD")
+    )
+    assert loaded is not None
+    assert loaded.broker_time_msc == 1795406052640
+    assert loaded.received_monotonic_ns == 123456789
+    assert loaded.bid == 3603.30
+    assert loaded.ask == 3603.87
+    assert loaded.received_at_utc.replace(tzinfo=timezone.utc) == now
+
+
+def test_broker_quote_record_rejects_invalid_spread(session):
+    record = BrokerQuoteRecord(
+        symbol="GOLD",
+        broker_time_msc=1795406052640,
+        received_at_utc=datetime.now(timezone.utc),
+        received_monotonic_ns=1,
+        bid=3603.87,
+        ask=3603.30,
+        account_login=12345678,
+        broker_server="XMGlobal-MT5 9",
+        source="symbol_info_tick",
+    )
+    session.add(record)
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
