@@ -34,9 +34,11 @@ def test_wsl_keepalive_is_a_noop_outside_windows():
 def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
     manager = WslChronyKeepalive()
     calls = []
+    timeouts = []
 
     def run(args, **kwargs):
         calls.append(args)
+        timeouts.append(kwargs.get("timeout"))
         if "systemctl" in args:
             return _completed("active\n")
         if "echo $!" in args[4]:
@@ -59,6 +61,7 @@ def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
         manager.start()
 
     assert manager.is_running is True
+    assert timeouts[0] == 30.0
     assert calls[0][:4] == [
         "wsl.exe",
         "--exec",
