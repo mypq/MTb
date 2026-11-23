@@ -6,7 +6,6 @@ from datetime import timezone
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from backend.database import Database
 from backend.database_models import BrokerQuoteRecord
 from backend.mt5.time_models import BrokerTimeSample
 
@@ -21,9 +20,11 @@ class BrokerQuoteSaveResult:
 class BrokerQuoteRepository:
     """Persist raw broker quotes without converting broker timestamps."""
 
-    def __init__(self, database: Database) -> None:
-        if not isinstance(database, Database):
-            raise TypeError("database must be a Database instance.")
+    def __init__(self, database) -> None:
+        # Accept the application's database abstraction and test doubles that
+        # implement the same session() contract; validate at first use.
+        if not callable(getattr(database, "session", None)):
+            raise TypeError("database must provide a session() context manager.")
         self._database = database
 
     @staticmethod
