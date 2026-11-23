@@ -304,3 +304,48 @@ def test_accept_interleaved_independent_runs(tmp_path):
         "run-b",
         "run-a",
     ]
+
+
+
+def test_accept_utf8_bom_header(tmp_path):
+    path = tmp_path / "clock_history.csv"
+    content = (
+        ";".join(CLOCK_HISTORY_COLUMNS)
+        + "\n"
+        + ";".join(make_row()[column] for column in CLOCK_HISTORY_COLUMNS)
+        + "\n"
+    )
+    path.write_bytes(b"\xef\xbb\xbf" + content.encode("utf-8"))
+
+    samples = read_clock_history(path)
+
+    assert len(samples) == 1
+    assert samples[0].sample_sequence == 1
+
+
+def test_reject_invalid_utf8_file_with_clock_history_error(tmp_path):
+    path = tmp_path / "clock_history.csv"
+    content = (
+        ";".join(CLOCK_HISTORY_COLUMNS)
+        + "\n"
+        + ";".join(make_row()[column] for column in CLOCK_HISTORY_COLUMNS)
+        + "\n"
+    ).encode("utf-8")
+    path.write_bytes(content + b"\xff\xfe\n")
+
+    with pytest.raises(ClockHistoryError, match="invalid text or CSV syntax"):
+        read_clock_history(path)
+
+
+def test_reject_malformed_quoted_csv_with_clock_history_error(tmp_path):
+    path = tmp_path / "clock_history.csv"
+    header = ";".join(CLOCK_HISTORY_COLUMNS)
+    values = [make_row()[column] for column in CLOCK_HISTORY_COLUMNS]
+    values[CLOCK_HISTORY_COLUMNS.index("broker_server")] = '"unterminated'
+    path.write_text(
+        header + "\n" + ";".join(values) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ClockHistoryError, match="invalid text or CSV syntax"):
+        read_clock_history(path)

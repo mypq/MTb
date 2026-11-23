@@ -219,6 +219,7 @@ def read_clock_history(
             reader = csv.DictReader(
                 handle,
                 delimiter=";",
+                strict=True,
             )
 
             if tuple(reader.fieldnames or ()) != CLOCK_HISTORY_COLUMNS:
@@ -270,6 +271,10 @@ def read_clock_history(
     except OSError as exc:
         raise ClockHistoryError(
             "Unable to read MT5 clock history."
+        ) from exc
+    except (UnicodeError, csv.Error) as exc:
+        raise ClockHistoryError(
+            "MT5 clock history contains invalid text or CSV syntax."
         ) from exc
 
     if not samples:
