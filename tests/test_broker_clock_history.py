@@ -780,14 +780,16 @@ def test_ntp_observation_age_precision_tolerance(
 
 def test_lock_recovers_stale_metadata_without_os_lock(tmp_path):
     lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("pid=424242\\n", encoding="ascii")
+    lock_path.write_text("pid=424242\n", encoding="ascii")
 
     with history_module.exclusive_file_lock(lock_path):
-        assert lock_path.read_text(encoding="ascii") == (
-            f"pid={os.getpid()}\\n"
-        )
+        pass
 
-    # The persistent lock inode remains, but the OS lock is released.
+    # Read metadata only after releasing the Windows byte-range lock.
+    assert lock_path.read_text(encoding="ascii") == (
+        f"pid={os.getpid()}\n"
+    )
+    # The persistent lock inode remains, and the OS lock is released.
     assert lock_path.exists()
     with history_module.exclusive_file_lock(lock_path):
         pass
@@ -798,9 +800,12 @@ def test_lock_ignores_unknown_metadata_when_os_lock_is_free(tmp_path):
     lock_path.write_text("unknown owner metadata", encoding="ascii")
 
     with history_module.exclusive_file_lock(lock_path):
-        assert lock_path.read_text(encoding="ascii") == (
-            f"pid={os.getpid()}\\n"
-        )
+        pass
+
+    # Read metadata only after releasing the Windows byte-range lock.
+    assert lock_path.read_text(encoding="ascii") == (
+        f"pid={os.getpid()}\n"
+    )
 
 
 def test_lock_releases_after_exception(tmp_path):
@@ -975,12 +980,15 @@ def test_append_failure_releases_lock_and_preserves_archive(
             return real_write(descriptor, data[:10])
         raise OSError("simulated disk write failure")
 
-    monkeypatch.setattr(history_module.os, "write", fail_after_partial_append)
-
-    with pytest.raises(OSError, match="simulated disk write failure"):
-        history_module.append_observations(
-            destination, second_observations
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            history_module.os, "write", fail_after_partial_append
         )
+
+        with pytest.raises(OSError, match="simulated disk write failure"):
+            history_module.append_observations(
+                destination, second_observations
+            )
 
     assert destination.read_bytes() == original_content
     assert len(read_history(destination)) == 3
