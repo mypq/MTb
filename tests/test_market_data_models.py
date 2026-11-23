@@ -446,6 +446,10 @@ def test_ntp_servers_are_normalized():
         ("ntp-a", "ntp-a", "ntp-c"),
         ("ntp-a", "ntp-b", " "),
         ("ntp-a", "ntp-b"),
+        ("ntp-a", "ntp-b", 123),
+        ("ntp-a", "ntp-b", None),
+        ("ntp-a", "ntp-b", ""),
+        ("ntp-a", "ntp-b", "   "),
     ],
 )
 def test_clock_evidence_rejects_invalid_ntp_servers(servers):
