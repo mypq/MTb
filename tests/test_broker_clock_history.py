@@ -783,3 +783,95 @@ def test_lock_does_not_recover_unreadable_or_unknown_metadata(
     assert lock_path.read_text(encoding="ascii") == (
         "unknown owner metadata"
     )
+
+
+
+def test_rejects_duplicate_source_header_columns(tmp_path):
+    source = tmp_path / "evidence.csv"
+    fields = list(SOURCE_FIELDS) + ["symbol"]
+    write_source_csv(source, [valid_source_row()], fields=fields)
+
+    with pytest.raises(ValueError, match="duplicate columns"):
+        history_module.read_source_rows(source)
+
+
+def test_rejects_source_row_with_missing_cells(tmp_path):
+    source = tmp_path / "evidence.csv"
+    write_source_csv(source, [valid_source_row()])
+    lines = source.read_text(encoding="utf-8").splitlines()
+    source.write_text("\\n".join([lines[0], ";".join(lines[1].split(";")[:-1])]) + "\\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="row shape"):
+        history_module.read_source_rows(source)
+
+
+def test_rejects_malformed_quoted_source_csv(tmp_path):
+    source = tmp_path / "evidence.csv"
+    source.write_text(
+        ";".join(SOURCE_FIELDS) + "\\n" + '"unterminated' + "\\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(csv.Error):
+        history_module.read_source_rows(source)
+
+
+def test_rejects_invalid_utf8_source_as_controlled_exit(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+    source.write_bytes(b"\\xff\\xfe")
+
+    result, stdout = run_archiver(
+        monkeypatch, source, output, capsys
+    )
+
+    assert result == 4
+    assert "cannot read input" in stdout
+    assert not output.exists()
+
+
+def test_rejects_history_row_with_missing_cells(tmp_path):
+    destination = tmp_path / "history.csv"
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(HISTORY_FIELDS)
+        writer.writerow(["only-one-field"])
+
+    with pytest.raises(ValueError, match="row shape"):
+        history_module.load_existing_keys(destination)
+
+
+def test_rejects_malformed_history_csv(tmp_path):
+    destination = tmp_path / "history.csv"
+    destination.write_text(
+        ",".join(HISTORY_FIELDS) + "\\n" + '"unterminated' + "\\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(csv.Error):
+        history_module.load_existing_keys(destination)
+
+
+def test_append_failure_does_not_remove_another_process_lock(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "history.csv"
+    lock_path = destination.with_name(destination.name + ".lock")
+    observations, _ = history_module.build_observations(
+        [valid_source_row()], "evidence.csv"
+    )
+
+    real_writerows = csv.DictWriter.writerows
+
+    def fail_writerows(self, rows):
+        raise OSError("simulated disk write failure")
+
+    monkeypatch.setattr(csv.DictWriter, "writerows", fail_writerows)
+
+    with pytest.raises(OSError, match="simulated disk write failure"):
+        history_module.append_observations(destination, observations)
+
+    assert not lock_path.exists()
+    assert destination.exists()

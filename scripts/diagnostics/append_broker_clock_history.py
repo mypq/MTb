@@ -327,12 +327,22 @@ def load_existing_keys(destination):
         newline="",
         encoding="utf-8-sig",
     ) as handle:
-        reader = csv.DictReader(handle)
+        reader = csv.DictReader(handle, strict=True)
 
         if reader.fieldnames != HISTORY_FIELDS:
             raise ValueError("history CSV schema mismatch")
 
-        return {observation_key(row) for row in reader}
+        keys = set()
+        for line_number, row in enumerate(reader, start=2):
+            if row is None or None in row or any(
+                value is None for value in row.values()
+            ):
+                raise ValueError(
+                    f"history CSV row shape is invalid at line {line_number}"
+                )
+            keys.add(observation_key(row))
+
+        return keys
 
 
 def read_source_rows(source):
@@ -341,9 +351,13 @@ def read_source_rows(source):
         newline="",
         encoding="utf-8-sig",
     ) as handle:
-        reader = csv.DictReader(handle)
+        reader = csv.DictReader(handle, strict=True)
 
-        missing = SOURCE_FIELDS.difference(reader.fieldnames or ())
+        fieldnames = reader.fieldnames or ()
+        if len(fieldnames) != len(set(fieldnames)):
+            raise ValueError("unsupported evidence CSV; duplicate columns")
+
+        missing = SOURCE_FIELDS.difference(fieldnames)
 
         if missing:
             raise ValueError(
@@ -351,7 +365,17 @@ def read_source_rows(source):
                 + ", ".join(sorted(missing))
             )
 
-        return list(reader)
+        rows = []
+        for line_number, row in enumerate(reader, start=2):
+            if row is None or None in row or any(
+                value is None for value in row.values()
+            ):
+                raise ValueError(
+                    f"evidence CSV row shape is invalid at line {line_number}"
+                )
+            rows.append(row)
+
+        return rows
 
 
 def valid_identity(row):
@@ -630,7 +654,7 @@ def main():
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 3
-    except (OSError, csv.Error) as exc:
+    except (OSError, UnicodeError, csv.Error) as exc:
         print(f"ERROR: cannot read input: {exc}")
         return 4
 
@@ -660,7 +684,7 @@ def main():
     except TimeoutError as exc:
         print(f"ERROR: {exc}")
         return 7
-    except (OSError, csv.Error) as exc:
+    except (OSError, UnicodeError, csv.Error) as exc:
         print(f"ERROR: cannot append history: {exc}")
         return 8
 
