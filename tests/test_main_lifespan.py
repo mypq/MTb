@@ -2195,3 +2195,37 @@ def test_session_calendar_reload_preserves_last_valid_calendar(
     asyncio.run(run())
     assert validator.session_calendar is initial
     assert validator.session_calendar.server_utc_offset_seconds == 7200
+
+
+
+def test_lifespan_starts_and_stops_wsl_chrony_keepalive(monkeypatch):
+    app, events = configure_lifecycle(
+        monkeypatch,
+        mt5_enabled=False,
+    )
+
+    class FakeWslChronyKeepalive:
+        def start(self):
+            events.append("wsl_keepalive.start")
+
+        def stop(self):
+            events.append("wsl_keepalive.stop")
+
+    monkeypatch.setattr(
+        main,
+        "WslChronyKeepalive",
+        FakeWslChronyKeepalive,
+    )
+
+    async def run():
+        async with main.lifespan(app):
+            assert "wsl_keepalive.start" in events
+            assert events.index("wsl_keepalive.start") < events.index(
+                "database.initialize"
+            )
+
+    asyncio.run(run())
+
+    assert events.index("wsl_keepalive.stop") < events.index(
+        "database.dispose"
+    )
