@@ -1067,3 +1067,54 @@ def test_ntp_checked_at_must_be_a_valid_unix_timestamp(checked_at):
     row = valid_source_row(ntp_checked_at_unix=checked_at)
 
     assert history_module.valid_ntp_metadata(row) is False
+
+
+@pytest.mark.parametrize(
+    "reported_age, expected",
+    [
+        ("5", True),
+        ("5.000001", True),
+        ("4.999999", True),
+        ("4.999", True),
+        ("15", True),
+        ("15.000001", False),
+        ("4.999999", True),
+        ("NaN", False),
+        ("Infinity", False),
+        ("-Infinity", False),
+    ],
+)
+def test_ntp_reported_age_must_match_observation_age_within_five_seconds(
+    reported_age, expected
+):
+    observed_at = "2026-11-16T20:44:17.258084+00:00"
+    observed_epoch = history_module.iso_epoch(observed_at)
+    actual_age = 10.0
+
+    row = valid_source_row(
+        ntp_checked_at_unix=str(observed_epoch - actual_age),
+        ntp_age_seconds=reported_age,
+    )
+
+    assert (
+        history_module.valid_ntp_at_observation(row, observed_at)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "reported_age",
+    ["", "not-a-number", "NaN", "Infinity", "-Infinity"],
+)
+def test_ntp_observation_rejects_invalid_reported_age(reported_age):
+    observed_at = "2026-11-16T20:44:17.258084+00:00"
+    observed_epoch = history_module.iso_epoch(observed_at)
+
+    row = valid_source_row(
+        ntp_checked_at_unix=str(observed_epoch - 10.0),
+        ntp_age_seconds=reported_age,
+    )
+
+    assert history_module.valid_ntp_at_observation(
+        row, observed_at
+    ) is False
