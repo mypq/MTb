@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import errno
+import io
 import math
 import os
 import sys
@@ -620,22 +621,43 @@ def append_observations(destination, observations):
         )
 
         if new_rows or write_header:
-            with destination.open(
-                "a",
-                newline="",
-                encoding="utf-8",
-            ) as handle:
-                writer = csv.DictWriter(
-                    handle,
-                    fieldnames=HISTORY_FIELDS,
-                )
+            buffer = io.StringIO(newline="")
+            writer = csv.DictWriter(
+                buffer,
+                fieldnames=HISTORY_FIELDS,
+            )
 
-                if write_header:
-                    writer.writeheader()
+            if write_header:
+                writer.writeheader()
 
-                writer.writerows(new_rows)
-                handle.flush()
-                os.fsync(handle.fileno())
+            writer.writerows(new_rows)
+            payload = buffer.getvalue().encode("utf-8")
+
+            descriptor = os.open(
+                str(destination),
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o666,
+            )
+            try:
+                original_size = os.fstat(descriptor).st_size
+                remaining = memoryview(payload)
+
+                try:
+                    while remaining:
+                        written = os.write(descriptor, remaining)
+                        if written <= 0:
+                            raise OSError("archive write made no progress")
+                        remaining = remaining[written:]
+
+                    os.fsync(descriptor)
+                except BaseException:
+                    # A failed append must not leave a partial CSV record
+                    # that makes the archive unreadable on the next run.
+                    os.ftruncate(descriptor, original_size)
+                    os.fsync(descriptor)
+                    raise
+            finally:
+                os.close(descriptor)
 
     return new_rows
 
