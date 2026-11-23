@@ -353,6 +353,7 @@ def configure_lifecycle(
         symbol,
         interval_seconds,
         clock_calibrator=None,
+        quote_repository=None,
     ):
         worker = FakeBrokerTickWorker(
             adapter=adapter,
@@ -537,6 +538,7 @@ def test_lifespan_waits_for_real_monitor_recovery_before_starting_workers(
             symbol,
             interval_seconds,
             clock_calibrator=None,
+            quote_repository=None,
         ):
             self.adapter = adapter
             self.monitor = monitor
