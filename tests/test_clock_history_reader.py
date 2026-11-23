@@ -418,3 +418,135 @@ def test_verified_checkpoint_rejects_same_size_prefix_rewrite(tmp_path):
         match="modified",
     ):
         reader.read_new()
+
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, True, 1.5, "2", None],
+)
+def test_max_samples_per_read_rejects_invalid_values(tmp_path, value):
+    with pytest.raises(ValueError, match="positive"):
+        make_reader(tmp_path, max_samples_per_read=value)
+
+
+@pytest.mark.parametrize(
+    "bad_line",
+    [
+        b"too;few;columns\\r\\n",
+        b"\\xff\\xfe\\r\\n",
+    ],
+)
+def test_malformed_or_non_utf8_appended_row_is_rejected(
+    tmp_path,
+    bad_line,
+):
+    history, _, reader = make_reader(tmp_path)
+    history.write_bytes(header_bytes() + bad_line)
+
+    with pytest.raises(Exception):
+        reader.read_new()
+
+
+def test_incomplete_header_is_rejected(tmp_path):
+    history, _, reader = make_reader(tmp_path)
+    history.write_bytes(b"schema_version;run_id")
+
+    with pytest.raises(ClockHistoryReaderError, match="header"):
+        reader.read_new()
+
+
+def test_wrong_header_is_rejected(tmp_path):
+    history, _, reader = make_reader(tmp_path)
+    history.write_bytes(b"wrong;header\\r\\n")
+
+    with pytest.raises(Exception, match="header"):
+        reader.read_new()
+
+
+def test_utf8_bom_header_is_accepted(tmp_path):
+    history, _, reader = make_reader(tmp_path)
+    history.write_bytes(
+        b"\\xef\\xbb\\xbf" + header_bytes() + row_bytes(make_row(1))
+    )
+
+    batch = reader.read_new()
+
+    assert [sample.sample_sequence for sample in batch.samples] == [1]
+
+
+def test_incremental_reader_rejects_non_advancing_monotonic_counter(
+    tmp_path,
+):
+    history, _, reader = make_reader(tmp_path)
+    write_history(history, [make_row(1)])
+    first = reader.read_new()
+    reader.commit(first)
+
+    with history.open("ab") as handle:
+        handle.write(
+            row_bytes(
+                make_row(
+                    2,
+                    monotonic_ms="60000",
+                )
+            )
+        )
+
+    with pytest.raises(Exception, match="did not advance"):
+        reader.read_new()
+
+
+def test_incremental_reader_accepts_monotonic_counter_wraparound(
+    tmp_path,
+):
+    history, _, reader = make_reader(tmp_path)
+    write_history(
+        history,
+        [make_row(1, monotonic_ms="4294967290")],
+    )
+    first = reader.read_new()
+    reader.commit(first)
+
+    with history.open("ab") as handle:
+        handle.write(
+            row_bytes(
+                make_row(
+                    2,
+                    monotonic_ms="20",
+                )
+            )
+        )
+
+    second = reader.read_new()
+
+    assert [sample.sample_sequence for sample in second.samples] == [2]
+
+
+def test_failed_checkpoint_save_keeps_batch_pending_for_retry(
+    tmp_path,
+    monkeypatch,
+):
+    history, checkpoint, reader = make_reader(tmp_path)
+    write_history(history, [make_row(1)])
+    batch = reader.read_new()
+    original_save = reader.store.save
+
+    def fail_save(_checkpoint):
+        raise OSError("simulated checkpoint write failure")
+
+    monkeypatch.setattr(reader.store, "save", fail_save)
+
+    with pytest.raises(OSError, match="simulated"):
+        reader.commit(batch)
+
+    assert not checkpoint.exists()
+
+    with pytest.raises(ClockHistoryReaderError, match="committed"):
+        reader.read_new()
+
+    monkeypatch.setattr(reader.store, "save", original_save)
+    reader.commit(batch)
+
+    assert checkpoint.exists()
+    assert reader.read_new().samples == ()
