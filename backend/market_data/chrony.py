@@ -119,46 +119,7 @@ class ChronyStatusService:
         return result.stdout
 
     def _run_sources(self) -> str:
-        """Read Chrony sources with the required WSL privilege."""
-        if os.name == "nt":
-            wsl = shutil.which("wsl.exe") or shutil.which("wsl") or "wsl.exe"
-
-            try:
-                result = subprocess.run(
-                    [
-                        wsl,
-                        "--exec",
-                        "sudo",
-                        "-n",
-                        "/usr/bin/chronyc",
-                        "sources",
-                        "-v",
-                    ],
-                    capture_output=True,
-                    check=False,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self._timeout_seconds,
-                    shell=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise ChronyStatusError(
-                    f"Unable to execute Chrony sources query: "
-                    f"{type(exc).__name__}."
-                ) from exc
-
-            if result.returncode != 0:
-                detail = result.stderr.strip() or result.stdout.strip()
-                raise ChronyStatusError(
-                    detail or (
-                        "Chrony sources query exited with code "
-                        f"{result.returncode}."
-                    )
-                )
-
-            return result.stdout
-
+        """Read Chrony sources without elevated privileges."""
         return self._run("sources", "-v")
 
     def _run_authdata(self) -> str:
