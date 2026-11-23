@@ -510,3 +510,77 @@ def test_wall_clock_jump_after_success_invalidates_existing_trust(
 
     assert verifier.is_trusted() is False
     assert verifier.last_verification() is None
+
+
+
+def test_response_server_identity_must_match_requested_server():
+    clock = FakeClock()
+    samples = valid_samples()
+    samples["time.google.com"] = NtpSample(
+        server="unexpected.example",
+        offset_seconds=0.05,
+        round_trip_seconds=0.08,
+        root_dispersion_seconds=0.01,
+    )
+
+    verifier = make_verifier(clock, samples)
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert "server identity does not match" in result.error
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+
+def test_query_must_return_an_ntp_sample():
+    clock = FakeClock()
+
+    def query(server):
+        if server == "time.google.com":
+            return {"server": server}
+        return valid_samples()[server]
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=query,
+    )
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert "invalid sample" in result.error
+    assert verifier.is_trusted() is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("round_trip_seconds", -0.001),
+        ("round_trip_seconds", 2.001),
+        ("root_dispersion_seconds", -0.001),
+        ("root_dispersion_seconds", 1.001),
+    ],
+)
+def test_out_of_range_sample_quality_metrics_are_rejected(
+    field: str,
+    value: float,
+):
+    clock = FakeClock()
+    samples = valid_samples()
+    original = samples["time.google.com"]
+    values = {
+        "server": original.server,
+        "offset_seconds": original.offset_seconds,
+        "round_trip_seconds": original.round_trip_seconds,
+        "root_dispersion_seconds": original.root_dispersion_seconds,
+        "root_delay_seconds": original.root_delay_seconds,
+    }
+    values[field] = value
+    samples["time.google.com"] = NtpSample(**values)
+
+    verifier = make_verifier(clock, samples)
+    result = verifier.verify()
+
+    assert result.verified is False
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
