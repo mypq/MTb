@@ -67,7 +67,7 @@ def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
     ]
     assert "exec -a" in calls[0][4]
     assert "giant_goldbot_wsl_keepalive_testmarker" in calls[0]
-    assert calls[1][2:5] == [
+    assert calls[2][2:5] == [
         "systemctl",
         "is-active",
         "chrony",
