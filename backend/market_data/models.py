@@ -160,8 +160,38 @@ class MarketDataClockEvidence(BaseModel):
             raise ValueError("verified must be a boolean.")
         return value
 
-    @field_validator("ntp_offset_seconds", "ntp_uncertainty_seconds",
-                     "candle_offset_seconds", "candle_uncertainty_seconds")
+    @field_validator(
+        "account_login",
+        "terminal_build",
+        "ntp_sample_count",
+        "calibration_sample_count",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_clock_counts(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Clock evidence count fields must not be boolean.")
+        return value
+
+    @field_validator(
+        "ntp_offset_seconds",
+        "ntp_uncertainty_seconds",
+        "candle_offset_seconds",
+        "candle_uncertainty_seconds",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_clock_values(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("Clock evidence numeric values must not be boolean.")
+        return value
+
+    @field_validator(
+        "ntp_offset_seconds",
+        "ntp_uncertainty_seconds",
+        "candle_offset_seconds",
+        "candle_uncertainty_seconds",
+    )
     @classmethod
     def require_finite_clock_values(cls, value: float) -> float:
         if not isfinite(value):
