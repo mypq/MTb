@@ -139,6 +139,13 @@ class MT5CapabilityProbe:
         if include_live_quote:
             try:
                 sample = self._source.get_broker_time_sample(normalized_symbol)
+                if account_login is not None and (
+                    sample.account_login != account_login
+                    or sample.broker_server != broker_server
+                ):
+                    raise ValueError(
+                        "MT5 account identity changed during capability probe."
+                    )
                 observations.append(self._record(
                     capability="live_quote_sample",
                     status=CapabilityStatus.AVAILABLE,
