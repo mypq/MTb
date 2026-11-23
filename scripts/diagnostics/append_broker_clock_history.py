@@ -320,7 +320,7 @@ def exclusive_file_lock(lock_path):
 
 
 def load_existing_keys(destination):
-    if not destination.exists():
+    if not destination.exists() or destination.stat().st_size == 0:
         return set()
 
     with destination.open(

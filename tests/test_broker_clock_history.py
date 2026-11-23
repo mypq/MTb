@@ -564,6 +564,33 @@ def test_rejects_history_schema_mismatch(
     assert "schema mismatch" in stdout.lower()
 
 
+def test_existing_empty_history_file_is_initialized_with_header(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "evidence.csv"
+    output = tmp_path / "history.csv"
+    write_source_csv(source, [valid_source_row()])
+    output.write_bytes(b"")
+
+    result, _ = run_archiver(
+        monkeypatch, source, output, capsys
+    )
+
+    assert result == 0
+    with output.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames == HISTORY_FIELDS
+        rows = list(reader)
+    assert len(rows) == 3
+
+
+def test_empty_history_file_has_no_existing_keys(tmp_path):
+    destination = tmp_path / "history.csv"
+    destination.write_bytes(b"")
+
+    assert history_module.load_existing_keys(destination) == set()
+
+
 def test_history_uses_existing_schema(
     tmp_path, monkeypatch, capsys
 ):
