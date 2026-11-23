@@ -1002,3 +1002,68 @@ def test_append_failure_releases_lock_and_preserves_archive(
     assert destination.read_bytes() == original_content
     assert len(read_history(destination)) == 3
     assert not lock_path.exists()
+
+
+@pytest.mark.parametrize(
+    "offset, expected",
+    [
+        ("-0.999999", True),
+        ("0.999999", True),
+        ("-1", False),
+        ("1", False),
+        ("-1.000001", False),
+        ("1.000001", False),
+    ],
+)
+def test_ntp_offset_must_be_strictly_within_one_second(
+    offset, expected
+):
+    row = valid_source_row(ntp_offset_seconds=offset)
+
+    assert history_module.valid_ntp_metadata(row) is expected
+
+
+@pytest.mark.parametrize(
+    "uncertainty, expected",
+    [
+        ("0", True),
+        ("1", True),
+        ("-0.000001", False),
+        ("1.000001", False),
+    ],
+)
+def test_ntp_uncertainty_must_be_within_inclusive_bounds(
+    uncertainty, expected
+):
+    row = valid_source_row(ntp_uncertainty_seconds=uncertainty)
+
+    assert history_module.valid_ntp_metadata(row) is expected
+
+
+@pytest.mark.parametrize(
+    "sample_count, expected",
+    [
+        ("0", False),
+        ("2", False),
+        ("3", True),
+        ("3.0", True),
+        ("3.5", False),
+        ("-3", False),
+    ],
+)
+def test_ntp_sample_count_must_be_integer_and_at_least_minimum(
+    sample_count, expected
+):
+    row = valid_source_row(ntp_sample_count=sample_count)
+
+    assert history_module.valid_ntp_metadata(row) is expected
+
+
+@pytest.mark.parametrize(
+    "checked_at",
+    ["", "NaN", "Infinity", "-Infinity", "not-a-timestamp"],
+)
+def test_ntp_checked_at_must_be_a_valid_unix_timestamp(checked_at):
+    row = valid_source_row(ntp_checked_at_unix=checked_at)
+
+    assert history_module.valid_ntp_metadata(row) is False
