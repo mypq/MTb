@@ -188,3 +188,41 @@ def test_depth_audit_counts_unconfirmed_gaps_and_unknown_volume(repository):
     assert m5.unknown_volume_candle_count == 1
     assert m5.ingestion_status == "LIMITED"
     assert any("unknown volume source" in item for item in m5.readiness_limitations)
+
+
+def test_unknown_volume_is_reported_without_invalidating_ohlc_ingestion(
+    repository,
+):
+    repo, database = repository
+    timestamp = datetime(2026, 1, 1, 10, 0, tzinfo=UTC)
+    received = datetime(2026, 1, 1, 10, 1, tzinfo=UTC)
+
+    with database.session() as session:
+        batch = add_batch(
+            session,
+            timeframe="M5",
+            received_at=received,
+            clock_verified=True,
+            timestamps=(timestamp,),
+            validation_report={
+                "checked_at": received.isoformat(),
+                "analysis_eligible": True,
+                "freshness_verified": True,
+                "issues": [{"code": "UNKNOWN_VOLUME_SOURCE"}],
+                "gaps": [],
+            },
+        )
+        batch.candles[0].volume_source = "UNKNOWN"
+
+    report = MarketDataDepthAuditor(repo).audit("XAUUSD")
+    m5 = next(item for item in report.timeframes if item.timeframe == "M5")
+
+    # OHLC ingestion remains validated; volume availability is reported
+    # independently so volume-dependent evaluation can reject it separately.
+    assert m5.ingestion_status == "VALIDATED"
+    assert m5.unknown_volume_candle_count == 1
+    assert any(
+        "unknown volume source" in item
+        for item in m5.readiness_limitations
+    )
+    assert m5.validation_issue_count == 1
