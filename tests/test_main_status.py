@@ -260,6 +260,13 @@ def test_system_status_reports_default_broker_tick_state(
         "timestamp_regressions": 0,
         "identity_changes": 0,
         "last_error": None,
+        "persistence": {
+            "enabled": False,
+            "inserted": 0,
+            "duplicates": 0,
+            "last_persisted_at_utc": None,
+            "last_error": None,
+        },
     }
 
 
