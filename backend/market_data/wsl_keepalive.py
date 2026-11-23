@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import platform
 import shutil
 import subprocess
@@ -22,18 +23,30 @@ class WslChronyKeepalive:
         startup_timeout_seconds: float = 30.0,
         poll_interval_seconds: float = 0.25,
     ) -> None:
-        if startup_timeout_seconds <= 0:
-            raise ValueError("startup_timeout_seconds must be positive.")
-        if poll_interval_seconds <= 0:
-            raise ValueError("poll_interval_seconds must be positive.")
-
-        self._startup_timeout_seconds = float(startup_timeout_seconds)
-        self._poll_interval_seconds = float(poll_interval_seconds)
+        self._startup_timeout_seconds = self._positive_interval(
+            startup_timeout_seconds,
+            "startup_timeout_seconds",
+        )
+        self._poll_interval_seconds = self._positive_interval(
+            poll_interval_seconds,
+            "poll_interval_seconds",
+        )
         self._lock = threading.Lock()
         self._executable: str | None = None
         self._process: subprocess.Popen | None = None
         self._pid: int | None = None
         self._marker: str | None = None
+
+    @staticmethod
+    def _positive_interval(value: float, name: str) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a finite positive number.")
+        return float(value)
 
     @property
     def is_running(self) -> bool:
