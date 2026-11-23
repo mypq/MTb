@@ -18,6 +18,9 @@ from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.time_models import BrokerTimeSample
 
 if TYPE_CHECKING:
+    from backend.mt5.quote_repository import BrokerQuoteRepository
+
+if TYPE_CHECKING:
     from backend.mt5.adapter import MT5Adapter
 
 
@@ -35,6 +38,7 @@ class BrokerTickMonitorWorker:
         symbol: str,
         interval_seconds: float = 1.0,
         clock_calibrator: BrokerClockCalibrator | None = None,
+        quote_repository: BrokerQuoteRepository | None = None,
     ) -> None:
         if not isinstance(symbol, str) or not symbol.strip():
             raise ValueError("Symbol must be a non-empty string.")
@@ -65,6 +69,11 @@ class BrokerTickMonitorWorker:
         self._adapter = adapter
         self._monitor = monitor
         self._clock_calibrator = clock_calibrator
+        self._quote_repository = quote_repository
+        self._quotes_inserted = 0
+        self._quotes_duplicates = 0
+        self._last_persisted_at_utc: datetime | None = None
+        self._persistence_error: str | None = None
         self._capability_registry = None
         self._symbol = symbol.strip()
         self._interval_seconds = float(interval_seconds)
@@ -181,6 +190,22 @@ class BrokerTickMonitorWorker:
 
         snapshot = self._monitor.observe(sample)
 
+        if self._quote_repository is not None:
+            try:
+                save_result = self._quote_repository.save_sample(sample)
+            except Exception as exc:
+                with self._status_lock:
+                    self._persistence_error = type(exc).__name__
+                raise
+            else:
+                with self._status_lock:
+                    if save_result.inserted:
+                        self._quotes_inserted += 1
+                    elif save_result.duplicate:
+                        self._quotes_duplicates += 1
+                    self._last_persisted_at_utc = sample.received_at_utc
+                    self._persistence_error = None
+
         if self._capability_registry is not None:
             self._capability_registry.record(
                 MarketDataCapability(
@@ -226,6 +251,18 @@ class BrokerTickMonitorWorker:
         result["state"] = snapshot.state.value
         result["running"] = self.is_running
         result["last_error"] = self.last_error
+        with self._status_lock:
+            result["persistence"] = {
+                "enabled": self._quote_repository is not None,
+                "inserted": self._quotes_inserted,
+                "duplicates": self._quotes_duplicates,
+                "last_persisted_at_utc": (
+                    self._last_persisted_at_utc.isoformat()
+                    if self._last_persisted_at_utc is not None
+                    else None
+                ),
+                "last_error": self._persistence_error,
+            }
 
         if self._clock_calibrator is None:
             result["clock_calibration"] = {

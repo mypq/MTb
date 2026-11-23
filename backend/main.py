@@ -45,6 +45,7 @@ from backend.market_data.broker_offset_service import (
 from backend.mt5.adapter import MT5Adapter, MT5AdapterError
 from backend.mt5.broker_tick_monitor import BrokerTickMonitor
 from backend.mt5.broker_tick_worker import BrokerTickMonitorWorker
+from backend.mt5.quote_repository import BrokerQuoteRepository
 from backend.mt5.models import MT5ConnectionState
 from backend.mt5.monitor import MT5ConnectionMonitor
 from backend.mt5.timeframes import SUPPORTED_TIMEFRAMES
@@ -388,6 +389,7 @@ async def lifespan(app: FastAPI):
 
     database = Database(settings.DATABASE_URL)
     market_data_repository = MarketDataRepository(database)
+    broker_quote_repository = BrokerQuoteRepository(database)
 
     # Load the broker session calendar when a file is configured.
     # A configured but missing or invalid file must stop startup.
@@ -463,6 +465,7 @@ async def lifespan(app: FastAPI):
     app.state.broker_tick_worker = None
     app.state.market_data_service = market_data_service
     app.state.market_data_repository = market_data_repository
+    app.state.broker_quote_repository = broker_quote_repository
     app.state.market_data_capability_registry = capability_registry
     app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
@@ -574,6 +577,7 @@ async def lifespan(app: FastAPI):
                         symbol=selected_symbol,
                         interval_seconds=1.0,
                         clock_calibrator=broker_clock_calibrator,
+                        quote_repository=broker_quote_repository,
                     )
 
                     app.state.broker_tick_worker = (
@@ -921,6 +925,13 @@ def create_app() -> FastAPI:
                 "timestamp_regressions": 0,
                 "identity_changes": 0,
                 "last_error": None,
+                "persistence": {
+                    "enabled": False,
+                    "inserted": 0,
+                    "duplicates": 0,
+                    "last_persisted_at_utc": None,
+                    "last_error": None,
+                },
             }
 
         if broker_offset_monitor is not None:

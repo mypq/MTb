@@ -154,6 +154,21 @@ def test_initial_migration_upgrade_and_downgrade(
 
         assert "market_data_batches" in inspector.get_table_names()
         assert "market_candles" in inspector.get_table_names()
+        assert "broker_quotes" in inspector.get_table_names()
+
+        quote_columns = {
+            column["name"] for column in inspector.get_columns("broker_quotes")
+        }
+        assert {
+            "symbol", "broker_time_msc", "received_at_utc",
+            "received_monotonic_ns", "bid", "ask",
+            "account_login", "broker_server", "source",
+        }.issubset(quote_columns)
+        quote_indexes = {
+            index["name"] for index in inspector.get_indexes("broker_quotes")
+        }
+        assert "ix_broker_quotes_symbol_received_at" in quote_indexes
+        assert "ix_broker_quotes_identity_broker_time" in quote_indexes
 
         batch_columns = {
             column["name"]
@@ -304,6 +319,7 @@ def test_initial_migration_upgrade_and_downgrade(
 
         assert "market_data_batches" not in tables
         assert "market_candles" not in tables
+        assert "broker_quotes" not in tables
 
     finally:
         verification_engine.dispose()

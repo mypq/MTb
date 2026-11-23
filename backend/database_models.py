@@ -100,6 +100,40 @@ class MarketCandleRecord(DatabaseBase):
     batch: Mapped[MarketDataBatchRecord] = relationship(back_populates="candles")
 
 
+class BrokerQuoteRecord(DatabaseBase):
+    """Persisted raw broker quote with separate broker and receipt clocks."""
+
+    __tablename__ = "broker_quotes"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol", "account_login", "broker_server",
+            "broker_time_msc", "bid", "ask",
+            name="uq_broker_quotes_observation",
+        ),
+        CheckConstraint("broker_time_msc > 0", name="ck_broker_quote_time_positive"),
+        CheckConstraint("received_monotonic_ns >= 0", name="ck_broker_quote_monotonic_nonnegative"),
+        CheckConstraint("bid > 0", name="ck_broker_quote_bid_positive"),
+        CheckConstraint("ask >= bid", name="ck_broker_quote_ask_gte_bid"),
+        CheckConstraint("account_login > 0", name="ck_broker_quote_login_positive"),
+        Index("ix_broker_quotes_symbol_received_at", "symbol", "received_at_utc"),
+        Index(
+            "ix_broker_quotes_identity_broker_time",
+            "symbol", "account_login", "broker_server", "broker_time_msc",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    broker_time_msc: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    received_monotonic_ns: Mapped[int] = mapped_column(Integer, nullable=False)
+    bid: Mapped[float] = mapped_column(Float, nullable=False)
+    ask: Mapped[float] = mapped_column(Float, nullable=False)
+    account_login: Mapped[int] = mapped_column(Integer, nullable=False)
+    broker_server: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+
+
 # This is a storage envelope, not a claim about the broker's tick size or digits.
 # Final instrument-specific precision remains a runtime/data-contract concern.
 class EvaluationDecimal(TypeDecorator[Decimal]):
