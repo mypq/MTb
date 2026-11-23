@@ -627,6 +627,32 @@ def test_observations_are_not_marked_verified(
     assert "NOT a broker UTC offset" in stdout
 
 
+@pytest.mark.parametrize("failure_point", ["write", "fsync"])
+def test_lock_initialization_failure_cleans_up_lock_file(
+    tmp_path, monkeypatch, failure_point
+):
+    lock_path = tmp_path / "history.csv.lock"
+
+    if failure_point == "write":
+        def fail_write(descriptor, data):
+            raise OSError("simulated lock metadata write failure")
+
+        monkeypatch.setattr(history_module.os, "write", fail_write)
+        expected_error = "lock metadata write failure"
+    else:
+        def fail_fsync(descriptor):
+            raise OSError("simulated lock metadata fsync failure")
+
+        monkeypatch.setattr(history_module.os, "fsync", fail_fsync)
+        expected_error = "lock metadata fsync failure"
+
+    with pytest.raises(OSError, match=expected_error):
+        with history_module.exclusive_file_lock(lock_path):
+            pytest.fail("lock context must not be entered")
+
+    assert not lock_path.exists()
+
+
 def test_lock_blocks_second_writer(tmp_path):
     lock_path = tmp_path / "history.csv.lock"
 
