@@ -198,3 +198,72 @@ def test_wsl_keepalive_detects_managed_wsl_process_exiting_during_start():
 
     run.assert_not_called()
     assert manager.is_running is False
+
+
+
+@pytest.mark.parametrize(
+    ("startup_timeout", "poll_interval"),
+    [
+        (0, 0.1),
+        (-1, 0.1),
+        (float("nan"), 0.1),
+        (float("inf"), 0.1),
+        (True, 0.1),
+        (1.0, 0),
+        (1.0, -0.1),
+        (1.0, float("nan")),
+        (1.0, float("inf")),
+        (1.0, False),
+        ("1", 0.1),
+    ],
+)
+def test_wsl_keepalive_rejects_non_finite_or_invalid_timing_configuration(
+    startup_timeout,
+    poll_interval,
+):
+    with pytest.raises(ValueError, match="finite positive number"):
+        WslChronyKeepalive(
+            startup_timeout_seconds=startup_timeout,
+            poll_interval_seconds=poll_interval,
+        )
+
+
+def test_wsl_keepalive_reports_missing_wsl_executable():
+    manager = WslChronyKeepalive()
+
+    with patch(
+        "backend.market_data.wsl_keepalive.platform.system",
+        return_value="Windows",
+    ), patch(
+        "backend.market_data.wsl_keepalive.shutil.which",
+        return_value=None,
+    ):
+        with pytest.raises(RuntimeError, match="wsl.exe was not found"):
+            manager.start()
+
+    assert manager.is_running is False
+
+
+def test_wsl_keepalive_wraps_process_launch_os_error():
+    manager = WslChronyKeepalive()
+
+    with patch(
+        "backend.market_data.wsl_keepalive.platform.system",
+        return_value="Windows",
+    ), patch(
+        "backend.market_data.wsl_keepalive.shutil.which",
+        return_value="wsl.exe",
+    ), patch(
+        "backend.market_data.wsl_keepalive.uuid.uuid4",
+    ) as uuid4, patch(
+        "backend.market_data.wsl_keepalive.subprocess.Popen",
+        side_effect=OSError("process creation denied"),
+    ):
+        uuid4.return_value.hex = "launchfailure"
+        with pytest.raises(
+            RuntimeError,
+            match="Could not start managed WSL process",
+        ):
+            manager.start()
+
+    assert manager.is_running is False
