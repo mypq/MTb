@@ -18,6 +18,7 @@ MIN_NTP_SAMPLES = 3
 MAX_NTP_OFFSET_SECONDS = 1.0
 MAX_NTP_UNCERTAINTY_SECONDS = 1.0
 NTP_AGE_PRECISION_TOLERANCE_SECONDS = 0.000001
+COMPARISON_PRECISION_TOLERANCE_SECONDS = 0.000002
 
 SOURCE_FIELDS = {
     "cycle_end_local_utc",
@@ -561,6 +562,19 @@ def build_observations(source_rows, source_name):
             if not valid_iso_datetime(comparison):
                 rejected_timestamps += 1
                 continue
+
+            # Closed-stream offsets must agree with the raw timestamp and
+            # the recorded corrected midpoint. The ISO midpoint is stored
+            # at microsecond precision, so allow a small serialization
+            # tolerance. Active-candle offsets are measured against the
+            # expected timeframe boundary and are intentionally excluded.
+            if kind in {"tick", "m1_closed_candle", "m5_closed_candle"}:
+                comparison_epoch = iso_epoch(comparison)
+                if comparison_epoch is None or abs(
+                    (raw - comparison_epoch) - difference
+                ) > COMPARISON_PRECISION_TOLERANCE_SECONDS:
+                    rejected_numeric += 1
+                    continue
 
             observations.append({
                 "observed_at_local_utc": observed_at,
