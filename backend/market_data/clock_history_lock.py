@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from pathlib import Path
@@ -25,14 +26,28 @@ class ClockHistoryFileLock:
         timeout_seconds: float = 1.0,
         retry_interval_seconds: float = 0.05,
     ) -> None:
-        if timeout_seconds < 0:
-            raise ValueError("timeout_seconds cannot be negative.")
-        if retry_interval_seconds <= 0:
-            raise ValueError("retry_interval_seconds must be positive.")
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds < 0
+        ):
+            raise ValueError(
+                "timeout_seconds must be a finite non-negative number."
+            )
+        if (
+            isinstance(retry_interval_seconds, bool)
+            or not isinstance(retry_interval_seconds, (int, float))
+            or not math.isfinite(retry_interval_seconds)
+            or retry_interval_seconds <= 0
+        ):
+            raise ValueError(
+                "retry_interval_seconds must be a finite positive number."
+            )
 
         self.path = Path(path)
-        self.timeout_seconds = timeout_seconds
-        self.retry_interval_seconds = retry_interval_seconds
+        self.timeout_seconds = float(timeout_seconds)
+        self.retry_interval_seconds = float(retry_interval_seconds)
         self._handle = None
 
     def __enter__(self) -> "ClockHistoryFileLock":

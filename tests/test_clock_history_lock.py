@@ -79,3 +79,39 @@ def test_invalid_retry_interval_is_rejected(tmp_path):
             tmp_path / "lock",
             retry_interval_seconds=0,
         )
+
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [-1, float("nan"), float("inf"), float("-inf"), True, "1"],
+)
+def test_invalid_timeout_values_are_rejected(tmp_path, timeout):
+    with pytest.raises(ValueError, match="finite non-negative number"):
+        ClockHistoryFileLock(
+            tmp_path / "lock",
+            timeout_seconds=timeout,
+        )
+
+
+@pytest.mark.parametrize(
+    "retry_interval",
+    [0, -0.1, float("nan"), float("inf"), float("-inf"), False, "0.1"],
+)
+def test_invalid_retry_interval_values_are_rejected(
+    tmp_path,
+    retry_interval,
+):
+    with pytest.raises(ValueError, match="finite positive number"):
+        ClockHistoryFileLock(
+            tmp_path / "lock",
+            retry_interval_seconds=retry_interval,
+        )
+
+
+def test_zero_timeout_is_allowed(tmp_path):
+    lock = ClockHistoryFileLock(
+        tmp_path / "lock",
+        timeout_seconds=0,
+    )
+    assert lock.timeout_seconds == 0.0
