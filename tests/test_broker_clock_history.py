@@ -532,6 +532,9 @@ def test_preserves_old_rows_when_adding_new_session(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        tick_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m1_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m5_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
         ntp_checked_at_unix="1794948256.2580843",
         ntp_age_seconds="1.0",
     )
@@ -702,6 +705,9 @@ def test_history_keeps_existing_rows_unchanged(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        tick_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m1_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m5_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
         ntp_checked_at_unix="1794948256.2580843",
         ntp_age_seconds="1.0",
     )
@@ -927,6 +933,9 @@ def test_fsync_failure_rolls_back_archive_and_releases_lock(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        tick_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m1_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m5_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
         ntp_checked_at_unix="1794948256.2580843",
         ntp_age_seconds="1.0",
     )
@@ -973,6 +982,9 @@ def test_append_failure_releases_lock_and_preserves_archive(
         tick_time_epoch_raw="1794955456.659",
         m1_latest_closed_open_raw="1794955380",
         m5_latest_closed_open_raw="1794954900",
+        tick_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m1_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
+        m5_corrected_read_midpoint_utc="2026-11-17T20:44:17.330279+00:00",
         ntp_checked_at_unix="1794948256.2580843",
         ntp_age_seconds="1.0",
     )
