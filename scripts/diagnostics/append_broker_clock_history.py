@@ -217,7 +217,7 @@ def exclusive_file_lock(lock_path):
         # Windows byte-range locks require the target byte to exist.
         if os.fstat(descriptor).st_size == 0:
             os.lseek(descriptor, 0, os.SEEK_SET)
-            os.write(descriptor, b"\\0")
+            os.write(descriptor, b"\0")
             os.fsync(descriptor)
 
         while not locked:
@@ -253,7 +253,7 @@ def exclusive_file_lock(lock_path):
         # to decide ownership or recover stale locks; the OS lock is authority.
         os.ftruncate(descriptor, 0)
         os.lseek(descriptor, 0, os.SEEK_SET)
-        os.write(descriptor, f"pid={os.getpid()}\\n".encode("ascii"))
+        os.write(descriptor, f"pid={os.getpid()}\n".encode("ascii"))
         os.fsync(descriptor)
         yield
     finally:
