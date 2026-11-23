@@ -61,7 +61,8 @@ class FakeNtpVerificationMonitor:
 
 class FakeClockCalibrator:
     def __init__(self, *args, **kwargs):
-        pass
+        self.args = args
+        self.kwargs = kwargs
 
 
 class FakeMarketDataRepository:
@@ -279,6 +280,21 @@ def test_lifespan_starts_and_stops_configured_broker_offset_pipeline(
                 created["service"]
             )
             assert app.state.broker_offset_monitor is monitor
+
+            # All time-sensitive components must share one NTP verifier.
+            shared_verifier = (
+                app.state.ntp_verification_monitor.verifier
+            )
+            assert shared_verifier.requires_nts_quorum is True
+            assert (
+                app.state.broker_clock_calibrator.args[0]
+                is shared_verifier
+            )
+            assert (
+                app.state.broker_candle_clock_calibrator.args[0]
+                is shared_verifier
+            )
+            assert created["detector"].verifier is shared_verifier
 
             # التأكد من ربط السجل (Registry) بالـ Adapter والـ Service بشكل صحيح
             assert (
