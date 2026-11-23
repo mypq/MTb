@@ -1074,11 +1074,10 @@ def test_ntp_checked_at_must_be_a_valid_unix_timestamp(checked_at):
     [
         ("5", True),
         ("5.000001", True),
-        ("4.999999", True),
+        ("4.999999", False),
         ("4.999", False),
         ("15", True),
         ("15.000001", False),
-        ("4.999999", True),
         ("NaN", False),
         ("Infinity", False),
         ("-Infinity", False),
