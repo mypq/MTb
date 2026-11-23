@@ -653,27 +653,24 @@ def test_lock_initialization_failure_cleans_up_lock_file(
         with history_module.exclusive_file_lock(lock_path):
             pytest.fail("lock context must not be entered")
 
-    assert not lock_path.exists()
+    assert lock_path.exists()
 
 
-def test_lock_blocks_second_writer(tmp_path):
+def test_lock_blocks_second_writer(tmp_path, monkeypatch):
     lock_path = tmp_path / "history.csv.lock"
 
     with history_module.exclusive_file_lock(lock_path):
         assert lock_path.exists()
 
-        with pytest.raises(FileExistsError):
-            descriptor = os.open(
-                str(lock_path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-            os.close(descriptor)
+        monkeypatch.setattr(history_module, "LOCK_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(history_module, "LOCK_RETRY_SECONDS", 0.001)
+        with pytest.raises(TimeoutError):
+            with history_module.exclusive_file_lock(lock_path):
+                pass
 
 
 def test_lock_timeout_is_reported(tmp_path, monkeypatch):
     lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("held by another process", encoding="utf-8")
-
     monkeypatch.setattr(
         history_module, "LOCK_TIMEOUT_SECONDS", 0.01
     )
@@ -681,9 +678,10 @@ def test_lock_timeout_is_reported(tmp_path, monkeypatch):
         history_module, "LOCK_RETRY_SECONDS", 0.001
     )
 
-    with pytest.raises(TimeoutError):
-        with history_module.exclusive_file_lock(lock_path):
-            pass
+    with history_module.exclusive_file_lock(lock_path):
+        with pytest.raises(TimeoutError):
+            with history_module.exclusive_file_lock(lock_path):
+                pass
 
 
 def test_history_keeps_existing_rows_unchanged(
@@ -780,69 +778,40 @@ def test_ntp_observation_age_precision_tolerance(
 
 
 
-def test_lock_recovers_file_owned_by_dead_process(tmp_path, monkeypatch):
+def test_lock_recovers_stale_metadata_without_os_lock(tmp_path):
     lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("pid=424242\n", encoding="ascii")
-
-    def dead_process(pid):
-        assert pid == 424242
-        return False
-
-    monkeypatch.setattr(
-        history_module, "_process_is_running", dead_process
-    )
+    lock_path.write_text("pid=424242\\n", encoding="ascii")
 
     with history_module.exclusive_file_lock(lock_path):
         assert lock_path.read_text(encoding="ascii") == (
-            f"pid={os.getpid()}\n"
+            f"pid={os.getpid()}\\n"
         )
 
-    assert not lock_path.exists()
+    # The persistent lock inode remains, but the OS lock is released.
+    assert lock_path.exists()
+    with history_module.exclusive_file_lock(lock_path):
+        pass
 
 
-def test_lock_does_not_recover_file_owned_by_running_process(
-    tmp_path, monkeypatch
-):
-    lock_path = tmp_path / "history.csv.lock"
-    lock_path.write_text("pid=424242\n", encoding="ascii")
-
-    monkeypatch.setattr(
-        history_module, "_process_is_running", lambda pid: True
-    )
-    monkeypatch.setattr(
-        history_module, "LOCK_TIMEOUT_SECONDS", 0.01
-    )
-    monkeypatch.setattr(
-        history_module, "LOCK_RETRY_SECONDS", 0.001
-    )
-
-    with pytest.raises(TimeoutError):
-        with history_module.exclusive_file_lock(lock_path):
-            pass
-
-    assert lock_path.read_text(encoding="ascii") == "pid=424242\n"
-
-
-def test_lock_does_not_recover_unreadable_or_unknown_metadata(
-    tmp_path, monkeypatch
-):
+def test_lock_ignores_unknown_metadata_when_os_lock_is_free(tmp_path):
     lock_path = tmp_path / "history.csv.lock"
     lock_path.write_text("unknown owner metadata", encoding="ascii")
-    monkeypatch.setattr(
-        history_module, "LOCK_TIMEOUT_SECONDS", 0.01
-    )
-    monkeypatch.setattr(
-        history_module, "LOCK_RETRY_SECONDS", 0.001
-    )
 
-    with pytest.raises(TimeoutError):
+    with history_module.exclusive_file_lock(lock_path):
+        assert lock_path.read_text(encoding="ascii") == (
+            f"pid={os.getpid()}\\n"
+        )
+
+
+def test_lock_releases_after_exception(tmp_path):
+    lock_path = tmp_path / "history.csv.lock"
+
+    with pytest.raises(RuntimeError, match="simulated failure"):
         with history_module.exclusive_file_lock(lock_path):
-            pass
+            raise RuntimeError("simulated failure")
 
-    assert lock_path.read_text(encoding="ascii") == (
-        "unknown owner metadata"
-    )
-
+    with history_module.exclusive_file_lock(lock_path):
+        pass
 
 
 def test_rejects_duplicate_source_header_columns(tmp_path):
@@ -963,7 +932,9 @@ def test_fsync_failure_rolls_back_archive_and_releases_lock(
     assert fsync_calls == 3
     assert destination.read_bytes() == original_content
     assert len(read_history(destination)) == 3
-    assert not lock_path.exists()
+    assert lock_path.exists()
+    with history_module.exclusive_file_lock(lock_path):
+        pass
 
 
 def test_append_failure_releases_lock_and_preserves_archive(
@@ -1013,7 +984,9 @@ def test_append_failure_releases_lock_and_preserves_archive(
 
     assert destination.read_bytes() == original_content
     assert len(read_history(destination)) == 3
-    assert not lock_path.exists()
+    assert lock_path.exists()
+    with history_module.exclusive_file_lock(lock_path):
+        pass
 
 
 @pytest.mark.parametrize(
