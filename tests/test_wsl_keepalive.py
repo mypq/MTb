@@ -39,7 +39,7 @@ def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
         calls.append(args)
         if "systemctl" in args:
             return _completed("active\n")
-        if "echo $!" in args[5]:
+        if "echo $!" in args[4]:
             return _completed("281\n")
         return _completed()
 
@@ -65,7 +65,7 @@ def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
         "/bin/bash",
         "-c",
     ]
-    assert "exec -a" in calls[0][5]
+    assert "exec -a" in calls[0][4]
     assert "giant_goldbot_wsl_keepalive_testmarker" in calls[0]
     assert calls[1][2:5] == [
         "systemctl",
@@ -91,8 +91,8 @@ def test_wsl_keepalive_stop_signals_only_its_marked_linux_pid():
 
     command = run.call_args.args[0]
     assert command[:4] == ["wsl.exe", "--exec", "/bin/bash", "-c"]
-    assert "kill -TERM" in command[5]
-    assert "case \"$actual\"" in command[5]
+    assert "kill -TERM" in command[4]
+    assert "case \"$actual\"" in command[4]
     assert "giant_goldbot_wsl_keepalive_testmarker" in command
     assert manager.is_running is False
 
@@ -112,7 +112,7 @@ def test_wsl_keepalive_stop_does_not_signal_pid_with_different_marker():
     ) as run:
         manager.stop()
 
-    script = run.call_args.args[0][5]
+    script = run.call_args.args[0][4]
     assert 'case "$actual"' in script
     assert "kill -TERM" in script
     assert "giant_goldbot_wsl_keepalive_owned" in run.call_args.args[0]
@@ -125,7 +125,7 @@ def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_session():
     )
 
     def run(args, **kwargs):
-        if "echo $!" in args[5]:
+        if "echo $!" in args[4]:
             return _completed("281\n")
         if "systemctl" in args:
             return _completed("inactive\n", returncode=3)
