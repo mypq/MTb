@@ -182,11 +182,15 @@ class MarketDataClockEvidence(BaseModel):
         cls,
         value: tuple[str, ...],
     ) -> tuple[str, ...]:
-        servers = tuple(
-            server.strip().lower()
+        if any(
+            not isinstance(server, str) or not server.strip()
             for server in value
-            if isinstance(server, str) and server.strip()
-        )
+        ):
+            raise ValueError(
+                "Every NTP server must be a non-empty string."
+            )
+
+        servers = tuple(server.strip().lower() for server in value)
 
         if len(servers) < 3:
             raise ValueError(
