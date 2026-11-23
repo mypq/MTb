@@ -5,6 +5,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -124,12 +125,12 @@ class BrokerQuoteRecord(DatabaseBase):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
-    broker_time_msc: Mapped[int] = mapped_column(Integer, nullable=False)
+    broker_time_msc: Mapped[int] = mapped_column(BigInteger, nullable=False)
     received_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    received_monotonic_ns: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_monotonic_ns: Mapped[int] = mapped_column(BigInteger, nullable=False)
     bid: Mapped[float] = mapped_column(Float, nullable=False)
     ask: Mapped[float] = mapped_column(Float, nullable=False)
-    account_login: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_login: Mapped[int] = mapped_column(BigInteger, nullable=False)
     broker_server: Mapped[str] = mapped_column(String(128), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
 
