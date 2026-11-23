@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import time
@@ -7,7 +8,21 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_broker_clock_history import history_module
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATH = (
+    PROJECT_ROOT
+    / "scripts"
+    / "diagnostics"
+    / "append_broker_clock_history.py"
+)
+spec = importlib.util.spec_from_file_location(
+    "append_broker_clock_history_process_test",
+    SCRIPT_PATH,
+)
+history_module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = history_module
+spec.loader.exec_module(history_module)
 
 
 def test_os_lock_blocks_a_separate_process_and_releases_after_exit(
@@ -16,12 +31,6 @@ def test_os_lock_blocks_a_separate_process_and_releases_after_exit(
     lock_path = tmp_path / "history.csv.lock"
     ready_path = tmp_path / "child-ready.txt"
     release_path = tmp_path / "child-release.txt"
-    script_path = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "diagnostics"
-        / "append_broker_clock_history.py"
-    )
 
     child_code = """
 import runpy
@@ -49,7 +58,7 @@ with lock(lock_path):
             sys.executable,
             "-c",
             child_code,
-            str(script_path),
+            str(SCRIPT_PATH),
             str(lock_path),
             str(ready_path),
             str(release_path),
