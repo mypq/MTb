@@ -195,130 +195,79 @@ def observation_key(row):
     )
 
 
-def _process_is_running(pid):
-    """Return True/False when the OS can determine whether a PID exists."""
-    if os.name == "nt":
-        import ctypes
-        from ctypes import wintypes
-
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        STILL_ACTIVE = 259
-        ERROR_INVALID_PARAMETER = 87
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        open_process = kernel32.OpenProcess
-        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        open_process.restype = wintypes.HANDLE
-        get_exit_code = kernel32.GetExitCodeProcess
-        get_exit_code.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-        get_exit_code.restype = wintypes.BOOL
-        close_handle = kernel32.CloseHandle
-        close_handle.argtypes = (wintypes.HANDLE,)
-        close_handle.restype = wintypes.BOOL
-
-        handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-        if not handle:
-            error = ctypes.get_last_error()
-            if error == ERROR_INVALID_PARAMETER:
-                return False
-            if error == 5:  # Access denied: process may exist; fail closed.
-                return True
-            return None
-
-        try:
-            exit_code = wintypes.DWORD()
-            if not get_exit_code(handle, ctypes.byref(exit_code)):
-                return None
-            return exit_code.value == STILL_ACTIVE
-        finally:
-            close_handle(handle)
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError as exc:
-        if exc.errno == errno.ESRCH:
-            return False
-        if exc.errno == errno.EPERM:
-            return True
-        return None
-
-    return True
-
-
-def _lock_owner_is_running(lock_path):
-    """Return True/False when the recorded owner PID can be checked.
-
-    Unknown or malformed lock metadata is treated conservatively as active.
-    """
-    try:
-        metadata = lock_path.read_text(encoding="ascii").strip()
-    except (OSError, UnicodeError):
-        return None
-
-    if not metadata.startswith("pid="):
-        return None
-
-    try:
-        pid = int(metadata[4:])
-    except ValueError:
-        return None
-
-    if pid <= 0:
-        return None
-
-    return _process_is_running(pid)
-
 @contextmanager
 def exclusive_file_lock(lock_path):
-    """Cross-process lock using atomic file creation and dead-owner recovery."""
+    """Acquire a cross-process OS lock; the lock file is persistent.
+
+    The operating system releases the lock automatically when a process exits.
+    Keeping the inode in place avoids the unlink/recreate race that can let two
+    writers lock different files under the same pathname.
+    """
     lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
-    descriptor = None
-
-    while descriptor is None:
-        try:
-            descriptor = os.open(
-                str(lock_path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-        except FileExistsError:
-            # Recover only when the operating system confirms the recorded
-            # owner process no longer exists. Unknown metadata fails closed.
-            if _lock_owner_is_running(lock_path) is False:
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"Timed out waiting for archive lock: {lock_path}"
-                )
-            time.sleep(LOCK_RETRY_SECONDS)
+    descriptor = os.open(
+        str(lock_path),
+        os.O_CREAT | os.O_RDWR,
+        0o666,
+    )
+    locked = False
 
     try:
-        os.write(
-            descriptor,
-            f"pid={os.getpid()}\n".encode("ascii"),
-        )
+        # Windows byte-range locks require the target byte to exist.
+        if os.fstat(descriptor).st_size == 0:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, b"\\0")
+            os.fsync(descriptor)
+
+        while not locked:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as exc:
+                lock_busy = (
+                    exc.errno in {
+                        errno.EACCES,
+                        errno.EAGAIN,
+                        errno.EDEADLK,
+                        errno.EWOULDBLOCK,
+                    }
+                )
+                if not lock_busy:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Timed out waiting for archive lock: {lock_path}"
+                    ) from exc
+                time.sleep(LOCK_RETRY_SECONDS)
+
+        # Preserve readable owner metadata for diagnostics. It is not used
+        # to decide ownership or recover stale locks; the OS lock is authority.
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, f"pid={os.getpid()}\\n".encode("ascii"))
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
         yield
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        if locked:
+            if os.name == "nt":
+                import msvcrt
 
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
 
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 def load_existing_keys(destination):
     if not destination.exists() or destination.stat().st_size == 0:
