@@ -651,10 +651,13 @@ def main():
 
     try:
         source_rows = read_source_rows(source)
+    except UnicodeError as exc:
+        print(f"ERROR: cannot read input: {exc}")
+        return 4
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 3
-    except (OSError, UnicodeError, csv.Error) as exc:
+    except (OSError, csv.Error) as exc:
         print(f"ERROR: cannot read input: {exc}")
         return 4
 
@@ -678,6 +681,9 @@ def main():
             destination,
             observations,
         )
+    except UnicodeError as exc:
+        print(f"ERROR: cannot append history: {exc}")
+        return 8
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 6
