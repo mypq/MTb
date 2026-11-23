@@ -487,3 +487,142 @@ def test_multi_timeframe_collection_rejects_duplicate_frames():
             timeframes=("M5", "m5"),
             clock_calibrator=object(),
         )
+
+
+def test_multi_timeframe_scheduler_waits_for_trusted_clock_without_utc_fallback(
+    monkeypatch,
+):
+    service = FakeMarketDataService(snapshot=make_snapshot())
+    repository = FakeMarketDataRepository()
+
+    class UntrustedClockCalibrator:
+        def trusted_evidence(self):
+            return (
+                SimpleNamespace(status="UNVERIFIED", offset_seconds=7200),
+                None,
+            )
+
+    collector = MarketDataCollector(
+        service,
+        repository,
+        symbol="XAUUSD",
+        timeframe="M5",
+        timeframes=("M5", "H1"),
+        clock_calibrator=UntrustedClockCalibrator(),
+    )
+    stop_event = asyncio.Event()
+    scheduled = []
+
+    async def fake_to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    def fake_next_collection_time(**kwargs):
+        scheduled.append(kwargs)
+        return datetime.now(timezone.utc) + timedelta(hours=1)
+
+    async def fake_wait_for(awaitable, *, timeout):
+        assert timeout == 5.0
+        awaitable.close()
+        stop_event.set()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.to_thread",
+        fake_to_thread,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.next_collection_time",
+        fake_next_collection_time,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.wait_for",
+        fake_wait_for,
+    )
+
+    asyncio.run(collector.run(stop_event))
+
+    # Initial history is collected, but no recurring deadline is created
+    # from UTC when trusted broker-clock evidence is unavailable.
+    assert [request["timeframe"] for request in service.requests] == [
+        "M5",
+        "H1",
+    ]
+    assert len(repository.saved_snapshots) == 2
+    assert scheduled == []
+
+
+def test_multi_timeframe_scheduler_rebuilds_all_deadlines_after_offset_change(
+    monkeypatch,
+):
+    service = FakeMarketDataService(snapshot=make_snapshot())
+    repository = FakeMarketDataRepository()
+
+    class VerifiedClockCalibrator:
+        def trusted_evidence(self):
+            return (
+                SimpleNamespace(status="VERIFIED", offset_seconds=7200),
+                object(),
+            )
+
+    collector = MarketDataCollector(
+        service,
+        repository,
+        symbol="XAUUSD",
+        timeframe="M5",
+        timeframes=("M5", "H1"),
+        clock_calibrator=VerifiedClockCalibrator(),
+    )
+    offsets = iter((7200.0, 7200.0, 7201.0))
+    monkeypatch.setattr(
+        collector,
+        "_verified_alignment_offset",
+        lambda: next(offsets),
+    )
+
+    stop_event = asyncio.Event()
+    scheduled = []
+    wait_count = 0
+
+    async def fake_to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    def fake_next_collection_time(
+        *,
+        timeframe_seconds,
+        alignment_offset_seconds,
+        **kwargs,
+    ):
+        scheduled.append((timeframe_seconds, alignment_offset_seconds))
+        return datetime.now(timezone.utc) + timedelta(hours=1)
+
+    async def fake_wait_for(awaitable, *, timeout):
+        nonlocal wait_count
+        wait_count += 1
+        awaitable.close()
+        if wait_count == 2:
+            stop_event.set()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.to_thread",
+        fake_to_thread,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.next_collection_time",
+        fake_next_collection_time,
+    )
+    monkeypatch.setattr(
+        "backend.market_data.collector.asyncio.wait_for",
+        fake_wait_for,
+    )
+
+    asyncio.run(collector.run(stop_event))
+
+    assert scheduled == [
+        (300, 7200.0),
+        (3600, 7200.0),
+        (300, 7201.0),
+        (3600, 7201.0),
+    ]
+    assert wait_count == 2
+    assert len(repository.saved_snapshots) == 2
