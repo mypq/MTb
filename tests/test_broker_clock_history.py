@@ -885,6 +885,52 @@ def test_rejects_malformed_history_csv(tmp_path):
         history_module.load_existing_keys(destination)
 
 
+def test_fsync_failure_rolls_back_archive_and_releases_lock(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "history.csv"
+    lock_path = destination.with_name(destination.name + ".lock")
+    first_observations, _ = history_module.build_observations(
+        [valid_source_row()], "evidence.csv"
+    )
+    history_module.append_observations(destination, first_observations)
+    original_content = destination.read_bytes()
+
+    second_row = valid_source_row(
+        cycle_end_local_utc="2026-11-17T20:44:17.258084+00:00",
+        tick_time_epoch_raw="1794955456.659",
+        m1_latest_closed_open_raw="1794955380",
+        m5_latest_closed_open_raw="1794954900",
+        ntp_checked_at_unix="1794948256.2580843",
+        ntp_age_seconds="1.0",
+    )
+    second_observations, _ = history_module.build_observations(
+        [second_row], "evidence.csv"
+    )
+
+    real_fsync = os.fsync
+    fsync_calls = 0
+
+    def fail_archive_fsync(descriptor):
+        nonlocal fsync_calls
+        fsync_calls += 1
+        if fsync_calls == 2:
+            raise OSError("simulated archive fsync failure")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(history_module.os, "fsync", fail_archive_fsync)
+
+    with pytest.raises(OSError, match="simulated archive fsync failure"):
+        history_module.append_observations(
+            destination, second_observations
+        )
+
+    assert fsync_calls == 3
+    assert destination.read_bytes() == original_content
+    assert len(read_history(destination)) == 3
+    assert not lock_path.exists()
+
+
 def test_append_failure_releases_lock_and_preserves_archive(
     tmp_path, monkeypatch
 ):
