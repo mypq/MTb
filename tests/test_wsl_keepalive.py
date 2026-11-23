@@ -15,6 +15,45 @@ def _completed(stdout="", returncode=0, stderr=""):
     )
 
 
+class _FakeProcess:
+    def __init__(self, *, initial_returncode=None):
+        self.returncode = initial_returncode
+        self.wait_calls = []
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        self.returncode = 15
+        return self.returncode
+
+
+def _windows_patches(*, run_side_effect=None, run_return=None, popen=None):
+    return (
+        patch(
+            "backend.market_data.wsl_keepalive.platform.system",
+            return_value="Windows",
+        ),
+        patch(
+            "backend.market_data.wsl_keepalive.shutil.which",
+            return_value="wsl.exe",
+        ),
+        patch(
+            "backend.market_data.wsl_keepalive.uuid.uuid4",
+        ),
+        patch(
+            "backend.market_data.wsl_keepalive.subprocess.Popen",
+            return_value=popen,
+        ),
+        patch(
+            "backend.market_data.wsl_keepalive.subprocess.run",
+            side_effect=run_side_effect,
+            return_value=run_return,
+        ),
+    )
+
+
 def test_wsl_keepalive_is_a_noop_outside_windows():
     manager = WslChronyKeepalive()
 
@@ -23,63 +62,57 @@ def test_wsl_keepalive_is_a_noop_outside_windows():
         return_value="Linux",
     ), patch(
         "backend.market_data.wsl_keepalive.subprocess.run",
-    ) as run:
+    ) as run, patch(
+        "backend.market_data.wsl_keepalive.subprocess.Popen",
+    ) as popen:
         manager.start()
         manager.stop()
 
     run.assert_not_called()
+    popen.assert_not_called()
     assert manager.is_running is False
 
 
-def test_wsl_keepalive_starts_unique_linux_process_and_waits_for_chrony():
+def test_wsl_keepalive_starts_attached_process_and_waits_for_chrony():
     manager = WslChronyKeepalive()
+    process = _FakeProcess()
     calls = []
-    timeouts = []
 
     def run(args, **kwargs):
         calls.append(args)
-        timeouts.append(kwargs.get("timeout"))
         if "systemctl" in args:
-            return _completed("active\n")
-        if "echo $!" in args[4]:
-            return _completed("281\n")
+            return _completed("active\\n")
+        if "pid_file=" in args[4]:
+            return _completed("281\\n")
         return _completed()
 
-    with patch(
-        "backend.market_data.wsl_keepalive.platform.system",
-        return_value="Windows",
-    ), patch(
-        "backend.market_data.wsl_keepalive.shutil.which",
-        return_value="wsl.exe",
-    ), patch(
-        "backend.market_data.wsl_keepalive.uuid.uuid4",
-    ) as uuid4, patch(
-        "backend.market_data.wsl_keepalive.subprocess.run",
-        side_effect=run,
-    ):
+    platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
+        _windows_patches(run_side_effect=run, popen=process)
+    )
+    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch as popen, run_patch:
         uuid4.return_value.hex = "testmarker"
         manager.start()
 
     assert manager.is_running is True
-    assert timeouts[0] == 30.0
-    assert calls[0][:4] == [
-        "wsl.exe",
-        "--exec",
-        "/bin/bash",
-        "-c",
-    ]
-    assert "exec -a" in calls[0][4]
-    assert "giant_goldbot_wsl_keepalive_testmarker" in calls[0]
-    assert calls[2][2:5] == [
-        "systemctl",
-        "is-active",
-        "chrony",
-    ]
+    popen.assert_called_once()
+    args = popen.call_args.args[0]
+    kwargs = popen.call_args.kwargs
+    assert args[:4] == ["wsl.exe", "--exec", "/bin/bash", "-c"]
+    assert 'echo "$$" > "/tmp/$1.pid"' in args[4]
+    assert "exec -a" in args[4]
+    assert "giant_goldbot_wsl_keepalive_testmarker" in args
+    assert kwargs["stdin"] is not None
+    assert kwargs["stdout"] is not None
+    assert kwargs["stderr"] is not None
+    assert calls[0][2:4] == ["/bin/bash", "-c"]
+    assert calls[1][2:5] == ["systemctl", "is-active", "chrony"]
 
 
-def test_wsl_keepalive_stop_signals_only_its_marked_linux_pid():
+def test_wsl_keepalive_stop_signals_only_its_marked_linux_pid_and_waits():
     manager = WslChronyKeepalive()
+    process = _FakeProcess()
     manager._executable = "wsl.exe"
+    manager._process = process
     manager._pid = 281
     manager._marker = "giant_goldbot_wsl_keepalive_testmarker"
 
@@ -93,16 +126,20 @@ def test_wsl_keepalive_stop_signals_only_its_marked_linux_pid():
         manager.stop()
 
     command = run.call_args.args[0]
+    script = command[4]
     assert command[:4] == ["wsl.exe", "--exec", "/bin/bash", "-c"]
-    assert "kill -TERM" in command[4]
-    assert "case \"$actual\"" in command[4]
+    assert 'case "$actual"' in script
+    assert "kill -TERM" in script
     assert "giant_goldbot_wsl_keepalive_testmarker" in command
+    assert process.wait_calls == [8.0]
     assert manager.is_running is False
 
 
-def test_wsl_keepalive_stop_does_not_signal_pid_with_different_marker():
+def test_wsl_keepalive_stop_does_not_run_when_managed_wsl_process_already_exited():
     manager = WslChronyKeepalive()
+    process = _FakeProcess(initial_returncode=15)
     manager._executable = "wsl.exe"
+    manager._process = process
     manager._pid = 281
     manager._marker = "giant_goldbot_wsl_keepalive_owned"
 
@@ -111,45 +148,53 @@ def test_wsl_keepalive_stop_does_not_signal_pid_with_different_marker():
         return_value="Windows",
     ), patch(
         "backend.market_data.wsl_keepalive.subprocess.run",
-        return_value=_completed(),
     ) as run:
         manager.stop()
 
-    script = run.call_args.args[0][4]
-    assert 'case "$actual"' in script
-    assert "kill -TERM" in script
-    assert "giant_goldbot_wsl_keepalive_owned" in run.call_args.args[0]
+    run.assert_not_called()
+    assert manager.is_running is False
 
 
-def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_session():
+def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_process():
     manager = WslChronyKeepalive(
         startup_timeout_seconds=0.01,
         poll_interval_seconds=0.001,
     )
+    process = _FakeProcess()
 
     def run(args, **kwargs):
-        if "echo $!" in args[4]:
-            return _completed("281\n")
         if "systemctl" in args:
-            return _completed("inactive\n", returncode=3)
+            return _completed("inactive\\n", returncode=3)
+        if "pid_file=" in args[4]:
+            return _completed("281\\n")
         return _completed()
 
-    with patch(
-        "backend.market_data.wsl_keepalive.platform.system",
-        return_value="Windows",
-    ), patch(
-        "backend.market_data.wsl_keepalive.shutil.which",
-        return_value="wsl.exe",
-    ), patch(
-        "backend.market_data.wsl_keepalive.uuid.uuid4",
-    ) as uuid4, patch(
-        "backend.market_data.wsl_keepalive.subprocess.run",
-        side_effect=run,
-    ), patch(
+    platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
+        _windows_patches(run_side_effect=run, popen=process)
+    )
+    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch, run_patch, patch(
         "backend.market_data.wsl_keepalive.time.sleep",
     ):
         uuid4.return_value.hex = "timeoutmarker"
-        with pytest.raises(TimeoutError, match="Chrony did not become active"):
+        with pytest.raises(TimeoutError, match="active Chrony service"):
             manager.start()
 
     assert manager.is_running is True
+    assert manager._pid == 281
+    assert process.poll() is None
+
+
+def test_wsl_keepalive_detects_managed_wsl_process_exiting_during_start():
+    manager = WslChronyKeepalive()
+    process = _FakeProcess(initial_returncode=15)
+
+    platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
+        _windows_patches(popen=process)
+    )
+    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch, run_patch as run:
+        uuid4.return_value.hex = "exitmarker"
+        with pytest.raises(RuntimeError, match="exited before keepalive readiness"):
+            manager.start()
+
+    run.assert_not_called()
+    assert manager.is_running is False
