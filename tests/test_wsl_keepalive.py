@@ -81,9 +81,9 @@ def test_wsl_keepalive_starts_attached_process_and_waits_for_chrony():
     def run(args, **kwargs):
         calls.append(args)
         if "systemctl" in args:
-            return _completed("active\\n")
+            return _completed("active\n")
         if "pid_file=" in args[4]:
-            return _completed("281\\n")
+            return _completed("281\n")
         return _completed()
 
     platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
@@ -164,9 +164,9 @@ def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_process():
 
     def run(args, **kwargs):
         if "systemctl" in args:
-            return _completed("inactive\\n", returncode=3)
+            return _completed("inactive\n", returncode=3)
         if "pid_file=" in args[4]:
-            return _completed("281\\n")
+            return _completed("281\n")
         return _completed()
 
     platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
