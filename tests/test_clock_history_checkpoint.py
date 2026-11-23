@@ -144,3 +144,103 @@ def test_failed_atomic_replace_preserves_previous_checkpoint(
     assert not list(
         tmp_path.glob(".checkpoint.json.*.tmp")
     )
+
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "file_device",
+        "file_inode",
+        "offset",
+        "file_size",
+        "file_mtime_ns",
+        "samples_processed",
+    ],
+)
+@pytest.mark.parametrize("invalid", [True, 1.5, "1"])
+def test_checkpoint_numeric_fields_must_be_integers(field, invalid):
+    values = {
+        "file_device": 10,
+        "file_inode": 20,
+        "offset": 256,
+        "file_size": 512,
+        "file_mtime_ns": 123456789,
+        "samples_processed": 3,
+        "last_by_run": {},
+    }
+    values[field] = invalid
+
+    with pytest.raises(
+        ClockHistoryCheckpointError,
+        match="must be integers",
+    ):
+        ClockHistoryCheckpoint(**values)
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        "not-a-hash",
+        "a" * 63,
+        "g" * 64,
+        "a" * 65,
+    ],
+)
+def test_invalid_checkpoint_prefix_digest_is_rejected(digest):
+    with pytest.raises(
+        ClockHistoryCheckpointError,
+        match="64 hexadecimal",
+    ):
+        ClockHistoryCheckpoint(
+            file_device=10,
+            file_inode=20,
+            offset=256,
+            file_size=512,
+            file_mtime_ns=123456789,
+            samples_processed=3,
+            last_by_run={},
+            prefix_sha256=digest,
+        )
+
+
+def test_empty_checkpoint_prefix_digest_remains_supported():
+    checkpoint = make_checkpoint()
+    assert checkpoint.prefix_sha256 == ""
+
+
+def test_boolean_checkpoint_version_is_rejected(tmp_path):
+    path = tmp_path / "checkpoint.json"
+    path.write_text(
+        json.dumps({
+            "version": True,
+            "checkpoint": {},
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ClockHistoryCheckpointError, match="version"):
+        ClockHistoryCheckpointStore(path).load()
+
+
+@pytest.mark.parametrize(
+    "last_by_run",
+    [
+        {1: {}},
+        {"run-a": []},
+    ],
+)
+def test_invalid_last_by_run_entries_are_rejected(last_by_run):
+    with pytest.raises(
+        ClockHistoryCheckpointError,
+        match="keyed by run ID",
+    ):
+        ClockHistoryCheckpoint(
+            file_device=10,
+            file_inode=20,
+            offset=256,
+            file_size=512,
+            file_mtime_ns=123456789,
+            samples_processed=3,
+            last_by_run=last_by_run,
+        )

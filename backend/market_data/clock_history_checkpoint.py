@@ -29,14 +29,23 @@ class ClockHistoryCheckpoint:
     prefix_sha256: str = ""
 
     def __post_init__(self) -> None:
-        if min(
+        numeric_fields = (
             self.file_device,
             self.file_inode,
             self.offset,
             self.file_size,
             self.file_mtime_ns,
             self.samples_processed,
-        ) < 0:
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in numeric_fields
+        ):
+            raise ClockHistoryCheckpointError(
+                "Checkpoint numeric fields must be integers."
+            )
+
+        if min(numeric_fields) < 0:
             raise ClockHistoryCheckpointError(
                 "Checkpoint numeric fields cannot be negative."
             )
@@ -49,6 +58,31 @@ class ClockHistoryCheckpoint:
         if not isinstance(self.last_by_run, dict):
             raise ClockHistoryCheckpointError(
                 "Checkpoint last_by_run must be an object."
+            )
+
+        if any(
+            not isinstance(run_id, str)
+            or not isinstance(sample, dict)
+            for run_id, sample in self.last_by_run.items()
+        ):
+            raise ClockHistoryCheckpointError(
+                "Checkpoint last_by_run entries must be objects keyed by run ID."
+            )
+
+        if not isinstance(self.prefix_sha256, str):
+            raise ClockHistoryCheckpointError(
+                "Checkpoint prefix SHA-256 must be a string."
+            )
+
+        if self.prefix_sha256 and (
+            len(self.prefix_sha256) != 64
+            or any(
+                character not in "0123456789abcdefABCDEF"
+                for character in self.prefix_sha256
+            )
+        ):
+            raise ClockHistoryCheckpointError(
+                "Checkpoint prefix SHA-256 must contain exactly 64 hexadecimal characters."
             )
 
 
@@ -76,7 +110,10 @@ class ClockHistoryCheckpointStore:
                 "Checkpoint root must be an object."
             )
 
-        if payload.get("version") != CHECKPOINT_VERSION:
+        if (
+            isinstance(payload.get("version"), bool)
+            or payload.get("version") != CHECKPOINT_VERSION
+        ):
             raise ClockHistoryCheckpointError(
                 "Unsupported checkpoint version."
             )
