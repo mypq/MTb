@@ -16,6 +16,7 @@ from backend.market_data.capabilities import CapabilityRegistry
 from backend.market_data.mt5_capability_probe import MT5CapabilityProbe
 from backend.market_data.ntp_monitor import NtpVerificationMonitor
 from backend.market_data.ntp_time import NtpTimeVerifier
+from backend.market_data.wsl_keepalive import WslChronyKeepalive
 from backend.market_data.repository import (
     MarketDataPersistenceConflict,
     MarketDataRepository,
@@ -294,6 +295,7 @@ async def lifespan(app: FastAPI):
     broker_tick_worker = None
 
     chrony_service = ChronyStatusService()
+    wsl_chrony_keepalive = WslChronyKeepalive()
 
     ntp_verifier = NtpTimeVerifier(
         nts_authentication_check=(
@@ -473,6 +475,7 @@ async def lifespan(app: FastAPI):
     app.state.market_data_capability_registry = capability_registry
     app.state.market_data_collector = None
     app.state.chrony_status_service = chrony_service
+    app.state.wsl_chrony_keepalive = wsl_chrony_keepalive
     app.state.ntp_verification_monitor = ntp_verification_monitor
     app.state.broker_clock_calibrator = broker_clock_calibrator
     app.state.broker_candle_clock_calibrator = (
@@ -484,6 +487,14 @@ async def lifespan(app: FastAPI):
     app.state.database_backup_service = None
 
     try:
+        try:
+            await asyncio.to_thread(wsl_chrony_keepalive.start)
+        except Exception:
+            logger.exception(
+                "WSL Chrony keepalive could not confirm Chrony readiness; "
+                "NTP verification will remain fail-closed and retry."
+            )
+
         database.initialize()
         upgrade_database()
 
@@ -819,6 +830,13 @@ async def lifespan(app: FastAPI):
                 )
 
         finally:
+            try:
+                await asyncio.to_thread(wsl_chrony_keepalive.stop)
+            except Exception:
+                logger.exception(
+                    "Failed to stop the WSL Chrony keepalive process."
+                )
+
             try:
                 database.dispose()
             except Exception:
