@@ -795,11 +795,15 @@ def test_rejects_duplicate_source_header_columns(tmp_path):
         history_module.read_source_rows(source)
 
 
+
 def test_rejects_source_row_with_missing_cells(tmp_path):
     source = tmp_path / "evidence.csv"
-    write_source_csv(source, [valid_source_row()])
-    lines = source.read_text(encoding="utf-8").splitlines()
-    source.write_text("\\n".join([lines[0], ";".join(lines[1].split(";")[:-1])]) + "\\n", encoding="utf-8")
+    fields = list(SOURCE_FIELDS)
+    row = valid_source_row()
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(fields)
+        writer.writerow([row.get(field, "") for field in fields[:-1]])
 
     with pytest.raises(ValueError, match="row shape"):
         history_module.read_source_rows(source)
@@ -807,10 +811,10 @@ def test_rejects_source_row_with_missing_cells(tmp_path):
 
 def test_rejects_malformed_quoted_source_csv(tmp_path):
     source = tmp_path / "evidence.csv"
-    source.write_text(
-        ";".join(SOURCE_FIELDS) + "\\n" + '"unterminated' + "\\n",
-        encoding="utf-8",
-    )
+    with source.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(SOURCE_FIELDS)
+        handle.write('"unterminated')
 
     with pytest.raises(csv.Error):
         history_module.read_source_rows(source)
@@ -821,7 +825,7 @@ def test_rejects_invalid_utf8_source_as_controlled_exit(
 ):
     source = tmp_path / "evidence.csv"
     output = tmp_path / "history.csv"
-    source.write_bytes(b"\\xff\\xfe")
+    source.write_bytes(bytes([0xFF, 0xFE]))
 
     result, stdout = run_archiver(
         monkeypatch, source, output, capsys
@@ -845,10 +849,10 @@ def test_rejects_history_row_with_missing_cells(tmp_path):
 
 def test_rejects_malformed_history_csv(tmp_path):
     destination = tmp_path / "history.csv"
-    destination.write_text(
-        ",".join(HISTORY_FIELDS) + "\\n" + '"unterminated' + "\\n",
-        encoding="utf-8",
-    )
+    with destination.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(HISTORY_FIELDS)
+        handle.write('"unterminated')
 
     with pytest.raises(csv.Error):
         history_module.load_existing_keys(destination)
