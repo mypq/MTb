@@ -1117,3 +1117,50 @@ def test_ntp_observation_rejects_invalid_reported_age(reported_age):
     assert history_module.valid_ntp_at_observation(
         row, observed_at
     ) is False
+
+
+@pytest.mark.parametrize(
+    "raw_field, difference_field, evidence_kind",
+    [
+        (
+            "tick_time_epoch_raw",
+            "tick_minus_corrected_utc_seconds",
+            "tick",
+        ),
+        (
+            "m1_latest_closed_open_raw",
+            "m1_latest_closed_open_minus_corrected_utc_seconds",
+            "m1_closed_candle",
+        ),
+        (
+            "m5_latest_closed_open_raw",
+            "m5_latest_closed_open_minus_corrected_utc_seconds",
+            "m5_closed_candle",
+        ),
+    ],
+)
+def test_closed_stream_offset_must_match_raw_timestamp_and_midpoint(
+    raw_field, difference_field, evidence_kind
+):
+    row = valid_source_row(**{difference_field: "0"})
+
+    observations, stats = history_module.build_observations(
+        [row], "evidence.csv"
+    )
+
+    assert evidence_kind not in {
+        item["evidence_kind"] for item in observations
+    }
+    assert len(observations) == 2
+    assert stats["rejected_numeric"] == 1
+
+
+def test_closed_stream_offset_accepts_iso_microsecond_rounding():
+    observations, stats = history_module.build_observations(
+        [valid_source_row()], "evidence.csv"
+    )
+
+    assert {
+        item["evidence_kind"] for item in observations
+    } == {"tick", "m1_closed_candle", "m5_closed_candle"}
+    assert stats["rejected_numeric"] == 0
