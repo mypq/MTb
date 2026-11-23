@@ -73,7 +73,7 @@ class WslChronyKeepalive:
                     executable,
                     launch_script,
                     marker,
-                    timeout=10.0,
+                    timeout=30.0,
                 )
                 if launched.returncode != 0:
                     raise RuntimeError(
