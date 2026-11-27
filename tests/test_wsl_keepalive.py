@@ -199,7 +199,7 @@ def test_wsl_keepalive_retries_readiness_on_same_managed_process():
                 returncode=4,
                 stderr="CHRONY_STATE=inactive",
             )
-        return _completed("281\\n")
+        return _completed("281\n")
 
     platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
         _windows_patches(run_side_effect=run, popen=process)
