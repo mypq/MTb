@@ -234,7 +234,7 @@ def test_wsl_keepalive_restarts_after_managed_process_exits():
 
     def run(args, **kwargs):
         readiness_calls.append(args)
-        return _completed("281\\n" if len(readiness_calls) == 1 else "282\\n")
+        return _completed("281\n" if len(readiness_calls) == 1 else "282\n")
 
     with patch(
         "backend.market_data.wsl_keepalive.platform.system",
