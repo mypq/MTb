@@ -267,6 +267,6 @@ class WslChronyKeepalive:
                 self._marker = None
 
         logger.info(
-            "Managed WSL keepalive process %s stopped; WSL and Chrony were not terminated.",
+            "Managed WSL keepalive process %s stopped; WSL may shut down when no other Linux processes remain.",
             pid,
         )
