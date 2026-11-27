@@ -242,21 +242,20 @@ class NtpTimeVerifier:
             )
         server_address = addresses[0][4]
 
-        t1, monotonic_t1 = self._read_clock_pair()
-
-        packet = bytearray(NTP_PACKET_SIZE)
-        packet[0] = 0x23
-        packet[40:48] = self._encode_timestamp(t1)
-
-        # Connect to the resolved numeric endpoint. This preserves the
-        # connected-socket source filter without performing DNS inside
-        # the NTP request's measured interval.
+        # Connect before taking the NTP transmit timestamp so socket setup
+        # is excluded from both the NTP exchange and its measured interval.
         with socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM,
         ) as client:
             client.settimeout(self._timeout_seconds)
             client.connect(server_address)
+
+            t1, monotonic_t1 = self._read_clock_pair()
+            packet = bytearray(NTP_PACKET_SIZE)
+            packet[0] = 0x23
+            packet[40:48] = self._encode_timestamp(t1)
+
             performance_t1 = time.perf_counter()
             client.send(packet)
             response = client.recv(512)
