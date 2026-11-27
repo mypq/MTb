@@ -48,6 +48,18 @@ def valid_samples():
             round_trip_seconds=0.12,
             root_dispersion_seconds=0.01,
         ),
+        "time.nist.gov": NtpSample(
+            server="time.nist.gov",
+            offset_seconds=0.05,
+            round_trip_seconds=0.09,
+            root_dispersion_seconds=0.01,
+        ),
+        "time.windows.com": NtpSample(
+            server="time.windows.com",
+            offset_seconds=0.06,
+            round_trip_seconds=0.11,
+            root_dispersion_seconds=0.01,
+        ),
     }
 
 
@@ -128,7 +140,7 @@ def test_verification_requires_three_valid_samples():
     result = verifier.verify()
 
     assert result.verified is True
-    assert result.sample_count == 3
+    assert result.sample_count == 5
     assert result.offset_seconds == pytest.approx(0.05)
     assert verifier.is_trusted() is True
 
@@ -174,10 +186,39 @@ def test_offset_above_one_second_is_rejected():
     assert verifier.verify().verified is False
 
 
+def test_one_unavailable_ntp_server_is_tolerated_with_four_valid_samples():
+    clock = FakeClock()
+    samples = valid_samples()
+
+    def query(server):
+        if server == "pool.ntp.org":
+            raise TimeoutError("simulated UDP timeout")
+        return samples[server]
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=query,
+    )
+
+    result = verifier.verify()
+
+    assert result.verified is True
+    assert result.sample_count == 4
+    assert set(result.servers) == {
+        "time.google.com",
+        "time.cloudflare.com",
+        "time.nist.gov",
+        "time.windows.com",
+    }
+
+
 def test_fewer_than_three_samples_are_rejected():
     clock = FakeClock()
     samples = valid_samples()
     samples.pop("pool.ntp.org")
+    samples.pop("time.nist.gov")
+    samples.pop("time.windows.com")
 
     verifier = make_verifier(clock, samples)
 
@@ -269,7 +310,12 @@ def test_non_finite_sample_is_rejected():
         root_dispersion_seconds=0.01,
     )
 
-    verifier = make_verifier(clock, samples)
+    verifier = NtpTimeVerifier(
+        servers=("time.google.com", "time.cloudflare.com", "pool.ntp.org"),
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: samples[server],
+    )
 
     result = verifier.verify()
 
@@ -525,7 +571,12 @@ def test_response_server_identity_must_match_requested_server():
         root_dispersion_seconds=0.01,
     )
 
-    verifier = make_verifier(clock, samples)
+    verifier = NtpTimeVerifier(
+        servers=("time.google.com", "time.cloudflare.com", "pool.ntp.org"),
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: samples[server],
+    )
     result = verifier.verify()
 
     assert result.verified is False
@@ -543,6 +594,7 @@ def test_query_must_return_an_ntp_sample():
         return valid_samples()[server]
 
     verifier = NtpTimeVerifier(
+        servers=("time.google.com", "time.cloudflare.com", "pool.ntp.org"),
         wall_clock=clock.time,
         monotonic_clock=clock.monotonic_time,
         query=query,
