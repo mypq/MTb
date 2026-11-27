@@ -225,21 +225,38 @@ class NtpTimeVerifier:
         )
 
     def _query_server(self, server: str) -> NtpSample:
+        # Resolve DNS before starting the NTP timing window. Passing a
+        # hostname to UDP connect() may perform a blocking DNS lookup;
+        # including that delay in the measured round trip can reject an
+        # otherwise fast NTP response.
+        addresses = socket.getaddrinfo(
+            server,
+            123,
+            family=socket.AF_INET,
+            type=socket.SOCK_DGRAM,
+            proto=socket.IPPROTO_UDP,
+        )
+        if not addresses:
+            raise RuntimeError(
+                "NTP server did not resolve to an IPv4 UDP address."
+            )
+        server_address = addresses[0][4]
+
         t1, monotonic_t1 = self._read_clock_pair()
 
         packet = bytearray(NTP_PACKET_SIZE)
         packet[0] = 0x23
         packet[40:48] = self._encode_timestamp(t1)
 
-        # A connected UDP socket restricts received packets to the
-        # remote endpoint selected by connect(), rather than accepting
-        # arbitrary datagram senders.
+        # Connect to the resolved numeric endpoint. This preserves the
+        # connected-socket source filter without performing DNS inside
+        # the NTP request's measured interval.
         with socket.socket(
             socket.AF_INET,
             socket.SOCK_DGRAM,
         ) as client:
             client.settimeout(self._timeout_seconds)
-            client.connect((server, 123))
+            client.connect(server_address)
             client.send(packet)
             response = client.recv(512)
 
