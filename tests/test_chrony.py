@@ -67,11 +67,11 @@ def successful_command(*args, **kwargs):
 
 def test_windows_chrony_snapshot_uses_one_combined_wsl_session():
     combined_output = (
-        "__GOLD_BOT_TRACKING_BEGIN__\\n"
+        "__GOLD_BOT_TRACKING_BEGIN__\n"
         + TRACKING_OUTPUT
-        + "__GOLD_BOT_SOURCES_BEGIN__\\n"
+        + "__GOLD_BOT_SOURCES_BEGIN__\n"
         + SOURCES_OUTPUT
-        + "__GOLD_BOT_AUTHDATA_BEGIN__\\n"
+        + "__GOLD_BOT_AUTHDATA_BEGIN__\n"
         + AUTHDATA_OUTPUT
     )
 
