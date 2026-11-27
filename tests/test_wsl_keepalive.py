@@ -219,6 +219,90 @@ def test_wsl_keepalive_retries_readiness_on_same_managed_process():
     assert manager.is_running is True
     assert manager._pid == 281
 
+def test_wsl_keepalive_restarts_after_managed_process_exits():
+    manager = WslChronyKeepalive()
+    first_process = _FakeProcess()
+    second_process = _FakeProcess()
+    processes = [first_process, second_process]
+    popen_calls = []
+
+    def popen(*args, **kwargs):
+        popen_calls.append(args[0])
+        return processes.pop(0)
+
+    readiness_calls = []
+
+    def run(args, **kwargs):
+        readiness_calls.append(args)
+        return _completed("281\\n" if len(readiness_calls) == 1 else "282\\n")
+
+    with patch(
+        "backend.market_data.wsl_keepalive.platform.system",
+        return_value="Windows",
+    ), patch(
+        "backend.market_data.wsl_keepalive.shutil.which",
+        return_value="wsl.exe",
+    ), patch(
+        "backend.market_data.wsl_keepalive.uuid.uuid4",
+    ) as uuid4, patch(
+        "backend.market_data.wsl_keepalive.subprocess.Popen",
+        side_effect=popen,
+    ), patch(
+        "backend.market_data.wsl_keepalive.subprocess.run",
+        side_effect=run,
+    ):
+        uuid4.return_value.hex = "recovery"
+        manager.start()
+        assert manager.is_ready is True
+        assert manager._pid == 281
+
+        first_process.returncode = 15
+        manager.start()
+
+    assert len(popen_calls) == 2
+    assert len(readiness_calls) == 2
+    assert manager.is_running is True
+    assert manager.is_ready is True
+    assert manager._pid == 282
+
+
+def test_wsl_keepalive_supervisor_retries_and_stops_cleanly():
+    import asyncio
+
+    manager = WslChronyKeepalive()
+    stop_event = asyncio.Event()
+    start_calls = []
+    stop_calls = []
+
+    def start():
+        start_calls.append(True)
+        if len(start_calls) == 1:
+            raise RuntimeError("temporary WSL startup failure")
+        manager._ready = True
+        stop_event.set()
+
+    def stop():
+        stop_calls.append(True)
+        manager._ready = False
+
+    with patch(
+        "backend.market_data.wsl_keepalive.platform.system",
+        return_value="Windows",
+    ), patch.object(manager, "start", side_effect=start), patch.object(
+        manager, "stop", side_effect=stop
+    ):
+        asyncio.run(
+            manager.run(
+                stop_event,
+                retry_interval_seconds=0.001,
+                health_check_interval_seconds=0.001,
+            )
+        )
+
+    assert len(start_calls) == 2
+    assert len(stop_calls) == 1
+
+
 def test_wsl_keepalive_detects_managed_wsl_process_exiting_during_start():
     manager = WslChronyKeepalive()
     process = _FakeProcess(initial_returncode=15)
