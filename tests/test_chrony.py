@@ -100,10 +100,20 @@ def test_windows_chrony_snapshot_uses_one_combined_wsl_session():
     run.assert_called_once()
     command = run.call_args.args[0]
     assert command[:4] == ["wsl.exe", "--exec", "/bin/bash", "-c"]
-    assert "/usr/bin/chronyc -n tracking" in command[4]
-    assert "/usr/bin/chronyc sources -v" in command[4]
-    assert "/usr/bin/chronyc -n sources -v" not in command[4]
-    assert "sudo -n /usr/bin/chronyc authdata" in command[4]
+    assert (
+        "sudo -n /usr/bin/chronyc "
+        "-h /run/chrony/chronyd.sock -n tracking"
+    ) in command[4]
+    assert (
+        "sudo -n /usr/bin/chronyc "
+        "-h /run/chrony/chronyd.sock sources -v"
+    ) in command[4]
+    assert (
+        "sudo -n /usr/bin/chronyc "
+        "-h /run/chrony/chronyd.sock authdata"
+    ) in command[4]
+    assert "/usr/bin/chronyc -n tracking" not in command[4]
+    assert "/usr/bin/chronyc sources -v" not in command[4]
     assert run.call_args.kwargs["timeout"] == 20.0
 
 
