@@ -635,6 +635,11 @@ def test_dns_resolution_happens_before_ntp_round_trip_timing(monkeypatch):
         ntp_time_module.socket, "socket",
         lambda *args, **kwargs: FakeSocket(),
     )
+    monkeypatch.setattr(
+        ntp_time_module.time,
+        "perf_counter",
+        lambda: events.append(("perf_counter",)) or 1.0,
+    )
 
     verifier = NtpTimeVerifier()
     verifier._read_clock_pair = lambda: (
@@ -646,4 +651,6 @@ def test_dns_resolution_happens_before_ntp_round_trip_timing(monkeypatch):
 
     assert events[0] == ("resolve", "time.cloudflare.com", 123)
     assert events[1] == ("clock_start",)
-    assert ("connect", ("192.0.2.10", 123)) in events
+    connect_index = events.index(("connect", ("192.0.2.10", 123)))
+    perf_index = events.index(("perf_counter",))
+    assert connect_index < perf_index < events.index(("send", 48))
