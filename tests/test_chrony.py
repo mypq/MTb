@@ -107,6 +107,25 @@ def test_windows_chrony_snapshot_uses_one_combined_wsl_session():
     assert run.call_args.kwargs["timeout"] == 20.0
 
 
+
+def test_chrony_counts_selectable_uncombined_sources_for_nts_quorum():
+    service = ChronyStatusService(command=["chronyc"])
+    selectable_sources = SOURCES_OUTPUT.replace("^+", "^-")
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(sources=selectable_sources),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is True
+    assert status.selected_source == "time.cloudflare.com"
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 3
+    assert status.quorum_met is True
+    assert status.error is None
+
 def test_chrony_reports_synchronized_with_three_nts_sources():
     service = ChronyStatusService(command=["chronyc"])
 
@@ -486,7 +505,7 @@ def test_chrony_error_reports_insufficient_healthy_sources():
     assert status.healthy_sources == 2
     assert status.nts_authenticated_sources == 3
     assert status.quorum_met is False
-    assert "2 healthy Chrony sources" in status.error
+    assert "2 selectable Chrony sources" in status.error
     assert "required exactly 3" in status.error
 
 
@@ -508,7 +527,7 @@ def test_chrony_error_reports_authenticated_source_mismatch():
     assert status.healthy_sources == 3
     assert status.nts_authenticated_sources == 2
     assert status.quorum_met is False
-    assert "3 healthy Chrony sources" in status.error
+    assert "3 selectable Chrony sources" in status.error
     assert "2 authenticated NTS providers" in status.error
     assert "required exactly 3" in status.error
 
