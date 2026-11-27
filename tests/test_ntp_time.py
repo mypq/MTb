@@ -632,7 +632,15 @@ def test_out_of_range_sample_quality_metrics_are_rejected(
     values[field] = value
     samples["time.google.com"] = NtpSample(**values)
 
-    verifier = make_verifier(clock, samples)
+    # Keep this quality-validation test scoped to the original three
+    # providers. Otherwise the two additional fallback providers can supply
+    # enough valid samples and mask the deliberately invalid sample.
+    verifier = NtpTimeVerifier(
+        servers=("time.google.com", "time.cloudflare.com", "pool.ntp.org"),
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: samples[server],
+    )
     result = verifier.verify()
 
     assert result.verified is False
