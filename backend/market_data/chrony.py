@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -379,9 +380,7 @@ class ChronyStatusService:
     @staticmethod
     def _parse_authdata_age_seconds(value: str) -> float:
         """Parse Chrony's Last age; unitless values are seconds."""
-        import re
-
-        match = re.fullmatch(r"(\\d+(?:\\.\\d+)?)([smhdw]?)", value.strip())
+        match = re.fullmatch(r"(\d+(?:\.\d+)?)([smhdw]?)", value.strip())
         if match is None:
             raise ChronyStatusError(
                 "Chrony returned an invalid NTS authentication age."
