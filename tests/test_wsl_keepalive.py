@@ -80,8 +80,6 @@ def test_wsl_keepalive_starts_attached_process_and_waits_for_chrony():
 
     def run(args, **kwargs):
         calls.append(args)
-        if "systemctl" in args:
-            return _completed("active\n")
         if "pid_file=" in args[4]:
             return _completed("281\n")
         return _completed()
@@ -104,8 +102,9 @@ def test_wsl_keepalive_starts_attached_process_and_waits_for_chrony():
     assert kwargs["stdin"] is not None
     assert kwargs["stdout"] is not None
     assert kwargs["stderr"] is not None
+    assert len(calls) == 1
     assert calls[0][2:4] == ["/bin/bash", "-c"]
-    assert calls[1][2:5] == ["systemctl", "is-active", "chrony"]
+    assert "systemctl is-active chrony" in calls[0][4]
 
 
 def test_wsl_keepalive_stop_signals_only_its_marked_linux_pid_and_waits():
@@ -163,11 +162,10 @@ def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_process():
     process = _FakeProcess()
 
     def run(args, **kwargs):
-        if "systemctl" in args:
-            return _completed("inactive\n", returncode=3)
-        if "pid_file=" in args[4]:
-            return _completed("281\n")
-        return _completed()
+        return _completed(
+            returncode=4,
+            stderr="CHRONY_STATE=inactive",
+        )
 
     platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
         _windows_patches(run_side_effect=run, popen=process)
@@ -182,6 +180,44 @@ def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_process():
     assert manager.is_running is True
     assert manager._pid == 281
     assert process.poll() is None
+
+
+
+
+def test_wsl_keepalive_retries_readiness_on_same_managed_process():
+    manager = WslChronyKeepalive(startup_timeout_seconds=0.5)
+    process = _FakeProcess()
+    attempts = []
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        if len(attempts) == 1:
+            return _completed(
+                returncode=4,
+                stderr="CHRONY_STATE=inactive",
+            )
+        return _completed("281\n")
+
+    platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
+        _windows_patches(run_side_effect=run, popen=process)
+    )
+    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch as popen, run_patch, patch(
+        "backend.market_data.wsl_keepalive.time.monotonic",
+        side_effect=[0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
+    ), patch("backend.market_data.wsl_keepalive.time.sleep"):
+        uuid4.return_value.hex = "retrymarker"
+        with pytest.raises(TimeoutError, match="CHRONY_STATE=inactive"):
+            manager.start()
+
+        assert manager.is_running is True
+        assert manager._pid is None
+
+        manager.start()
+
+    assert popen.call_count == 1
+    assert len(attempts) == 2
+    assert manager.is_running is True
+    assert manager._pid == 281
 
 
 def test_wsl_keepalive_detects_managed_wsl_process_exiting_during_start():
