@@ -50,7 +50,7 @@ class ChronyStatusService:
         self,
         command: Sequence[str] | None = None,
         *,
-        timeout_seconds: float = 3.0,
+        timeout_seconds: float = 20.0,
     ) -> None:
         if isinstance(timeout_seconds, bool) or not isinstance(
             timeout_seconds, (int, float)
@@ -81,6 +81,7 @@ class ChronyStatusService:
 
         self._command = tuple(command)
         self._timeout_seconds = timeout_value
+        self._use_wsl_bundle = command is None and os.name == "nt"
 
     @staticmethod
     def _default_command() -> tuple[str, ...]:
@@ -117,6 +118,75 @@ class ChronyStatusService:
             )
 
         return result.stdout
+
+    def _run_windows_bundle(self) -> tuple[str, str, str]:
+        """Collect all Chrony evidence in one WSL session.
+
+        A separate wsl.exe invocation can cold-start and then auto-stop the
+        distribution between tracking, sources, and authdata queries. Running
+        all three commands in one Linux process avoids repeated WSL boot cycles
+        and gives the snapshot one coherent collection window.
+        """
+        wsl = self._command[0]
+        markers = (
+            "__GOLD_BOT_TRACKING_BEGIN__",
+            "__GOLD_BOT_SOURCES_BEGIN__",
+            "__GOLD_BOT_AUTHDATA_BEGIN__",
+        )
+        script = (
+            "set -e; "
+            f"printf '{markers[0]}\\n'; "
+            "/usr/bin/chronyc -n tracking; "
+            f"printf '{markers[1]}\\n'; "
+            "/usr/bin/chronyc -n sources -v; "
+            f"printf '{markers[2]}\\n'; "
+            "sudo -n /usr/bin/chronyc authdata"
+        )
+        try:
+            result = subprocess.run(
+                [wsl, "--exec", "/bin/bash", "-c", script],
+                capture_output=True,
+                check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self._timeout_seconds,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ChronyStatusError(
+                f"Unable to execute combined Chrony WSL query: "
+                f"{type(exc).__name__}."
+            ) from exc
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise ChronyStatusError(
+                detail or (
+                    "Combined Chrony WSL query exited with code "
+                    f"{result.returncode}."
+                )
+            )
+
+        sections = result.stdout.split(markers[0], 1)
+        if len(sections) != 2:
+            raise ChronyStatusError(
+                "Combined Chrony output is missing the tracking section."
+            )
+        tracking_and_rest = sections[1]
+        sections = tracking_and_rest.split(markers[1], 1)
+        if len(sections) != 2:
+            raise ChronyStatusError(
+                "Combined Chrony output is missing the sources section."
+            )
+        tracking, sources_and_authdata = sections
+        sections = sources_and_authdata.split(markers[2], 1)
+        if len(sections) != 2:
+            raise ChronyStatusError(
+                "Combined Chrony output is missing the authdata section."
+            )
+        sources, authdata = sections
+        return tracking.strip(), sources.strip(), authdata.strip()
 
     def _run_sources(self) -> str:
         """Read Chrony sources without elevated privileges."""
@@ -398,12 +468,17 @@ class ChronyStatusService:
     def snapshot(self) -> ChronyStatus:
         """Return current Chrony status; query failures are unavailable."""
         try:
-            tracking = self._parse_tracking(
-                self._run("-n", "tracking")
-            )
-
-            sources_output = self._run_sources()
-            authdata_output = self._run_authdata()
+            if self._use_wsl_bundle:
+                tracking_output, sources_output, authdata_output = (
+                    self._run_windows_bundle()
+                )
+                tracking = self._parse_tracking(tracking_output)
+            else:
+                tracking = self._parse_tracking(
+                    self._run("-n", "tracking")
+                )
+                sources_output = self._run_sources()
+                authdata_output = self._run_authdata()
 
             (
                 selected_source,
