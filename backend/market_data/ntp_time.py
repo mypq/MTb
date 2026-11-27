@@ -257,8 +257,10 @@ class NtpTimeVerifier:
         ) as client:
             client.settimeout(self._timeout_seconds)
             client.connect(server_address)
+            performance_t1 = time.perf_counter()
             client.send(packet)
             response = client.recv(512)
+            performance_t4 = time.perf_counter()
 
         wall_t4, monotonic_t4 = self._read_clock_pair()
         clock_start = (t1, monotonic_t1)
@@ -268,10 +270,16 @@ class NtpTimeVerifier:
                 "Local wall clock jump detected during the NTP request."
             )
 
-        monotonic_elapsed = monotonic_t4 - monotonic_t1
-        # Use monotonic elapsed time to reconstruct the local receive time.
-        # This keeps wall-clock adjustments from distorting the NTP math.
-        t4 = t1 + monotonic_elapsed
+        # GetTickCount64-backed time.monotonic() can have coarse resolution
+        # on Windows. Use QueryPerformanceCounter-backed perf_counter() for
+        # the short UDP exchange while retaining monotonic() for clock-jump
+        # and trust-continuity checks.
+        performance_elapsed = performance_t4 - performance_t1
+        if not math.isfinite(performance_elapsed) or performance_elapsed < 0:
+            raise RuntimeError("NTP performance-counter interval is invalid.")
+        # Reconstruct local receive time from the high-resolution elapsed
+        # interval, without relying on wall-clock granularity during recv().
+        t4 = t1 + performance_elapsed
 
         if len(response) < NTP_PACKET_SIZE:
             raise RuntimeError(
@@ -317,7 +325,7 @@ class NtpTimeVerifier:
                 "NTP timestamps are inconsistent."
             )
 
-        round_trip = monotonic_elapsed - (t3 - t2)
+        round_trip = performance_elapsed - (t3 - t2)
 
         if (
             not math.isfinite(round_trip)
