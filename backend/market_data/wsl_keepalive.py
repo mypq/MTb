@@ -198,6 +198,7 @@ class WslChronyKeepalive:
             executable = self._executable
             process = self._process
             marker = self._marker
+            self._ready = False
 
         assert executable is not None and process is not None and marker is not None
         deadline = time.monotonic() + self._startup_timeout_seconds
