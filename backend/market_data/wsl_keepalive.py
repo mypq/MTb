@@ -230,7 +230,10 @@ class WslChronyKeepalive:
                     executable,
                     readiness_script,
                     marker,
-                    timeout=min(3.0, remaining),
+                    # WSL cold-starts can take longer than three seconds.
+                    # Repeated short timeouts kill the client command while
+                    # WSL is still initializing and can queue competing requests.
+                    timeout=remaining,
                 )
                 if result.returncode == 0:
                     try:
@@ -329,7 +332,7 @@ class WslChronyKeepalive:
                 stop_script,
                 marker,
                 marker,
-                timeout=8.0,
+                timeout=max(20.0, self._startup_timeout_seconds),
             )
             if result.returncode == 2:
                 raise RuntimeError(
@@ -337,8 +340,9 @@ class WslChronyKeepalive:
                 )
             if result.returncode != 0:
                 raise RuntimeError(
-                    "Could not safely stop the managed Linux keepalive: "
-                    f"{result.stderr.strip()}"
+                    "Could not safely stop the managed Linux keepalive "
+                    f"(exit={result.returncode}): "
+                    f"{result.stderr.strip() or result.stdout.strip() or 'no command output'}"
                 )
             process.wait(timeout=8.0)
         except (OSError, subprocess.TimeoutExpired) as exc:
