@@ -128,9 +128,14 @@ class WslChronyKeepalive:
             'case "$pid" in ""|*[!0-9]*) exit 2 ;; esac; '
             '[ -r "/proc/$pid/cmdline" ] || exit 1; '
             'actual=$(tr "\\000" " " < "/proc/$pid/cmdline") || exit 1; '
-            'case "$actual" in *"$1"*) printf "%s\\n" "$pid"; exit 0 ;; '
-            '*) exit 3 ;; esac'
+            'case "$actual" in *"$1"*) ;; *) exit 3 ;; esac; '
+            'chrony_state=$(systemctl is-active chrony 2>/dev/null) || '
+            '{ printf "CHRONY_STATE=%s\\n" "$chrony_state" >&2; exit 4; }; '
+            '[ "$chrony_state" = "active" ] || '
+            '{ printf "CHRONY_STATE=%s\\n" "$chrony_state" >&2; exit 4; }; '
+            'printf "%s\\n" "$pid"; exit 0'
         )
+        last_readiness_detail = "No readiness response was received."
 
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -140,57 +145,57 @@ class WslChronyKeepalive:
 
             remaining = max(0.1, deadline - time.monotonic())
             try:
-                owned = self._run_wsl_command(
+                result = self._run_wsl_command(
                     executable,
                     readiness_script,
                     marker,
                     timeout=min(3.0, remaining),
                 )
-                if owned.returncode == 0:
+                if result.returncode == 0:
                     try:
-                        pid = int(owned.stdout.strip().splitlines()[-1])
+                        pid = int(result.stdout.strip().splitlines()[-1])
                     except (ValueError, IndexError) as exc:
                         raise RuntimeError(
                             "WSL did not return a valid managed process ID."
                         ) from exc
+
                     with self._lock:
                         self._pid = pid
 
-                    result = subprocess.run(
-                        [
-                            executable,
-                            "--exec",
-                            "systemctl",
-                            "is-active",
-                            "chrony",
-                        ],
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        check=False,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        timeout=min(3.0, remaining),
-                        shell=False,
+                    logger.info(
+                        "Managed WSL process %s is running and Chrony is active.",
+                        pid,
                     )
-                    if result.returncode == 0 and result.stdout.strip() == "active":
-                        logger.info(
-                            "Managed WSL process %s is running and Chrony is active.",
-                            pid,
-                        )
-                        return
-                elif owned.returncode in (2, 3):
+                    return
+
+                if result.returncode in (2, 3):
                     raise RuntimeError(
                         "The WSL keepalive PID file or process identity is invalid."
                     )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
 
+                last_readiness_detail = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or f"Readiness command exited with code {result.returncode}."
+                )
+            except subprocess.TimeoutExpired:
+                last_readiness_detail = (
+                    "The combined WSL process-identity and Chrony readiness "
+                    "check exceeded its command timeout."
+                )
+            except OSError as exc:
+                last_readiness_detail = f"WSL readiness command failed: {exc}"
+
+            logger.debug(
+                "WSL Chrony keepalive is not ready yet: %s",
+                last_readiness_detail,
+            )
             time.sleep(self._poll_interval_seconds)
 
         raise TimeoutError(
             "WSL started, but the managed process and active Chrony service "
             f"were not ready within {self._startup_timeout_seconds:.1f} seconds. "
+            f"Last readiness result: {last_readiness_detail} "
             "The managed WSL process remains attached so readiness can be retried."
         )
 
