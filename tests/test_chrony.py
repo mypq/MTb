@@ -65,6 +65,47 @@ def successful_command(*args, **kwargs):
     return run_with_outputs()(*args, **kwargs)
 
 
+def test_windows_chrony_snapshot_uses_one_combined_wsl_session():
+    combined_output = (
+        "__GOLD_BOT_TRACKING_BEGIN__\\n"
+        + TRACKING_OUTPUT
+        + "__GOLD_BOT_SOURCES_BEGIN__\\n"
+        + SOURCES_OUTPUT
+        + "__GOLD_BOT_AUTHDATA_BEGIN__\\n"
+        + AUTHDATA_OUTPUT
+    )
+
+    with patch("backend.market_data.chrony.os.name", "nt"), patch(
+        "backend.market_data.chrony.shutil.which",
+        return_value="wsl.exe",
+    ):
+        service = ChronyStatusService()
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        return_value=CompletedProcess(
+            args=["wsl.exe"],
+            returncode=0,
+            stdout=combined_output,
+            stderr="",
+        ),
+    ) as run:
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.synchronized is True
+    assert status.healthy_sources == 3
+    assert status.nts_authenticated_sources == 3
+    assert status.quorum_met is True
+    run.assert_called_once()
+    command = run.call_args.args[0]
+    assert command[:4] == ["wsl.exe", "--exec", "/bin/bash", "-c"]
+    assert "/usr/bin/chronyc -n tracking" in command[4]
+    assert "/usr/bin/chronyc -n sources -v" in command[4]
+    assert "sudo -n /usr/bin/chronyc authdata" in command[4]
+    assert run.call_args.kwargs["timeout"] == 20.0
+
+
 def test_chrony_reports_synchronized_with_three_nts_sources():
     service = ChronyStatusService(command=["chronyc"])
 
