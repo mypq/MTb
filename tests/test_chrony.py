@@ -158,6 +158,48 @@ def test_chrony_reports_synchronized_with_three_nts_sources():
     assert status.root_dispersion_seconds == 0.002205403
 
 
+
+@pytest.mark.parametrize(
+    ("last_age", "expected_authenticated"),
+    [
+        ("59m", 3),
+        ("60m", 3),
+        ("61m", 2),
+        ("4d", 2),
+        ("43h", 2),
+    ],
+)
+def test_chrony_requires_recent_nts_authentication(last_age, expected_authenticated):
+    service = ChronyStatusService(command=["chronyc"])
+    authdata = AUTHDATA_OUTPUT.replace("23m", last_age, 1)
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=authdata),
+    ):
+        status = service.snapshot()
+
+    assert status.available is True
+    assert status.nts_authenticated_sources == expected_authenticated
+    assert status.quorum_met is (expected_authenticated == 3)
+    assert status.synchronized is (expected_authenticated == 3)
+
+
+def test_chrony_rejects_unparseable_nts_authentication_age():
+    service = ChronyStatusService(command=["chronyc"])
+    authdata = AUTHDATA_OUTPUT.replace("23m", "unknown", 1)
+
+    with patch(
+        "backend.market_data.chrony.subprocess.run",
+        side_effect=run_with_outputs(authdata=authdata),
+    ):
+        status = service.snapshot()
+
+    assert status.available is False
+    assert status.synchronized is False
+    assert "invalid NTS authentication age" in status.error
+
+
 def test_chrony_preserves_healthy_sources_when_authdata_is_empty():
     service = ChronyStatusService(command=["chronyc"])
 
