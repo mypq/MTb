@@ -383,6 +383,9 @@ async def lifespan(app: FastAPI):
     ntp_stop_event = asyncio.Event()
     ntp_task = None
 
+    wsl_chrony_stop_event = asyncio.Event()
+    wsl_chrony_task = None
+
     candle_clock_stop_event = asyncio.Event()
     candle_clock_task = None
 
@@ -492,8 +495,14 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception(
                 "WSL Chrony keepalive could not confirm Chrony readiness; "
-                "NTP verification will remain fail-closed and retry."
+                "the lifecycle supervisor will retry automatically and "
+                "NTP verification will remain fail-closed."
             )
+
+        wsl_chrony_task = asyncio.create_task(
+            wsl_chrony_keepalive.run(wsl_chrony_stop_event),
+            name="wsl-chrony-keepalive-supervisor",
+        )
 
         database.initialize()
         upgrade_database()
@@ -716,6 +725,7 @@ async def lifespan(app: FastAPI):
     finally:
         try:
             startup_stop_event.set()
+            wsl_chrony_stop_event.set()
             session_calendar_stop_event.set()
             broker_offset_stop_event.set()
             ntp_stop_event.set()
@@ -743,6 +753,14 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     logger.exception(
                         "Failed to stop independent NTP verification."
+                    )
+
+            if wsl_chrony_task is not None:
+                try:
+                    await wsl_chrony_task
+                except Exception:
+                    logger.exception(
+                        "Failed to stop WSL Chrony keepalive supervisor."
                     )
 
             if startup_task is not None:
@@ -830,13 +848,6 @@ async def lifespan(app: FastAPI):
                 )
 
         finally:
-            try:
-                await asyncio.to_thread(wsl_chrony_keepalive.stop)
-            except Exception:
-                logger.exception(
-                    "Failed to stop the WSL Chrony keepalive process."
-                )
-
             try:
                 database.dispose()
             except Exception:
