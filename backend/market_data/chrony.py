@@ -134,14 +134,23 @@ class ChronyStatusService:
             "__GOLD_BOT_SOURCES_BEGIN__",
             "__GOLD_BOT_AUTHDATA_BEGIN__",
         )
+        # WSL runs a second Chrony daemon in its root namespace.  UDP
+        # localhost requests to port 323 can be answered by either daemon.
+        # Use Ubuntu's protected Unix-domain socket explicitly, and run as
+        # root so the restricted /run/chrony directory is accessible.
+        chrony_socket = "/run/chrony/chronyd.sock"
+        chronyc = (
+            "sudo -n /usr/bin/chronyc "
+            f"-h {chrony_socket} "
+        )
         script = (
             "set -e; "
             f"printf '{markers[0]}\\n'; "
-            "/usr/bin/chronyc -n tracking; "
+            f"{chronyc}-n tracking; "
             f"printf '{markers[1]}\\n'; "
-            "/usr/bin/chronyc sources -v; "
+            f"{chronyc}sources -v; "
             f"printf '{markers[2]}\\n'; "
-            "sudo -n /usr/bin/chronyc authdata"
+            f"{chronyc}authdata"
         )
         try:
             result = subprocess.run(
