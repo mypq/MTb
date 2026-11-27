@@ -654,7 +654,6 @@ class NtpTimeVerifier:
             self.reset()
             return False
 
-        self._last_trust_clock_pair = current_clock_pair
         elapsed = (
             current_clock_pair[1] - self._last_success_monotonic
         )
@@ -667,6 +666,18 @@ class NtpTimeVerifier:
             self.reset()
             return False
 
+        # NTS quorum is a live prerequisite, not a property that remains
+        # valid for the lifetime of a previous NTP verification.
+        if self._nts_authentication_check is not None:
+            try:
+                if self._nts_authentication_check() is not True:
+                    self.reset()
+                    return False
+            except Exception:
+                self.reset()
+                return False
+
+        self._last_trust_clock_pair = current_clock_pair
         return True
 
     def last_verification(self) -> NtpVerification | None:
