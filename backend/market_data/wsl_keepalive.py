@@ -71,7 +71,7 @@ class WslChronyKeepalive:
         stop_event: asyncio.Event,
         *,
         retry_interval_seconds: float = 5.0,
-        health_check_interval_seconds: float = 1.0,
+        health_check_interval_seconds: float = 10.0,
     ) -> None:
         """Maintain WSL/Chrony for the application lifetime and recover exits."""
         if not isinstance(stop_event, asyncio.Event):
@@ -158,9 +158,6 @@ class WslChronyKeepalive:
                 self._pid = None
                 self._marker = None
                 self._ready = False
-
-            if self._process is not None and self._ready:
-                return
 
             if self._process is None:
                 executable = shutil.which("wsl.exe") or shutil.which("wsl")
