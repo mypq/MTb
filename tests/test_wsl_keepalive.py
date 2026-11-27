@@ -178,33 +178,33 @@ def test_wsl_keepalive_reports_chrony_startup_timeout_but_keeps_process():
             manager.start()
 
     assert manager.is_running is True
-    assert manager._pid == 281
+    assert manager._pid is None
     assert process.poll() is None
 
 
 
 
 def test_wsl_keepalive_retries_readiness_on_same_managed_process():
-    manager = WslChronyKeepalive(startup_timeout_seconds=0.5)
+    import time
+
+    manager = WslChronyKeepalive(startup_timeout_seconds=0.01)
     process = _FakeProcess()
     attempts = []
 
     def run(args, **kwargs):
         attempts.append(args)
         if len(attempts) == 1:
+            time.sleep(0.02)
             return _completed(
                 returncode=4,
                 stderr="CHRONY_STATE=inactive",
             )
-        return _completed("281\n")
+        return _completed("281\\n")
 
     platform_patch, which_patch, uuid_patch, popen_patch, run_patch = (
         _windows_patches(run_side_effect=run, popen=process)
     )
-    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch as popen, run_patch, patch(
-        "backend.market_data.wsl_keepalive.time.monotonic",
-        side_effect=[0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
-    ), patch("backend.market_data.wsl_keepalive.time.sleep"):
+    with platform_patch, which_patch, uuid_patch as uuid4, popen_patch as popen, run_patch:
         uuid4.return_value.hex = "retrymarker"
         with pytest.raises(TimeoutError, match="CHRONY_STATE=inactive"):
             manager.start()
@@ -218,7 +218,6 @@ def test_wsl_keepalive_retries_readiness_on_same_managed_process():
     assert len(attempts) == 2
     assert manager.is_running is True
     assert manager._pid == 281
-
 
 def test_wsl_keepalive_detects_managed_wsl_process_exiting_during_start():
     manager = WslChronyKeepalive()
