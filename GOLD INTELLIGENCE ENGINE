@@ -252,6 +252,12 @@ Order Flow & Liquidity
 - استقبال بيانات MT5 الحية (Tick وBid/Ask): كملنا مع اختباراته الحية.
 - حفظ Quote الحي واسترجاعه والتحقق من منع تكرار السجل: كملنا مع اختباراته الحية.
 
+أدلة الاختبارات الحية المرتبطة:
+- MT5 Live GOLD — 2026-11-23: CONNECTED؛ Bid=3603.3؛ Ask=3603.87؛ Spread≈0.57؛ Tick=1795406052640؛ Server=XMGlobal-MT5 9.
+- MT5 Live sampling — 2026-11-23: 60 عينة؛ NTP_VERIFIED=60/60؛ Tick UPDATED=59 وINITIAL=1؛ أخطاء القراءة=0؛ Tick timestamps=60.
+- Live Quote persistence: اختبار الحفظ والاسترجاع الفعلي أكد inserted=1 وduplicates=0، قراءة السجل المحفوظ مطابقة، وإعادة الإدخال لم تزد عدد السجلات. Migration 0008؛ CI workflow #844 (commit a2beaf1) ناجح.
+- تنبيه نطاق الإثبات: نتائج الاختبارات الآلية/المحاكاة لا تُعامل كاختبار حي. تحويل الشموع التاريخية وحفظها مختبران آلياً، لكن Backfill التاريخي الحقيقي لم يُعلن مكتملاً بعد.
+
 5.2 Data Validation
 
 يجب فحص:
