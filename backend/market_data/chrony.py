@@ -67,6 +67,7 @@ class ChronyStatusService:
         if not math.isfinite(timeout_value) or timeout_value <= 0:
             raise ValueError("timeout_seconds must be a finite positive number.")
 
+        use_wsl_bundle = command is None and os.name == "nt"
         if command is None:
             command = self._default_command()
 
@@ -81,7 +82,7 @@ class ChronyStatusService:
 
         self._command = tuple(command)
         self._timeout_seconds = timeout_value
-        self._use_wsl_bundle = command is None and os.name == "nt"
+        self._use_wsl_bundle = use_wsl_bundle
 
     @staticmethod
     def _default_command() -> tuple[str, ...]:
