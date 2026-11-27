@@ -139,7 +139,7 @@ class ChronyStatusService:
             f"printf '{markers[0]}\\n'; "
             "/usr/bin/chronyc -n tracking; "
             f"printf '{markers[1]}\\n'; "
-            "/usr/bin/chronyc -n sources -v; "
+            "/usr/bin/chronyc sources -v; "
             f"printf '{markers[2]}\\n'; "
             "sudo -n /usr/bin/chronyc authdata"
         )
