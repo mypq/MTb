@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import platform
@@ -36,6 +37,7 @@ class WslChronyKeepalive:
         self._process: subprocess.Popen | None = None
         self._pid: int | None = None
         self._marker: str | None = None
+        self._ready = False
 
     @staticmethod
     def _positive_interval(value: float, name: str) -> float:
@@ -53,6 +55,74 @@ class WslChronyKeepalive:
         """Return whether the managed WSL process is still alive."""
         process = self._process
         return process is not None and process.poll() is None
+
+    @property
+    def is_ready(self) -> bool:
+        """Return whether the managed process passed the Chrony readiness check."""
+        process = self._process
+        return (
+            self._ready
+            and process is not None
+            and process.poll() is None
+        )
+
+    async def run(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        retry_interval_seconds: float = 5.0,
+        health_check_interval_seconds: float = 1.0,
+    ) -> None:
+        """Maintain WSL/Chrony for the application lifetime and recover exits."""
+        if not isinstance(stop_event, asyncio.Event):
+            raise TypeError("stop_event must be an asyncio.Event.")
+
+        retry_interval = self._positive_interval(
+            retry_interval_seconds,
+            "retry_interval_seconds",
+        )
+        health_interval = self._positive_interval(
+            health_check_interval_seconds,
+            "health_check_interval_seconds",
+        )
+
+        if platform.system() != "Windows":
+            await stop_event.wait()
+            return
+
+        logger.info(
+            "WSL Chrony keepalive supervisor started: retry_seconds=%s "
+            "health_check_seconds=%s",
+            retry_interval,
+            health_interval,
+        )
+        try:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.to_thread(self.start)
+                except Exception:
+                    logger.exception(
+                        "WSL Chrony keepalive is not ready; automatic recovery "
+                        "will retry in %.1f seconds.",
+                        retry_interval,
+                    )
+
+                delay = health_interval if self.is_ready else retry_interval
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=delay,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            try:
+                await asyncio.to_thread(self.stop)
+            except Exception:
+                logger.exception(
+                    "WSL Chrony keepalive supervisor could not confirm shutdown."
+                )
+            logger.info("WSL Chrony keepalive supervisor stopped.")
 
     @staticmethod
     def _run_wsl_command(
@@ -79,6 +149,19 @@ class WslChronyKeepalive:
             return
 
         with self._lock:
+            if self._process is not None and self._process.poll() is not None:
+                logger.warning(
+                    "Managed WSL process exited; clearing stale state before recovery."
+                )
+                self._executable = None
+                self._process = None
+                self._pid = None
+                self._marker = None
+                self._ready = False
+
+            if self._process is not None and self._ready:
+                return
+
             if self._process is None:
                 executable = shutil.which("wsl.exe") or shutil.which("wsl")
                 if executable is None:
@@ -161,6 +244,7 @@ class WslChronyKeepalive:
 
                     with self._lock:
                         self._pid = pid
+                        self._ready = True
 
                     logger.info(
                         "Managed WSL process %s is running and Chrony is active.",
@@ -221,6 +305,7 @@ class WslChronyKeepalive:
                 self._process = None
                 self._pid = None
                 self._marker = None
+                self._ready = False
             return
 
         stop_script = (
@@ -270,6 +355,7 @@ class WslChronyKeepalive:
                 self._process = None
                 self._pid = None
                 self._marker = None
+                self._ready = False
 
         logger.info(
             "Managed WSL keepalive process %s stopped; WSL may shut down when no other Linux processes remain.",
