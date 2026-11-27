@@ -50,7 +50,7 @@ class ChronyStatusService:
         self,
         command: Sequence[str] | None = None,
         *,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 60.0,
     ) -> None:
         if isinstance(timeout_seconds, bool) or not isinstance(
             timeout_seconds, (int, float)
