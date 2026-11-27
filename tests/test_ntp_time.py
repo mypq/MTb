@@ -469,6 +469,59 @@ def test_failed_nts_quorum_reverification_invalidates_previous_trust():
     assert verifier.last_verification() is None
 
 
+def test_losing_nts_quorum_immediately_invalidates_existing_trust():
+    clock = FakeClock()
+    gate = {"verified": True}
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=lambda: gate["verified"],
+    )
+
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+    gate["verified"] = False
+
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+    # Restoring the quorum cannot revive the invalidated old verification.
+    gate["verified"] = True
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+    # A fresh NTP verification is required to establish trust again.
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+
+def test_nts_quorum_check_exception_invalidates_existing_trust():
+    clock = FakeClock()
+    gate = {"raise": False}
+
+    def check_quorum():
+        if gate["raise"]:
+            raise RuntimeError("Chrony unavailable")
+        return True
+
+    verifier = NtpTimeVerifier(
+        wall_clock=clock.time,
+        monotonic_clock=clock.monotonic_time,
+        query=lambda server: valid_samples()[server],
+        nts_authentication_check=check_quorum,
+    )
+
+    assert verifier.verify().verified is True
+    assert verifier.is_trusted() is True
+
+    gate["raise"] = True
+
+    assert verifier.is_trusted() is False
+    assert verifier.last_verification() is None
+
+
 def test_non_callable_nts_authentication_check_is_rejected():
     with pytest.raises(ValueError, match="must be callable"):
         NtpTimeVerifier(nts_authentication_check=True)
