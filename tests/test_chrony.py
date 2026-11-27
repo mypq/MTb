@@ -114,7 +114,7 @@ def test_windows_chrony_snapshot_uses_one_combined_wsl_session():
     ) in command[4]
     assert "/usr/bin/chronyc -n tracking" not in command[4]
     assert "/usr/bin/chronyc sources -v" not in command[4]
-    assert run.call_args.kwargs["timeout"] == 20.0
+    assert run.call_args.kwargs["timeout"] == 60.0
 
 
 
