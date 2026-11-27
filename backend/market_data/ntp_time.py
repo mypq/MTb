@@ -55,10 +55,14 @@ class NtpTimeVerifier:
     Any failed verification immediately invalidates previous trust.
     """
 
+    # Five independent providers allow two UDP outages while still
+    # requiring three distinct valid samples for acceptance.
     DEFAULT_SERVERS = (
         "time.google.com",
         "time.cloudflare.com",
         "pool.ntp.org",
+        "time.nist.gov",
+        "time.windows.com",
     )
 
     def __init__(
