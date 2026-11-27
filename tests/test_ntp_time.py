@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import backend.market_data.ntp_time as ntp_time_module
+
 import pytest
 
 from backend.market_data.ntp_time import (
@@ -584,3 +586,64 @@ def test_out_of_range_sample_quality_metrics_are_rejected(
     assert result.verified is False
     assert verifier.is_trusted() is False
     assert verifier.last_verification() is None
+
+
+def test_dns_resolution_happens_before_ntp_round_trip_timing(monkeypatch):
+    events = []
+
+    def fake_getaddrinfo(
+        host, port, *, family, type, proto
+    ):
+        events.append(("resolve", host, port))
+        assert family == ntp_time_module.socket.AF_INET
+        assert type == ntp_time_module.socket.SOCK_DGRAM
+        assert proto == ntp_time_module.socket.IPPROTO_UDP
+        return [
+            (
+                ntp_time_module.socket.AF_INET,
+                ntp_time_module.socket.SOCK_DGRAM,
+                ntp_time_module.socket.IPPROTO_UDP,
+                "",
+                ("192.0.2.10", 123),
+            )
+        ]
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def settimeout(self, timeout):
+            events.append(("timeout", timeout))
+
+        def connect(self, address):
+            events.append(("connect", address))
+
+        def send(self, packet):
+            events.append(("send", len(packet)))
+
+        def recv(self, size):
+            events.append(("recv", size))
+            raise TimeoutError("test timeout")
+
+    monkeypatch.setattr(
+        ntp_time_module.socket, "getaddrinfo", fake_getaddrinfo
+    )
+    monkeypatch.setattr(
+        ntp_time_module.socket, "socket",
+        lambda *args, **kwargs: FakeSocket(),
+    )
+
+    verifier = NtpTimeVerifier()
+    verifier._read_clock_pair = lambda: (
+        events.append(("clock_start",)) or (1_800_000_000.0, 1000.0)
+    )
+
+    with pytest.raises(TimeoutError, match="test timeout"):
+        verifier._query_server("time.cloudflare.com")
+
+    assert events[0] == ("resolve", "time.cloudflare.com", 123)
+    assert events[1] == ("clock_start",)
+    assert ("connect", ("192.0.2.10", 123)) in events
