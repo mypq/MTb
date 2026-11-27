@@ -304,7 +304,7 @@ class ChronyStatusService:
             if (
                 len(mode_state) != 2
                 or mode_state[0] != "^"
-                or mode_state[1] not in {"*", "+"}
+                or mode_state[1] not in {"*", "+", "-"}
             ):
                 continue
 
@@ -546,7 +546,7 @@ class ChronyStatusService:
                     if quorum_met
                     else (
                         "NTS quorum not met: "
-                        f"{healthy_sources} healthy Chrony sources "
+                        f"{healthy_sources} selectable Chrony sources "
                         f"(required exactly {REQUIRED_NTS_SOURCES}); "
                         f"{authenticated_sources} authenticated NTS providers "
                         f"(required exactly {REQUIRED_NTS_SOURCES}); "
