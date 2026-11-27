@@ -12,6 +12,7 @@ from typing import Sequence
 
 
 REQUIRED_NTS_SOURCES = 3
+NTS_AUTH_MAX_AGE_SECONDS = 60 * 60
 
 REQUIRED_NTS_SOURCE_NAMES = frozenset({
     "time.cloudflare.com",
@@ -375,6 +376,33 @@ class ChronyStatusService:
 
         return None
 
+    @staticmethod
+    def _parse_authdata_age_seconds(value: str) -> float:
+        """Parse Chrony's Last age; unitless values are seconds."""
+        import re
+
+        match = re.fullmatch(r"(\\d+(?:\\.\\d+)?)([smhdw]?)", value.strip())
+        if match is None:
+            raise ChronyStatusError(
+                "Chrony returned an invalid NTS authentication age."
+            )
+
+        amount = float(match.group(1))
+        multiplier = {
+            "": 1,
+            "s": 1,
+            "m": 60,
+            "h": 60 * 60,
+            "d": 24 * 60 * 60,
+            "w": 7 * 24 * 60 * 60,
+        }[match.group(2)]
+        age_seconds = amount * multiplier
+        if not math.isfinite(age_seconds) or age_seconds < 0:
+            raise ChronyStatusError(
+                "Chrony returned an invalid NTS authentication age."
+            )
+        return age_seconds
+
     @classmethod
     def _parse_authdata(cls, output: str) -> frozenset[str]:
         """Return healthy NTS provider identities from approved records.
@@ -414,7 +442,7 @@ class ChronyStatusService:
                 _key_id,
                 _auth_type,
                 _key_length,
-                _last_attempt,
+                last_age,
                 attempts,
                 nak,
                 cookies,
@@ -464,6 +492,10 @@ class ChronyStatusService:
                 )
 
             if nak_count != 0 or cookie_count <= 0:
+                continue
+
+            last_age_seconds = cls._parse_authdata_age_seconds(last_age)
+            if last_age_seconds > NTS_AUTH_MAX_AGE_SECONDS:
                 continue
 
             authenticated_providers.add(provider)
