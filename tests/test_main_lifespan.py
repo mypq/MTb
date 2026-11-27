@@ -2208,6 +2208,10 @@ def test_lifespan_starts_and_stops_wsl_chrony_keepalive(monkeypatch):
         def start(self):
             events.append("wsl_keepalive.start")
 
+        async def run(self, stop_event):
+            await stop_event.wait()
+            self.stop()
+
         def stop(self):
             events.append("wsl_keepalive.stop")
 
