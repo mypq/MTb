@@ -650,7 +650,7 @@ def test_dns_resolution_happens_before_ntp_round_trip_timing(monkeypatch):
         verifier._query_server("time.cloudflare.com")
 
     assert events[0] == ("resolve", "time.cloudflare.com", 123)
-    assert events[1] == ("clock_start",)
     connect_index = events.index(("connect", ("192.0.2.10", 123)))
+    clock_index = events.index(("clock_start",))
     perf_index = events.index(("perf_counter",))
-    assert connect_index < perf_index < events.index(("send", 48))
+    assert connect_index < clock_index < perf_index < events.index(("send", 48))
