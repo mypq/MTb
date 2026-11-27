@@ -86,6 +86,11 @@ MASTER TECHNICAL SPECIFICATION — VERSION 3.0
 8. اختبار restart/recovery سابق لـ WslChronyKeepalive فشل في دورة أولى لأن Chrony أظهر healthy_sources=2 وquorum=False رغم NTS auth لثلاثة مصادر. أظهرت قراءة المصادر لاحقاً الثلاثة selectable؛ هذا الفشل التشخيصي سبق اعتماد حل socket-pinned ولا يُحذف من التاريخ. WslChronyKeepalive يتولى عمر بيئة WSL ضمن دورة حياة التطبيق ولا يفترض أن يوقف توزيعة WSL كلها أو عمليات غير مملوكة له.
 9. في اختبار سابق شوهد إيقاف كامل منظم لـ WSL عند 03:15:56–03:16:02 +03؛ عندها لم تكن أي توزيعة WSL قيد التشغيل. سُجل أن توقف البيئة كان سبباً محتملاً لانقطاع Chrony، لكن الجهة التي طلبت الإيقاف لم تُحسم.
 10. لا يُشغّل السيرفر أثناء فحوص Chrony/NTS إلا بطلب صريح؛ ويمكن إجراء فحوص البنية الزمنية دون تشغيل FastAPI.
+11. كشف اختبار دورة حياة الثقة فجوة: بعد نجاح NTP وNTS، كان is_trusted() يعتمد على نتيجة التحقق السابقة وعمرها واستقرار الساعة، من دون إعادة فحص NTS quorum؛ لذلك كان من الممكن أن تبقى الثقة القديمة صالحة مؤقتاً بعد فقدان quorum.
+12. الإصلاح على main: backend/market_data/ntp_time.py يعيد الآن فحص nts_authentication_check عند كل is_trusted()؛ إذا كانت النتيجة ليست True أو حدث استثناء، تُمسح الثقة السابقة فوراً ويصبح التحقق الجديد مطلوباً. التغيير متوافق مع الوضع legacy عندما لا يُضبط callback.
+13. أضيف اختباران آليان في tests/test_ntp_time.py: فقدان quorum بعد تحقق ناجح يبطل الثقة فوراً ولا يعيدها بمجرد رجوع quorum، والاستثناء من فحص quorum يبطل الثقة أيضاً. GitHub Actions على commit 153a74a51d212e44fc7d40b3ff05d3ba5b31315b انتهى Success؛ هذا إثبات CI للاختبارات، وليس اختباراً حياً لفقدان NTS.
+14. الاختبار الحي بعد الإصلاح على PC، دون تشغيل FastAPI أو MT5 أو قاعدة البيانات: NtpTimeVerifier نفذ خمس عينات NTP حقيقية من خمسة خوادم؛ النتيجة verified=True وoffset=0.068218 ثانية وuncertainty=0.145015 ثانية وnts_quorum_verified=True. استُدعي ChronyStatusService مرتين: مرة أثناء verify() ومرة ثانية عند is_trusted()؛ في المرتين available=True وsynchronized=True وhealthy_sources=3 وnts_authenticated_sources=3 وquorum=True. النتيجة النهائية LIVE NTP + CHRONY + TRUST: PASS.
+15. حدود هذا الإثبات: الاختبار الحي يثبت إعادة فحص quorum وقبول الثقة عندما يكون quorum سليماً؛ فقدان quorum الفعلي أثناء التشغيل اختُبر آلياً بمحاكاة callback، ولم يُفرض عمداً على خدمة Chrony الحقيقية.
 
 ب. MT5 Clock History وBrokerOffsetRegistry:
 1. سجل diagnostics/broker_clock_history.csv بلغ 3897 صفاً: Tick=2423 وM1 closed=749 وM5 closed=725.
@@ -119,7 +124,7 @@ MASTER TECHNICAL SPECIFICATION — VERSION 3.0
 - MT5 live Tick/Bid/Ask: مكتمل باختبار حي محدد.
 - Live Quote persistence/readback/deduplication: مكتمل باختبار حي محدد.
 - MT5 live sampling مع NTP: مثبت ضمن نافذة 60 عينة.
-- Chrony/NTS trust path: اجتاز فحوص الاستقرار المحلية بعد إصلاح socket؛ CI منفصل.
+- Chrony/NTS trust path: اجتاز فحوص الاستقرار المحلية، واختبار دورة حياة NTS الآلي، واختباراً حياً أكد إعادة فحص quorum عند verify() وعند is_trusted()؛ فقدان quorum الحي اختُبر آلياً لا بتعطيل Chrony الحقيقي.
 - BrokerOffsetRegistry: 291 حدثاً متصلاً، مع سجل تاريخي يبيّن offsets متعددة ونوافذ/فجوات.
 - Incremental Reader/Checkpoint: فحوص سلامة وقراءة read-only ناجحة، مع عينة واحدة غير معالجة في آخر فحص.
 - UTC candle conversion/persistence: مكتمل باختبار آلي فقط؛ Backfill الحي غير مثبت.
