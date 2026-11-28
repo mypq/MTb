@@ -337,6 +337,59 @@ def test_sample_at_ntp_freshness_boundary_is_accepted() -> None:
     assert result.sample_count == 1
 
 
+@pytest.mark.parametrize(
+    "sample_delta_seconds",
+    [-(89 * 60), -60, 60, 89 * 60],
+)
+def test_sample_within_ntp_freshness_window_in_either_direction_is_accepted(
+    sample_delta_seconds: int,
+) -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+    sample = make_sample()
+    shifted_sample = replace(
+        sample,
+        time_gmt_epoch=BASE_EPOCH + sample_delta_seconds,
+        time_trade_server_epoch=(
+            BASE_EPOCH + sample_delta_seconds + 7200
+        ),
+        time_current_quote_epoch=(
+            BASE_EPOCH + sample_delta_seconds + 7200
+        ),
+        time_local_epoch=BASE_EPOCH + sample_delta_seconds,
+    )
+
+    result = detector.observe(shifted_sample)
+
+    assert result.status == BrokerOffsetStatus.COLLECTING
+    assert result.candidate_ready is False
+    assert result.sample_count == 1
+
+
+@pytest.mark.parametrize("sample_delta_seconds", [-(90 * 60) - 1, (90 * 60) + 1])
+def test_sample_outside_ntp_freshness_window_is_rejected(
+    sample_delta_seconds: int,
+) -> None:
+    detector = BrokerOffsetDetector(make_verifier())
+    sample = make_sample()
+    shifted_sample = replace(
+        sample,
+        time_gmt_epoch=BASE_EPOCH + sample_delta_seconds,
+        time_trade_server_epoch=(
+            BASE_EPOCH + sample_delta_seconds + 7200
+        ),
+        time_current_quote_epoch=(
+            BASE_EPOCH + sample_delta_seconds + 7200
+        ),
+        time_local_epoch=BASE_EPOCH + sample_delta_seconds,
+    )
+
+    result = detector.observe(shifted_sample)
+
+    assert result.status == BrokerOffsetStatus.WAITING_FOR_NTP
+    assert result.candidate_ready is False
+    assert result.sample_count == 0
+
+
 def test_samples_too_close_together_restart_collection() -> None:
     detector = BrokerOffsetDetector(make_verifier())
 
